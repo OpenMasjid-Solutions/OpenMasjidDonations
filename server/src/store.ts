@@ -62,6 +62,9 @@ export interface Campaign {
   title: string;
   description: string;
   coverImage: string;
+  /** Full-page background image URL for this campaign's public page. When empty the
+   *  page shows the default theme scene (it does NOT inherit the dashboard wallpaper). */
+  backgroundImage: string;
   /** Suggested amounts, in MINOR currency units (e.g. pence). */
   presetAmounts: number[];
   allowCustom: boolean;
@@ -157,6 +160,7 @@ export class Store {
         title TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
         cover_image TEXT NOT NULL DEFAULT '',
+        background_image TEXT NOT NULL DEFAULT '',
         preset_amounts TEXT NOT NULL DEFAULT '[]',
         allow_custom INTEGER NOT NULL DEFAULT 1,
         min_amount INTEGER NOT NULL DEFAULT 100,
@@ -194,12 +198,23 @@ export class Store {
     } catch {
       /* best-effort (e.g. Windows dev) */
     }
+    // Add columns introduced after first release (CREATE TABLE IF NOT EXISTS won't).
+    this.ensureColumn('campaigns', 'background_image', "TEXT NOT NULL DEFAULT ''");
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
     this.migrateCampaignSlugs();
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_slug ON campaigns(slug)');
     log.info(`data store ready at ${dbPath}`);
+  }
+
+  /** Add a column to an existing table if it isn't already there (forward migration). */
+  private ensureColumn(table: string, column: string, decl: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      log.info(`added column ${table}.${column}`);
+    }
   }
 
   private getRaw(key: string): string | null {
@@ -265,7 +280,7 @@ export class Store {
       email: s.email ?? seed.masjid.email,
       phone: s.phone ?? seed.masjid.phone,
       website: s.website ?? seed.masjid.website,
-      currency: (s.currency ?? seed.currency ?? 'GBP').toUpperCase() || 'GBP',
+      currency: (s.currency ?? seed.currency ?? 'USD').toUpperCase() || 'USD',
     };
   }
 
@@ -451,6 +466,7 @@ export class Store {
       title: String(r.title),
       description: String(r.description),
       coverImage: String(r.cover_image),
+      backgroundImage: String(r.background_image ?? ''),
       presetAmounts: Array.isArray(presets) ? presets : [],
       allowCustom: !!r.allow_custom,
       minAmount: Number(r.min_amount),
@@ -469,16 +485,17 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO campaigns
-          (id, slug, token, title, description, cover_image, preset_amounts, allow_custom, min_amount,
+          (id, slug, token, title, description, cover_image, background_image, preset_amounts, allow_custom, min_amount,
            max_amount, stripe_account_id, cover_fees, gift_aid, goal_amount, active, sort_order, created_at)
          VALUES
-          (@id, @slug, @token, @title, @description, @coverImage, @presetAmounts, @allowCustom, @minAmount,
+          (@id, @slug, @token, @title, @description, @coverImage, @backgroundImage, @presetAmounts, @allowCustom, @minAmount,
            @maxAmount, @stripeAccountId, @coverFees, @giftAid, @goalAmount, @active, @sortOrder, @createdAt)
          ON CONFLICT(id) DO UPDATE SET
            slug=excluded.slug, title=excluded.title, description=excluded.description, cover_image=excluded.cover_image,
-           preset_amounts=excluded.preset_amounts, allow_custom=excluded.allow_custom, min_amount=excluded.min_amount,
-           max_amount=excluded.max_amount, stripe_account_id=excluded.stripe_account_id, cover_fees=excluded.cover_fees,
-           gift_aid=excluded.gift_aid, goal_amount=excluded.goal_amount, active=excluded.active, sort_order=excluded.sort_order`,
+           background_image=excluded.background_image, preset_amounts=excluded.preset_amounts, allow_custom=excluded.allow_custom,
+           min_amount=excluded.min_amount, max_amount=excluded.max_amount, stripe_account_id=excluded.stripe_account_id,
+           cover_fees=excluded.cover_fees, gift_aid=excluded.gift_aid, goal_amount=excluded.goal_amount, active=excluded.active,
+           sort_order=excluded.sort_order`,
       )
       .run({
         ...c,
@@ -524,6 +541,7 @@ export class Store {
       title: input.title,
       description: input.description ?? '',
       coverImage: input.coverImage ?? '',
+      backgroundImage: input.backgroundImage ?? '',
       presetAmounts: input.presetAmounts ?? [],
       allowCustom: input.allowCustom ?? true,
       minAmount: input.minAmount ?? 100,

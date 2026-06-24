@@ -62,8 +62,9 @@ export const config = {
       phone: env('MASJID_PHONE', ''),
       website: env('MASJID_WEBSITE', ''),
     },
-    // CURRENCY install setting wins; else the platform's MASJID_CURRENCY; else GBP.
-    currency: (env('CURRENCY', '') || env('MASJID_CURRENCY', '') || 'GBP').toUpperCase(),
+    // CURRENCY install setting wins; else the platform's MASJID_CURRENCY; else USD
+    // (the default offered during first-run setup; the admin can change it in-app).
+    currency: (env('CURRENCY', '') || env('MASJID_CURRENCY', '') || 'USD').toUpperCase(),
     stripe: {
       publishableKey: env('STRIPE_PUBLISHABLE_KEY', ''),
       secretKey: env('STRIPE_SECRET_KEY', ''),

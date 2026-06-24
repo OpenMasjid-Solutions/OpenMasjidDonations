@@ -335,6 +335,7 @@ async function main(): Promise<void> {
     slug: z.string().max(60).optional(),
     description: z.string().max(8000).optional(),
     coverImage: z.string().max(2000).optional(),
+    backgroundImage: z.string().max(2000).optional(),
     presetAmounts: z.array(z.number().nonnegative()).max(12).optional(), // major units
     allowCustom: z.boolean().optional(),
     minAmount: z.number().nonnegative().optional(), // major
@@ -369,6 +370,7 @@ async function main(): Promise<void> {
       slug,
       description: p.description,
       coverImage: p.coverImage,
+      backgroundImage: p.backgroundImage,
       allowCustom: p.allowCustom,
       stripeAccountId: accountId,
       coverFees: p.coverFees,
@@ -396,6 +398,7 @@ async function main(): Promise<void> {
       slug,
       description: p.description,
       coverImage: p.coverImage,
+      backgroundImage: p.backgroundImage,
       allowCustom: p.allowCustom,
       stripeAccountId: p.stripeAccountId,
       coverFees: p.coverFees,
@@ -543,6 +546,7 @@ async function main(): Promise<void> {
       title: c.title,
       description: c.description,
       coverImage: c.coverImage,
+      backgroundImage: c.backgroundImage,
       presetAmounts: c.presetAmounts.map(toMajorCur),
       allowCustom: c.allowCustom,
       minAmount: toMajorCur(c.minAmount),

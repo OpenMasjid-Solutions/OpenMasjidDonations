@@ -15,7 +15,18 @@ import {
   type PublicCampaign,
 } from './api';
 import { resolveTheme, usePrefs } from './prefs';
-import { Scene } from './ui';
+
+/** The donation page's own background. Unlike the rest of the app it does NOT inherit
+ *  the dashboard wallpaper: it shows the campaign's own background image when set, and
+ *  otherwise the default theme scene. The URL can be admin-entered, so sanitise it
+ *  before putting it in a CSS url() (accept only http(s)/data:image; reject quotes,
+ *  backslashes and whitespace). */
+function DonateScene({ image }: { image?: string }) {
+  const v = (image ?? '').trim();
+  const safe = /^(https?:\/\/|data:image\/)/i.test(v) && !/["\\\s]/.test(v) ? v : '';
+  if (safe) return <div className="scene-img" aria-hidden="true" style={{ backgroundImage: `url("${safe}")` }} />;
+  return <div className="scene" aria-hidden="true" />;
+}
 
 // One Stripe instance per publishable key (loadStripe is expensive).
 const stripeCache = new Map<string, Promise<Stripe | null>>();
@@ -33,6 +44,19 @@ export function DonatePage({ slug, token }: { slug: string; token?: string }) {
   const [loadError, setLoadError] = useState('');
   const [intent, setIntent] = useState<IntentResponse | null>(null);
   const [result, setResult] = useState<ConfirmResponse | null>(null);
+
+  // The public donation page is its own world: pin the scene to the default wallpaper
+  // so it never shows the dashboard's inherited wallpaper. The actual backdrop is the
+  // campaign's own background image (or the default theme scene) via <DonateScene>.
+  useEffect(() => {
+    const html = document.documentElement;
+    const prev = html.getAttribute('data-wallpaper');
+    html.setAttribute('data-wallpaper', 'aurora');
+    return () => {
+      if (prev) html.setAttribute('data-wallpaper', prev);
+      else html.removeAttribute('data-wallpaper');
+    };
+  }, []);
 
   // If Stripe redirected back here (some payment methods do), it appends
   // ?payment_intent=…&redirect_status=…. Confirm it with the server on mount.
@@ -55,7 +79,7 @@ export function DonatePage({ slug, token }: { slug: string; token?: string }) {
 
   return (
     <div className="shell">
-      <Scene />
+      <DonateScene image={campaign?.backgroundImage} />
       <main className="donate-wrap">
         {result ? (
           <ThankYou result={result} />

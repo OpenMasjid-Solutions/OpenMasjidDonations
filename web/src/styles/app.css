@@ -153,7 +153,7 @@ h1, h2, h3, p { margin: 0; }
 .auth-card form { text-align: start; }
 
 /* ── Admin area ───────────────────────────────────────────────────────────── */
-.admin { max-width: 720px; margin-inline: auto; padding: 0.5rem 1.1rem 6rem; }
+.admin { max-width: 720px; margin-inline: auto; padding: 0.5rem 1.1rem 7rem; }
 .page-head { margin-block: 0.5rem 1.25rem; }
 .page-title { font-family: var(--font-display); font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; }
 .page-sub { color: var(--color-ink-muted); margin-block-start: 0.25rem; font-size: 0.95rem; }
@@ -323,3 +323,26 @@ select.input { appearance: auto; }
 }
 .trend-label { font-size: 0.72rem; color: var(--color-ink-faint); }
 @media (prefers-reduced-motion: reduce) { .metric-bar-fill, .trend-bar { transition: none; } }
+
+/* ── Bottom dock (primary navigation — matches OpenMasjidOS/Display) ───────── */
+.dock-wrap {
+  position: fixed; inset-block-end: 1rem; inset-inline: 0; z-index: 40;
+  display: flex; justify-content: center; pointer-events: none;
+  padding-inline: max(0.75rem, env(safe-area-inset-left));
+}
+.dock {
+  pointer-events: auto; display: flex; align-items: center; gap: 0.3rem;
+  padding: 0.45rem; border-radius: 20px; max-width: 100%;
+  overflow-x: auto; scrollbar-width: none;
+}
+.dock::-webkit-scrollbar { display: none; }
+.dock .nav-item {
+  flex-shrink: 0; width: 2.75rem; height: 2.75rem; padding: 0; border: 0; border-radius: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--color-ink-muted);
+  transition: transform var(--dur-micro) var(--ease-settle), background-color var(--dur-micro) ease, color var(--dur-micro) ease;
+}
+.dock .nav-item .nav-label { display: none; }
+.dock .nav-item:hover { color: var(--color-ink); background: var(--color-surface-hover); }
+.dock .nav-item.is-active { color: var(--color-primary); background: var(--color-primary-subtle); }
+.dock .nav-item:active { transform: scale(0.92); }

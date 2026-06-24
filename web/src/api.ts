@@ -104,6 +104,7 @@ export interface Campaign {
   title: string;
   description: string;
   coverImage: string;
+  backgroundImage: string;
   presetAmounts: number[]; // major units
   allowCustom: boolean;
   minAmount: number;
@@ -213,6 +214,7 @@ export interface PublicCampaign {
   title: string;
   description: string;
   coverImage: string;
+  backgroundImage: string;
   presetAmounts: number[];
   allowCustom: boolean;
   minAmount: number;

@@ -10,15 +10,17 @@ appeals, amounts, theme, Stripe keys, and a donations log — from a polished,
 login-protected panel. It runs as **one container** on a cheap mini-PC or a
 Raspberry Pi, on your masjid's own network.
 
-> **Status:** early development (v0.5.0). Working: OpenMasjidOS single sign-on (with a
-> local admin-password fallback), the notifications relay, a guided first-run setup,
-> a **metrics dashboard** (totals, this month, average gift, a per-appeal breakdown and
-> a 6-month trend), **multiple Stripe accounts** (e.g. separate Zakat vs general funds),
-> **campaigns** — each with **a clean link you choose** (e.g. `/zakat`), preset + custom
-> amounts, optional goal/cover-fees/Gift-Aid — the **public donation page** with Stripe's
-> Payment Element (one-time card payments, confirmed by server-side retrieve), a
-> **donations log + CSV export**, and an optional **Cloudflare Tunnel** for public
-> access (paste a tunnel token — secure HTTPS, no port-forwarding). Still to come:
+> **Status:** early development (v0.6.0). Working: OpenMasjidOS single sign-on (with a
+> local admin-password fallback), the notifications relay, a guided first-run setup, a
+> tabbed admin with a bottom **dock** (Overview · Campaigns · Donations · Payments ·
+> Settings) like the rest of the family, a **metrics dashboard** (totals, this month,
+> average gift, a per-appeal breakdown and a 6-month trend), **multiple Stripe accounts**
+> (e.g. separate Zakat vs general funds), **campaigns** — each with **a clean link you
+> choose** (e.g. `/zakat`), preset + custom amounts, optional goal/cover-fees/Gift-Aid,
+> and **its own background image** (or the default look) — the **public donation page**
+> with Stripe's Payment Element (one-time card payments, confirmed by server-side
+> retrieve), a **donations log + CSV export**, and an optional **Cloudflare Tunnel** for
+> public access (paste a tunnel token — secure HTTPS, no port-forwarding). Still to come:
 > recurring (monthly) donations (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
 
 ---

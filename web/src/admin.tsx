@@ -4,8 +4,9 @@
 import { useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import {
-  Bell, CalendarDays, CheckCircle2, Coins, Copy, ExternalLink, Eye, EyeOff, Globe, KeyRound, Landmark, Link2,
-  LogIn, LogOut, Megaphone, Pencil, Plus, RefreshCw, ShieldCheck, Sparkles, TrendingUp, Trash2, Wallet,
+  Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, ExternalLink, Eye, EyeOff, Globe, KeyRound, Landmark,
+  LayoutDashboard, Link2, LogIn, LogOut, Megaphone, Pencil, Plus, ReceiptText, RefreshCw, Settings as SettingsIcon,
+  ShieldCheck, Sparkles, TrendingUp, Trash2, Wallet,
 } from 'lucide-react';
 import {
   checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations,
@@ -147,39 +148,94 @@ function Onboarding({ settings, onReload }: { settings: Settings; onReload: () =
   );
 }
 
+// Primary navigation — a bottom dock, like the other OpenMasjidOS apps. Each tab is a
+// distinct section; the Donations records get their own tab.
+type AdminTab = 'overview' | 'campaigns' | 'donations' | 'payments' | 'settings';
+const ADMIN_TABS: { id: AdminTab; label: string; Icon: typeof Megaphone }[] = [
+  { id: 'overview', label: 'Overview', Icon: LayoutDashboard },
+  { id: 'campaigns', label: 'Campaigns', Icon: Megaphone },
+  { id: 'donations', label: 'Donations', Icon: ReceiptText },
+  { id: 'payments', label: 'Payments', Icon: CreditCard },
+  { id: 'settings', label: 'Settings', Icon: SettingsIcon },
+];
+
+function Dock({ tab, setTab }: { tab: AdminTab; setTab: (t: AdminTab) => void }) {
+  return (
+    <div className="dock-wrap">
+      <nav className="dock glass-raised" aria-label="Sections">
+        {ADMIN_TABS.map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            className={`nav-item${tab === id ? ' is-active' : ''}`}
+            onClick={() => setTab(id)}
+            aria-current={tab === id ? 'page' : undefined}
+            aria-label={label}
+            title={label}
+          >
+            <Icon size={20} />
+            <span className="nav-label">{label}</span>
+          </button>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
 function AdminHome({ info, session, settings, onReload, onSignedOut }: {
   info: AppInfo | null; session: Session; settings: Settings; onReload: () => void; onSignedOut: () => void;
 }) {
   const embedded = !!info?.embedded;
+  const [tab, setTab] = useState<AdminTab>('overview');
   const [signingOut, setSigningOut] = useState(false);
   const signOut = async () => { setSigningOut(true); try { await logout(); } catch { /* ignore */ } onSignedOut(); };
+
+  const meta: Record<AdminTab, { title: string; sub: string }> = {
+    overview: { title: 'Dashboard', sub: `${session.sso.username ? `Signed in as ${session.sso.username}` : 'Signed in'}${embedded ? ' · via OpenMasjidOS' : ''}` },
+    campaigns: { title: 'Campaigns', sub: 'Create and manage your donation appeals.' },
+    donations: { title: 'Donations', sub: 'Every gift your masjid has received.' },
+    payments: { title: 'Payments', sub: 'Your Stripe accounts and optional public access.' },
+    settings: { title: 'Settings', sub: 'Masjid details, notifications and your account.' },
+  };
+
   return (
-    <main className="admin">
-      <div className="page-head">
-        <h1 className="page-title">Dashboard</h1>
-        <p className="page-sub">{session.sso.username ? `Signed in as ${session.sso.username}` : 'Signed in'}{embedded ? ' · via OpenMasjidOS' : ''}</p>
-      </div>
-      <MetricsDashboard />
-      <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} />
-      <StripeAccountsCard accounts={settings.stripeAccounts} onChanged={onReload} />
-      <DonationsCard />
-      <MasjidCard masjid={settings.masjid} onSaved={onReload} />
-      <PublicAccessCard />
-      <Notifications embedded={embedded} />
-      <section className="glass panel">
-        <div className="row-between">
-          <div className="row"><ShieldCheck size={18} className="panel-ico" aria-hidden="true" /><span className="muted">{embedded ? 'Signed in with your OpenMasjidOS login.' : 'Signed in with your local admin password.'}</span></div>
-          {embedded ? (
-            // Under SSO the platform owns the session — clearing our local cookie is
-            // instantly undone by the omos_session cookie, so point to the dashboard.
-            <span className="hint">Sign out from your OpenMasjidOS dashboard</span>
-          ) : (
-            <button className="btn btn--ghost btn--sm" onClick={signOut} disabled={signingOut}>{signingOut ? <span className="spinner" /> : <LogOut size={15} />} Sign out</button>
-          )}
+    <>
+      <main className="admin">
+        <div className="page-head">
+          <h1 className="page-title">{meta[tab].title}</h1>
+          <p className="page-sub">{meta[tab].sub}</p>
         </div>
-      </section>
-      <p className="admin-foot faint">OpenMasjid Donations v{info?.version ?? __APP_VERSION__} · <a href={SOURCE_URL} target="_blank" rel="noreferrer noopener">Source code <ExternalLink size={12} /></a> · AGPL-3.0</p>
-    </main>
+
+        {tab === 'overview' && <MetricsDashboard />}
+        {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} />}
+        {tab === 'donations' && <DonationsCard />}
+        {tab === 'payments' && (
+          <>
+            <StripeAccountsCard accounts={settings.stripeAccounts} onChanged={onReload} />
+            <PublicAccessCard />
+          </>
+        )}
+        {tab === 'settings' && (
+          <>
+            <MasjidCard masjid={settings.masjid} onSaved={onReload} />
+            <Notifications embedded={embedded} />
+            <section className="glass panel">
+              <div className="row-between">
+                <div className="row"><ShieldCheck size={18} className="panel-ico" aria-hidden="true" /><span className="muted">{embedded ? 'Signed in with your OpenMasjidOS login.' : 'Signed in with your local admin password.'}</span></div>
+                {embedded ? (
+                  // Under SSO the platform owns the session — clearing our local cookie is
+                  // instantly undone by the omos_session cookie, so point to the dashboard.
+                  <span className="hint">Sign out from your OpenMasjidOS dashboard</span>
+                ) : (
+                  <button className="btn btn--ghost btn--sm" onClick={signOut} disabled={signingOut}>{signingOut ? <span className="spinner" /> : <LogOut size={15} />} Sign out</button>
+                )}
+              </div>
+            </section>
+            <p className="admin-foot faint">OpenMasjid Donations v{info?.version ?? __APP_VERSION__} · <a href={SOURCE_URL} target="_blank" rel="noreferrer noopener">Source code <ExternalLink size={12} /></a> · AGPL-3.0</p>
+          </>
+        )}
+      </main>
+      <Dock tab={tab} setTab={setTab} />
+    </>
   );
 }
 
@@ -479,6 +535,7 @@ function CampaignForm({ campaign, accounts, currency, onDone }: {
   const [slugInfo, setSlugInfo] = useState<{ slug: string; available: boolean; reserved: boolean } | null>(null);
   const [description, setDescription] = useState(campaign?.description ?? '');
   const [coverImage, setCoverImage] = useState(campaign?.coverImage ?? '');
+  const [backgroundImage, setBackgroundImage] = useState(campaign?.backgroundImage ?? '');
   const [presets, setPresets] = useState((campaign?.presetAmounts ?? [10, 25, 50, 100]).join(', '));
   const [allowCustom, setAllowCustom] = useState(campaign?.allowCustom ?? true);
   const [minAmount, setMinAmount] = useState(String(campaign?.minAmount ?? 1));
@@ -510,6 +567,7 @@ function CampaignForm({ campaign, accounts, currency, onDone }: {
       slug: slug.trim() || undefined,
       description: description.trim(),
       coverImage: coverImage.trim(),
+      backgroundImage: backgroundImage.trim(),
       presetAmounts: presets.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0),
       allowCustom,
       minAmount: Number(minAmount) || 0,
@@ -540,7 +598,11 @@ function CampaignForm({ campaign, accounts, currency, onDone }: {
         <SlugHint info={slugInfo} hasInput={!!(slug.trim() || title.trim())} />
       </Field>
       <Field id="cd" label="Description (optional)"><textarea id="cd" className="input" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
-      <Field id="cimg" label="Cover image URL (optional)"><input id="cimg" className="input" value={coverImage} onChange={(e) => setCoverImage(e.target.value)} placeholder="https://" /></Field>
+      <Field id="cimg" label="Cover image URL (optional)"><input id="cimg" className="input" value={coverImage} onChange={(e) => setCoverImage(e.target.value)} placeholder="https://  — shown inside the page" /></Field>
+      <Field id="cbg" label="Background image URL (optional)">
+        <input id="cbg" className="input" value={backgroundImage} onChange={(e) => setBackgroundImage(e.target.value)} placeholder="https://  — leave empty for the default look" />
+        <span className="hint">This page's full background. Leave empty to use the default theme (it won't use the dashboard wallpaper).</span>
+      </Field>
       <Field id="cp" label={`Suggested amounts (${currency}, comma-separated)`}><input id="cp" className="input" value={presets} onChange={(e) => setPresets(e.target.value)} placeholder="10, 25, 50, 100" /></Field>
       <div className="grid2">
         <Field id="cmin" label={`Minimum custom amount (${currency})`}><input id="cmin" className="input" type="number" min="0" step="0.01" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} /></Field>
