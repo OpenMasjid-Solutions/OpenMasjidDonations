@@ -16,12 +16,42 @@ export interface Prefs {
   wallpaper: string;
   /** Optional custom wallpaper image URL — overrides the preset when set. */
   wallpaperImage: string;
+  /** Accent colour id — matches the dashboard's accent when embedded. */
+  accent: string;
   /** Mirror OpenMasjidOS's theme + wallpaper (on by default under the platform). */
   followOmos: boolean;
 }
 
 const KEY = 'omdon-prefs';
-const DEFAULTS: Prefs = { theme: 'system', wallpaper: 'aurora', wallpaperImage: '', followOmos: true };
+const DEFAULTS: Prefs = { theme: 'system', wallpaper: 'aurora', wallpaperImage: '', accent: 'cyan', followOmos: true };
+
+/** Accent palette — mirrors OpenMasjidOS so the app matches the dashboard's accent.
+ *  cyan is the tokens' built-in primary, so selecting it just clears the overrides. */
+export const ACCENTS: Record<string, { primary: string; hover: string; subtle: string }> = {
+  cyan: { primary: '#22D3EE', hover: '#67E8F9', subtle: 'rgba(34,211,238,0.12)' },
+  teal: { primary: '#2DD4BF', hover: '#5EEAD4', subtle: 'rgba(45,212,191,0.12)' },
+  sky: { primary: '#38BDF8', hover: '#7DD3FC', subtle: 'rgba(56,189,248,0.12)' },
+  violet: { primary: '#A78BFA', hover: '#C4B5FD', subtle: 'rgba(167,139,250,0.14)' },
+  gold: { primary: '#FBBF24', hover: '#FCD34D', subtle: 'rgba(251,191,36,0.14)' },
+};
+
+/** Apply the accent by overriding the primary CSS variables (or clearing them for
+ *  the default cyan). Mirrors the platform's applyAccent. */
+export function applyAccent(id: string): void {
+  const el = document.documentElement;
+  const a = ACCENTS[id];
+  if (!a || id === 'cyan') {
+    for (const p of ['--color-primary', '--color-primary-hover', '--color-primary-subtle', '--color-btn', '--color-btn-hover']) {
+      el.style.removeProperty(p);
+    }
+    return;
+  }
+  el.style.setProperty('--color-primary', a.primary);
+  el.style.setProperty('--color-primary-hover', a.hover);
+  el.style.setProperty('--color-primary-subtle', a.subtle);
+  el.style.setProperty('--color-btn', a.primary);
+  el.style.setProperty('--color-btn-hover', a.hover);
+}
 
 export const WALLPAPERS: Record<string, { label: string; preview: string }> = {
   aurora: { label: 'Aurora', preview: 'radial-gradient(circle at 30% 25%, #22D3EE, #0A1828 70%)' },
@@ -60,16 +90,17 @@ interface OmosAppearance {
   theme?: string;
   wallpaper?: string;
   wallpaperImage?: string;
+  accent?: string;
 }
 
 function appearancePatch(p: OmosAppearance): Partial<Prefs> {
   const out: Partial<Prefs> = {};
   if (p.theme != null) out.theme = normTheme(p.theme);
   if (typeof p.wallpaper === 'string') out.wallpaper = p.wallpaper;
+  if (typeof p.accent === 'string') out.accent = p.accent;
   // wallpaperImage comes from the attacker-craftable #omos fragment (and the public
-  // appearance endpoint). It is stored as-is but MUST be validated before it is ever
-  // rendered into a CSS url(...): when a later slice consumes it, accept only
-  // http(s)/data:image URLs and reject ')' ';' or whitespace to prevent CSS injection.
+  // appearance endpoint). Stored as-is; the Scene sanitises it before rendering it
+  // into a CSS url(...) (accept only http(s)/data:image, reject quotes/backslash/space).
   if (typeof p.wallpaperImage === 'string') out.wallpaperImage = p.wallpaperImage;
   return out;
 }
@@ -122,6 +153,7 @@ export const prefsStore = {
     persist();
     if (part.theme !== undefined) applyTheme(state.theme);
     if (part.wallpaper !== undefined) applyWallpaper(state.wallpaper);
+    if (part.accent !== undefined) applyAccent(state.accent);
     for (const l of listeners) l();
   },
   /** Apply persisted prefs on first load, inherit any OpenMasjidOS hand-off, and
@@ -135,6 +167,7 @@ export const prefsStore = {
     }
     applyTheme(state.theme);
     applyWallpaper(state.wallpaper);
+    applyAccent(state.accent);
     window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
       if (state.theme === 'system') applyTheme('system');
     });

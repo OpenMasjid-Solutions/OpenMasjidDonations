@@ -2,8 +2,17 @@
 import { HandCoins, Moon, Sun } from 'lucide-react';
 import { prefsStore, resolveTheme, usePrefs } from './prefs';
 
-/** Ambient theme/wallpaper-driven background (gradient + aurora + geometric). */
+/** Ambient background. A custom wallpaper image (inherited from the dashboard or set
+ *  in the app) fully replaces the preset gradient; otherwise we show the preset scene
+ *  (gradient + aurora + geometric pattern, driven by data-wallpaper). */
 export function Scene() {
+  const prefs = usePrefs();
+  const v = prefs.wallpaperImage.trim();
+  // Accept only http(s)/data:image URLs with no characters that could break out of
+  // url("…"). The value can come from the attacker-craftable #omos fragment, and this
+  // is the whole backdrop, so sanitise before use (mirrors Display).
+  const safe = /^(https?:\/\/|data:image\/)/i.test(v) && !/["\\\s]/.test(v) ? v : '';
+  if (safe) return <div className="scene-img" aria-hidden="true" style={{ backgroundImage: `url("${safe}")` }} />;
   return <div className="scene" aria-hidden="true" />;
 }
 

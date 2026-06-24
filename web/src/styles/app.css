@@ -41,6 +41,14 @@ h1, h2, h3, p { margin: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .scene::before { animation: none; } }
 
+/* Custom wallpaper image — a standalone backdrop with NO preset gradient/aurora/
+   pattern, so an inherited (or admin-set) image fully replaces the built-in scene. */
+.scene-img {
+  position: fixed; inset: 0; z-index: -1;
+  background-color: var(--scene-base);
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+}
+
 /* ── Shell + top bar ──────────────────────────────────────────────────────── */
 .shell { min-height: 100vh; min-height: 100dvh; }
 .topbar {
