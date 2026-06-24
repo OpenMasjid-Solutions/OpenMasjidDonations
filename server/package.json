@@ -1,7 +1,7 @@
 {
   "name": "openmasjid-donations-server",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "API + Stripe + storage + static web host for OpenMasjid Donations",
   "license": "AGPL-3.0",
   "scripts": {
