@@ -52,8 +52,9 @@ export interface StripeAccount extends StripeConfig {
   createdAt: string;
 }
 
-/** A donation page/appeal. The public URL is /c/<slug>-<token>; the token is an
- *  unguessable suffix so links can be shared without exposing all campaigns. */
+/** A donation page/appeal. The public URL is a clean, admin-chosen path: /<slug>
+ *  (e.g. /zakat). The slug is unique across campaigns. The `token` is retained only
+ *  so older /c/<slug>-<token> links keep working; new links never expose it. */
 export interface Campaign {
   id: string;
   slug: string;
@@ -120,6 +121,11 @@ export function slugify(s: string): string {
     .slice(0, 40);
   return out || 'appeal';
 }
+
+/** Slugs the admin must not claim — they collide with the app's own top-level paths
+ *  (the admin panel, the API, health check, the built assets, and the legacy /c/ link
+ *  prefix). The donation page lives at /<slug>, so these are off-limits. */
+export const RESERVED_SLUGS = new Set(['admin', 'api', 'healthz', 'assets', 'c', 'static', 'public']);
 
 export class Store {
   private readonly db: Database.Database;
@@ -189,6 +195,10 @@ export class Store {
       /* best-effort (e.g. Windows dev) */
     }
     this.migrateLegacyStripe();
+    // Slugs are now the public link (/<slug>) and must be unique. Older data could
+    // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
+    this.migrateCampaignSlugs();
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_slug ON campaigns(slug)');
     log.info(`data store ready at ${dbPath}`);
   }
 
@@ -323,6 +333,44 @@ export class Store {
     }
   }
 
+  // ── Slugs: the public link is /<slug>, so slugs must be unique + not reserved ──
+  /** Is this slug free to use? (Not reserved, and not held by another campaign.) */
+  isSlugAvailable(slug: string, exceptId?: string): boolean {
+    if (!slug || RESERVED_SLUGS.has(slug)) return false;
+    const row = this.db.prepare('SELECT id FROM campaigns WHERE slug = ?').get(slug) as { id: string } | undefined;
+    return !row || row.id === exceptId;
+  }
+
+  /** A guaranteed-free slug derived from `base`, appending -2, -3, … on collision. */
+  uniqueSlug(base: string, exceptId?: string): string {
+    const root = slugify(base);
+    if (this.isSlugAvailable(root, exceptId)) return root;
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${root.slice(0, 37)}-${n}`;
+      if (this.isSlugAvailable(candidate, exceptId)) return candidate;
+    }
+    return `${root.slice(0, 30)}-${rid('x').slice(2)}`;
+  }
+
+  /** One-off reconcile: rename any reserved or duplicate slugs so the unique index
+   *  can be created. Order by creation so the oldest campaign keeps its original slug. */
+  private migrateCampaignSlugs(): void {
+    const rows = this.db.prepare('SELECT id, slug FROM campaigns ORDER BY created_at, id').all() as { id: string; slug: string }[];
+    const seen = new Set<string>();
+    for (const r of rows) {
+      let slug = slugify(r.slug || '');
+      if (RESERVED_SLUGS.has(slug) || seen.has(slug)) {
+        // Derive a fresh unique slug, avoiding the ones we've already locked in.
+        let candidate = this.uniqueSlug(slug, r.id);
+        while (seen.has(candidate)) candidate = this.uniqueSlug(`${slug}-x`, r.id);
+        slug = candidate;
+        this.db.prepare('UPDATE campaigns SET slug = ? WHERE id = ?').run(slug, r.id);
+        log.info(`migrated campaign ${r.id} to slug "${slug}"`);
+      }
+      seen.add(slug);
+    }
+  }
+
   // ── Stripe accounts ─────────────────────────────────────────────────────────
   private rowToAccount(r: Record<string, unknown>): StripeAccount {
     return {
@@ -453,6 +501,13 @@ export class Store {
     return r ? this.rowToCampaign(r) : null;
   }
 
+  /** Resolve a campaign by its (now unique) slug — the primary public lookup. */
+  getCampaignBySlug(slug: string): Campaign | null {
+    const r = this.db.prepare('SELECT * FROM campaigns WHERE slug = ?').get(slug) as Record<string, unknown> | undefined;
+    return r ? this.rowToCampaign(r) : null;
+  }
+
+  /** Back-compat lookup for older /c/<slug>-<token> links. */
   getCampaignBySlugToken(slug: string, token: string): Campaign | null {
     const r = this.db.prepare('SELECT * FROM campaigns WHERE slug = ? AND token = ?').get(slug, token) as
       | Record<string, unknown>
@@ -557,6 +612,37 @@ export class Store {
         s: number;
       }
     ).s;
+  }
+
+  /** Aggregated donation metrics (all amounts in MINOR units; only succeeded
+   *  donations count toward money raised). The route converts to major units, joins
+   *  campaign titles and fills the month window for display. */
+  metrics(): {
+    totalRaised: number;
+    count: number;
+    byCampaign: { campaignId: string; raised: number; count: number }[];
+    monthly: { month: string; raised: number; count: number }[];
+  } {
+    const totals = this.db
+      .prepare(`SELECT COALESCE(SUM(amount), 0) AS s, COUNT(*) AS n FROM donations WHERE status = 'succeeded'`)
+      .get() as { s: number; n: number };
+    const byCampaign = (
+      this.db
+        .prepare(
+          `SELECT campaign_id AS campaignId, COALESCE(SUM(amount), 0) AS raised, COUNT(*) AS count
+           FROM donations WHERE status = 'succeeded' GROUP BY campaign_id`,
+        )
+        .all() as { campaignId: string; raised: number; count: number }[]
+    ).map((r) => ({ campaignId: String(r.campaignId), raised: Number(r.raised), count: Number(r.count) }));
+    const monthly = (
+      this.db
+        .prepare(
+          `SELECT strftime('%Y-%m', created_at) AS month, COALESCE(SUM(amount), 0) AS raised, COUNT(*) AS count
+           FROM donations WHERE status = 'succeeded' GROUP BY month`,
+        )
+        .all() as { month: string; raised: number; count: number }[]
+    ).map((r) => ({ month: String(r.month), raised: Number(r.raised), count: Number(r.count) }));
+    return { totalRaised: Number(totals.s), count: Number(totals.n), byCampaign, monthly };
   }
 
   close(): void {

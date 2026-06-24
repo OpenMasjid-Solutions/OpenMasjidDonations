@@ -12,7 +12,7 @@ import fastifyCookie from '@fastify/cookie';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify } from './store';
+import { Store, slugify, RESERVED_SLUGS } from './store';
 import type { Campaign, StripeAccount } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
 import { notify, platformUser } from './fabric';
@@ -231,8 +231,19 @@ async function main(): Promise<void> {
     goalAmount: toMajorCur(c.goalAmount),
     raised: toMajorCur(store.raisedForCampaign(c.id)),
     currency: cur(),
-    url: `/c/${c.slug}-${c.token}`,
+    url: `/${c.slug}`,
   });
+
+  /** Validate + resolve a campaign link slug. Returns the final slug, or an error
+   *  message if the admin chose one that's reserved or already taken. When no slug is
+   *  given, derives a unique one from the title. */
+  const resolveSlug = (raw: string | undefined, title: string, exceptId?: string): { slug?: string; error?: string } => {
+    if (raw == null || raw.trim() === '') return { slug: store.uniqueSlug(title || 'appeal', exceptId) };
+    const slug = slugify(raw);
+    if (RESERVED_SLUGS.has(slug)) return { error: `“${slug}” is reserved — please choose a different link.` };
+    if (!store.isSlugAvailable(slug, exceptId)) return { error: `The link “/${slug}” is already used by another campaign.` };
+    return { slug };
+  };
 
   // ── Settings: masjid details + onboarding (Stripe accounts have own routes) ──
   app.get('/api/settings', { preHandler: requireAdmin }, async () => ({
@@ -351,10 +362,11 @@ async function main(): Promise<void> {
     const p = parsed.data;
     const accountId = p.stripeAccountId || store.listStripeAccounts()[0]?.id;
     if (!accountId) return reply.code(400).send({ error: 'Add a Stripe account before creating a campaign.' });
+    const { slug, error } = resolveSlug(p.slug, p.title!);
+    if (error) return reply.code(409).send({ error });
     const c = store.createCampaign({
       title: p.title!, // guarded above — title is required for create
-
-      slug: p.slug ? slugify(p.slug) : undefined,
+      slug,
       description: p.description,
       coverImage: p.coverImage,
       allowCustom: p.allowCustom,
@@ -370,9 +382,18 @@ async function main(): Promise<void> {
     const parsed = CampaignBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please check the campaign details.' });
     const p = parsed.data;
-    const c = store.updateCampaign((req.params as { id: string }).id, {
+    const id = (req.params as { id: string }).id;
+    // Only touch the slug when the admin actually sent one; an empty/omitted slug
+    // leaves the existing link untouched.
+    let slug: string | undefined;
+    if (p.slug != null && p.slug.trim() !== '') {
+      const r = resolveSlug(p.slug, p.title ?? '', id);
+      if (r.error) return reply.code(409).send({ error: r.error });
+      slug = r.slug;
+    }
+    const c = store.updateCampaign(id, {
       title: p.title,
-      slug: p.slug ? slugify(p.slug) : undefined,
+      slug,
       description: p.description,
       coverImage: p.coverImage,
       allowCustom: p.allowCustom,
@@ -388,6 +409,13 @@ async function main(): Promise<void> {
   app.delete('/api/admin/campaigns/:id', { preHandler: requireAdmin }, async (req) => {
     store.deleteCampaign((req.params as { id: string }).id);
     return { data: { ok: true } };
+  });
+  // Live feedback for the link editor: is this slug usable? Returns the cleaned slug.
+  app.get('/api/admin/campaigns/slug-check', { preHandler: requireAdmin }, async (req) => {
+    const q = req.query as { slug?: string; exceptId?: string };
+    const slug = slugify(q.slug ?? '');
+    const reserved = RESERVED_SLUGS.has(slug);
+    return { data: { slug, available: !reserved && store.isSlugAvailable(slug, q.exceptId), reserved } };
   });
 
   // ── Donations log + CSV ─────────────────────────────────────────────────────
@@ -415,6 +443,72 @@ async function main(): Promise<void> {
     return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
   });
 
+  // ── Metrics dashboard ───────────────────────────────────────────────────────
+  // Headline totals + a per-campaign breakdown (which appeal raised what) + a 6-month
+  // trend, all derived from succeeded donations. Amounts are returned in major units.
+  app.get('/api/admin/metrics', { preHandler: requireAdmin }, async () => {
+    const currency = cur();
+    const m = store.metrics();
+    const campaigns = store.listCampaigns();
+    const titles = new Map(campaigns.map((c) => [c.id, c.title]));
+    const raisedBy = new Map(m.byCampaign.map((r) => [r.campaignId, r]));
+
+    // One row per current campaign (sorted by money raised), so the admin sees every
+    // appeal — even those at £0 — and which is pulling its weight.
+    const byCampaign = campaigns
+      .map((c) => {
+        const r = raisedBy.get(c.id);
+        return {
+          id: c.id,
+          title: c.title,
+          slug: c.slug,
+          active: c.active,
+          goal: toMajorCur(c.goalAmount),
+          raised: toMajorCur(r?.raised ?? 0),
+          count: r?.count ?? 0,
+        };
+      })
+      .sort((a, b) => b.raised - a.raised);
+    // Include any orphaned totals from deleted campaigns so the numbers reconcile.
+    for (const r of m.byCampaign) {
+      if (!titles.has(r.campaignId)) {
+        byCampaign.push({ id: r.campaignId, title: 'Deleted campaign', slug: '', active: false, goal: 0, raised: toMajorCur(r.raised), count: r.count });
+      }
+    }
+
+    // Build a contiguous trailing 6-month window (fill empty months with zero) so the
+    // chart never has gaps. Months are YYYY-MM in the server's local zone.
+    const monthMap = new Map(m.monthly.map((r) => [r.month, r]));
+    const now = new Date();
+    const monthly: { month: string; label: string; raised: number; count: number }[] = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const row = monthMap.get(key);
+      monthly.push({
+        month: key,
+        label: d.toLocaleString('en', { month: 'short' }),
+        raised: toMajorCur(row?.raised ?? 0),
+        count: row?.count ?? 0,
+      });
+    }
+    const thisMonth = monthly[monthly.length - 1];
+
+    return {
+      data: {
+        currency,
+        totalRaised: toMajorCur(m.totalRaised),
+        count: m.count,
+        average: m.count > 0 ? toMajorCur(Math.round(m.totalRaised / m.count)) : 0,
+        thisMonthRaised: thisMonth.raised,
+        thisMonthCount: thisMonth.count,
+        activeCampaigns: campaigns.filter((c) => c.active).length,
+        byCampaign,
+        monthly,
+      },
+    };
+  });
+
   // ── Public donation flow (no auth) ──────────────────────────────────────────
   // Simple per-IP fixed-window limiter for intent creation.
   const donateHits = new Map<string, { c: number; reset: number }>();
@@ -431,11 +525,21 @@ async function main(): Promise<void> {
     return true;
   };
 
+  // Resolve a public campaign by its clean slug. A legacy /c/<slug>-<token> link may
+  // still carry a token — prefer the exact slug+token match for those, then fall back
+  // to the (now unique) slug, so old shared links keep working.
+  const resolvePublicCampaign = (slug: string, token?: string): Campaign | null => {
+    if (token) {
+      const exact = store.getCampaignBySlugToken(slug, token);
+      if (exact) return exact;
+    }
+    return store.getCampaignBySlug(slug);
+  };
+
   const publicCampaign = (c: Campaign) => {
     const acct = store.getStripeAccount(c.stripeAccountId);
     return {
       slug: c.slug,
-      token: c.token,
       title: c.title,
       description: c.description,
       coverImage: c.coverImage,
@@ -454,11 +558,18 @@ async function main(): Promise<void> {
     };
   };
 
-  app.get('/api/public/campaign/:slug/:token', async (req, reply) => {
-    const { slug, token } = req.params as { slug: string; token: string };
-    const c = store.getCampaignBySlugToken(slug, token);
+  const sendPublicCampaign = (slug: string, token: string | undefined, reply: import('fastify').FastifyReply) => {
+    const c = resolvePublicCampaign(slug, token);
     if (!c || !c.active) return reply.code(404).send({ error: 'This donation page isn’t available.' });
     return { data: publicCampaign(c) };
+  };
+  // Primary clean route + back-compat route that still accepts the old token segment.
+  app.get('/api/public/campaign/:slug', async (req, reply) =>
+    sendPublicCampaign((req.params as { slug: string }).slug, undefined, reply),
+  );
+  app.get('/api/public/campaign/:slug/:token', async (req, reply) => {
+    const { slug, token } = req.params as { slug: string; token: string };
+    return sendPublicCampaign(slug, token, reply);
   });
 
   const IntentBody = z.object({
@@ -468,12 +579,15 @@ async function main(): Promise<void> {
     donorName: z.string().max(120).optional(),
     donorEmail: z.string().max(200).optional(),
   });
-  app.post('/api/public/campaign/:slug/:token/intent', async (req, reply) => {
+  const intentHandler = async (
+    req: import('fastify').FastifyRequest,
+    reply: import('fastify').FastifyReply,
+  ) => {
     if (!donateRateOk(req.socket.remoteAddress ?? 'unknown')) {
       return reply.code(429).send({ error: 'Too many attempts. Please wait a moment.' });
     }
-    const { slug, token } = req.params as { slug: string; token: string };
-    const c = store.getCampaignBySlugToken(slug, token);
+    const { slug, token } = req.params as { slug: string; token?: string };
+    const c = resolvePublicCampaign(slug, token);
     if (!c || !c.active) return reply.code(404).send({ error: 'This donation page isn’t available.' });
     const acct = store.getStripeAccount(c.stripeAccountId);
     if (!acct || !stripeConfigured(acct)) return reply.code(400).send({ error: 'Donations aren’t set up for this page yet.' });
@@ -524,16 +638,18 @@ async function main(): Promise<void> {
     return {
       data: { clientSecret: intent.clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency },
     };
-  });
+  };
+  app.post('/api/public/campaign/:slug/intent', intentHandler);
+  app.post('/api/public/campaign/:slug/:token/intent', intentHandler); // back-compat
 
   // Confirm a return from the Payment Element by RETRIEVING the intent from Stripe
   // (never trust the client). Records the outcome + alerts the masjid on first success.
-  const ConfirmBody = z.object({ paymentIntentId: z.string().max(255), slug: z.string().max(80), token: z.string().max(40) });
+  const ConfirmBody = z.object({ paymentIntentId: z.string().max(255), slug: z.string().max(80), token: z.string().max(40).optional() });
   app.post('/api/public/confirm', async (req, reply) => {
     const parsed = ConfirmBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Missing payment reference.' });
     const { paymentIntentId, slug, token } = parsed.data;
-    const c = store.getCampaignBySlugToken(slug, token);
+    const c = resolvePublicCampaign(slug, token);
     if (!c) return reply.code(404).send({ error: 'Unknown campaign.' });
     const acct = store.getStripeAccount(c.stripeAccountId);
     const don = store.getDonationByPaymentIntent(paymentIntentId);

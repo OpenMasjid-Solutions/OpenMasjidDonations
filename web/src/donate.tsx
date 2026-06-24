@@ -1,4 +1,4 @@
-/** The public donation page for a single campaign, at /c/<slug>-<token>.
+/** The public donation page for a single campaign, at the clean path /<slug>.
  *  Flow: pick an amount → Stripe Payment Element → confirm on return by asking the
  *  server to RETRIEVE the PaymentIntent (never trusting the client) → thank-you. */
 import { useEffect, useMemo, useState } from 'react';
@@ -17,13 +17,6 @@ import {
 import { resolveTheme, usePrefs } from './prefs';
 import { Scene } from './ui';
 
-/** Parse "/c/<slug>-<token>" → { slug, token }. The token is the trailing hex run;
- *  the slug may itself contain dashes. */
-export function parseCampaignPath(pathname: string): { slug: string; token: string } | null {
-  const m = pathname.replace(/\/+$/, '').match(/^\/c\/(.+)-([0-9a-f]{6,})$/i);
-  return m ? { slug: m[1], token: m[2] } : null;
-}
-
 // One Stripe instance per publishable key (loadStripe is expensive).
 const stripeCache = new Map<string, Promise<Stripe | null>>();
 function stripeFor(pk: string): Promise<Stripe | null> {
@@ -35,7 +28,7 @@ function stripeFor(pk: string): Promise<Stripe | null> {
   return p;
 }
 
-export function DonatePage({ slug, token }: { slug: string; token: string }) {
+export function DonatePage({ slug, token }: { slug: string; token?: string }) {
   const [campaign, setCampaign] = useState<PublicCampaign | null>(null);
   const [loadError, setLoadError] = useState('');
   const [intent, setIntent] = useState<IntentResponse | null>(null);
@@ -113,7 +106,7 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
       return setError(`The maximum is ${fmt(campaign.maxAmount)}.`);
     setBusy(true);
     try {
-      const i = await createIntent(campaign.slug, campaign.token, {
+      const i = await createIntent(campaign.slug, {
         amount: effective,
         coverFees: coverFees && campaign.coverFees,
         giftAid: giftAid && campaign.giftAid,
@@ -195,7 +188,7 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
         )}
 
         {error && <p className="form-error" role="alert">{error}</p>}
-        <button className="btn btn--primary btn--block donate-cta" type="submit" disabled={busy || !campaign.ready}>
+        <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={busy || !campaign.ready}>
           {busy ? <span className="spinner" /> : <HeartHandshake size={18} />}
           {Number.isFinite(effective) && effective > 0 ? ` Donate ${fmt(effective)}` : ' Donate'}
         </button>
@@ -265,7 +258,7 @@ function PayForm({
     // Inline success path — verify with the server (it retrieves the intent).
     const piId = paymentIntent?.id ?? '';
     try {
-      const r = await confirmDonation({ paymentIntentId: piId, slug: campaign.slug, token: campaign.token });
+      const r = await confirmDonation({ paymentIntentId: piId, slug: campaign.slug });
       onDone(r);
     } catch {
       setError('Payment taken, but we couldn’t confirm it here. Please contact the masjid if charged.');
@@ -277,7 +270,7 @@ function PayForm({
     <form onSubmit={submit} className="pay-form">
       <PaymentElement />
       {error && <p className="form-error" role="alert">{error}</p>}
-      <button className="btn btn--primary btn--block donate-cta" type="submit" disabled={!stripe || busy}>
+      <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={!stripe || busy}>
         {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {money(intent.amount, intent.currency)}
       </button>
       <p className="hint pay-hint"><ShieldCheck size={12} /> Your card details go straight to Stripe — never to this app.</p>

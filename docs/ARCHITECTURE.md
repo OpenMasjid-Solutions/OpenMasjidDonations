@@ -82,15 +82,17 @@ must not be renamed.
 1. **Scaffold**: boots, themed shell, `/healthz`. ✅
 2. **Platform SSO + theme + local-password fallback** (Fabric: SSO, notifications, appearance). ✅
 3. **Guided first-run onboarding + Stripe/masjid config** (env + in-app, test-mode badge, verify, "not set up yet" states). ✅
-4. **Multiple Stripe accounts** + **campaigns** (slug + random token, preset/custom
+4. **Multiple Stripe accounts** + **campaigns** (admin-chosen unique slug, preset/custom
    amounts, goal, → a chosen Stripe account). ✅
-5. **Public donation page** (`/c/<slug>-<token>`): preset/custom amounts, Stripe
+5. **Public donation page** (`/<slug>` — a clean link the admin picks, e.g. `/zakat`;
+   legacy `/c/<slug>-<token>` links still resolve): preset/custom amounts, Stripe
    Payment Element, one-time PaymentIntent, retrieve-on-return confirm, thank-you,
    donation recorded. ✅
 6. Cover-the-fees + Gift-Aid toggles. ✅ (Gift-Aid stores the opt-in; full
    declaration/address capture + optional email receipt are follow-ups.)
 7. Recurring (monthly) subscriptions (+ optional webhook path). ⏳
-8. Donations log + stats + CSV export. ✅
+8. Donations log + stats + CSV export, plus a **metrics dashboard** (totals, this
+   month, average gift, per-appeal breakdown, 6-month trend). ✅
 9. Cloudflare Tunnel helper (bundled `cloudflared`, in-app token, supervised) for
    public access — no port-forwarding. ✅
 9. Appearance/theming polish, animations, friendly errors.

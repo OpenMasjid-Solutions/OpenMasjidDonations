@@ -140,6 +140,39 @@ export interface DonationsResult {
   stats: { totalRaised: number; count: number; currency: string };
 }
 
+export interface CampaignMetric {
+  id: string;
+  title: string;
+  slug: string;
+  active: boolean;
+  goal: number;
+  raised: number;
+  count: number;
+}
+export interface MonthMetric {
+  month: string;
+  label: string;
+  raised: number;
+  count: number;
+}
+export interface Metrics {
+  currency: string;
+  totalRaised: number;
+  count: number;
+  average: number;
+  thisMonthRaised: number;
+  thisMonthCount: number;
+  activeCampaigns: number;
+  byCampaign: CampaignMetric[];
+  monthly: MonthMetric[];
+}
+
+export interface SlugCheck {
+  slug: string;
+  available: boolean;
+  reserved: boolean;
+}
+
 // ── Settings + accounts (admin) ─────────────────────────────────────────────
 export const getSettings = () => request<Settings>('/api/settings');
 export const saveMasjid = (patch: Partial<MasjidProfile>) =>
@@ -166,13 +199,17 @@ export const updateCampaign = (id: string, body: CampaignInput) =>
 export const deleteCampaign = (id: string) =>
   request<{ ok: true }>(`/api/admin/campaigns/${id}`, { method: 'DELETE' });
 
-// ── Donations (admin) ───────────────────────────────────────────────────────
+// ── Donations + metrics (admin) ─────────────────────────────────────────────
 export const getDonations = () => request<DonationsResult>('/api/admin/donations');
+export const getMetrics = () => request<Metrics>('/api/admin/metrics');
+export const checkSlug = (slug: string, exceptId?: string) =>
+  request<SlugCheck>(
+    `/api/admin/campaigns/slug-check?slug=${encodeURIComponent(slug)}${exceptId ? `&exceptId=${encodeURIComponent(exceptId)}` : ''}`,
+  );
 
 // ── Public donation flow ────────────────────────────────────────────────────
 export interface PublicCampaign {
   slug: string;
-  token: string;
   title: string;
   description: string;
   coverImage: string;
@@ -203,18 +240,24 @@ export interface ConfirmResponse {
   campaignTitle: string;
   donorName: string;
 }
-export const getPublicCampaign = (slug: string, token: string) =>
-  request<PublicCampaign>(`/api/public/campaign/${encodeURIComponent(slug)}/${encodeURIComponent(token)}`);
+/** Build the public campaign API path. New links use the clean /<slug>; an optional
+ *  `token` (only present on legacy /c/<slug>-<token> links) is appended for the
+ *  server's back-compat resolver. */
+const campaignPath = (slug: string, token?: string) =>
+  `/api/public/campaign/${encodeURIComponent(slug)}${token ? `/${encodeURIComponent(token)}` : ''}`;
+
+export const getPublicCampaign = (slug: string, token?: string) =>
+  request<PublicCampaign>(campaignPath(slug, token));
 export const createIntent = (
   slug: string,
-  token: string,
   body: { amount: number; coverFees?: boolean; giftAid?: boolean; donorName?: string; donorEmail?: string },
+  token?: string,
 ) =>
-  request<IntentResponse>(`/api/public/campaign/${encodeURIComponent(slug)}/${encodeURIComponent(token)}/intent`, {
+  request<IntentResponse>(`${campaignPath(slug, token)}/intent`, {
     method: 'POST',
     body: JSON.stringify(body),
   });
-export const confirmDonation = (body: { paymentIntentId: string; slug: string; token: string }) =>
+export const confirmDonation = (body: { paymentIntentId: string; slug: string; token?: string }) =>
   request<ConfirmResponse>('/api/public/confirm', { method: 'POST', body: JSON.stringify(body) });
 
 // ── Cloudflare Tunnel (public access) ───────────────────────────────────────

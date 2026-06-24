@@ -2,16 +2,17 @@
  *  campaigns (donation pages), and the donations log. Stripe SECRET keys are sent to
  *  the server and never returned to the browser. */
 import { useEffect, useState } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
 import {
-  Bell, CheckCircle2, Copy, ExternalLink, Eye, EyeOff, Globe, KeyRound, Landmark, LogIn, LogOut, Megaphone,
-  Pencil, Plus, RefreshCw, ShieldCheck, Trash2, Wallet,
+  Bell, CalendarDays, CheckCircle2, Coins, Copy, ExternalLink, Eye, EyeOff, Globe, KeyRound, Landmark, Link2,
+  LogIn, LogOut, Megaphone, Pencil, Plus, RefreshCw, ShieldCheck, Sparkles, TrendingUp, Trash2, Wallet,
 } from 'lucide-react';
 import {
-  completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations, getSession,
-  getSettings, getTunnel, listCampaigns, login, logout, money, saveMasjid, saveTunnel, sendTestNotification,
-  setupAdmin, testAccount, updateAccount, updateCampaign,
+  checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations,
+  getMetrics, getSession, getSettings, getTunnel, listCampaigns, login, logout, money, saveMasjid, saveTunnel,
+  sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign,
   type AccountInput, type AppInfo, type Campaign, type CampaignInput, type DonationsResult, type MasjidProfile,
-  type Session, type Settings, type StripeAccount, type TunnelStatus, type VerifyResult,
+  type Metrics, type Session, type Settings, type StripeAccount, type TunnelStatus, type VerifyResult,
 } from './api';
 
 const SOURCE_URL = 'https://github.com/hasan-ismail/OpenMasjidDonations';
@@ -155,9 +156,10 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
   return (
     <main className="admin">
       <div className="page-head">
-        <h1 className="page-title">Admin</h1>
+        <h1 className="page-title">Dashboard</h1>
         <p className="page-sub">{session.sso.username ? `Signed in as ${session.sso.username}` : 'Signed in'}{embedded ? ' · via OpenMasjidOS' : ''}</p>
       </div>
+      <MetricsDashboard />
       <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} />
       <StripeAccountsCard accounts={settings.stripeAccounts} onChanged={onReload} />
       <DonationsCard />
@@ -178,6 +180,86 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
       </section>
       <p className="admin-foot faint">OpenMasjid Donations v{info?.version ?? __APP_VERSION__} · <a href={SOURCE_URL} target="_blank" rel="noreferrer noopener">Source code <ExternalLink size={12} /></a> · AGPL-3.0</p>
     </main>
+  );
+}
+
+// ── Metrics dashboard ─────────────────────────────────────────────────────────
+function MetricsDashboard() {
+  const reduce = useReducedMotion();
+  const [m, setM] = useState<Metrics | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    getMetrics().then(setM).catch(() => setFailed(true));
+  }, []);
+
+  if (failed) return null; // the dashboard is a nicety — never block the rest of the panel
+  if (!m) return <section className="glass panel metrics-skel"><span className="spinner" aria-label="Loading totals" /></section>;
+
+  const fmt = (n: number) => money(n, m.currency);
+  const hasMoney = m.totalRaised > 0;
+  const tiles: { icon: React.ReactNode; label: string; value: string; sub?: string; accent?: boolean }[] = [
+    { icon: <Coins size={17} />, label: 'Total raised', value: fmt(m.totalRaised), accent: true },
+    { icon: <CalendarDays size={17} />, label: 'This month', value: fmt(m.thisMonthRaised), sub: `${m.thisMonthCount} donation${m.thisMonthCount === 1 ? '' : 's'}` },
+    { icon: <TrendingUp size={17} />, label: 'Donations', value: String(m.count), sub: `${m.activeCampaigns} live appeal${m.activeCampaigns === 1 ? '' : 's'}` },
+    { icon: <Sparkles size={17} />, label: 'Average gift', value: m.count ? fmt(m.average) : '—' },
+  ];
+  const maxRaised = Math.max(1, ...m.byCampaign.map((c) => c.raised));
+  const maxMonth = Math.max(1, ...m.monthly.map((x) => x.raised));
+  const rise = (i: number) =>
+    reduce ? {} : { initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 }, transition: { delay: 0.05 * i, duration: 0.4, ease: 'easeOut' as const } };
+
+  return (
+    <section className="glass panel metrics">
+      <div className="card-head">
+        <TrendingUp size={18} className="panel-ico" aria-hidden="true" />
+        <div className="card-head__main">
+          <h2 className="section-title-inline">Overview</h2>
+          <p className="muted">{hasMoney ? 'How your appeals are doing.' : 'Your totals will appear here as donations come in.'}</p>
+        </div>
+      </div>
+
+      <div className="stat-grid">
+        {tiles.map((t, i) => (
+          <motion.div key={t.label} className={`stat-tile${t.accent ? ' stat-tile--accent' : ''}`} {...rise(i)}>
+            <span className="stat-tile__icon" aria-hidden="true">{t.icon}</span>
+            <span className="stat-tile__label">{t.label}</span>
+            <span className="stat-tile__value">{t.value}</span>
+            <span className="stat-tile__sub">{t.sub ?? ' '}</span>
+          </motion.div>
+        ))}
+      </div>
+
+      {hasMoney && m.byCampaign.length > 0 && (
+        <div className="metric-block">
+          <h3 className="metric-h">Where it’s going</h3>
+          <div className="metric-bars">
+            {m.byCampaign.map((c) => (
+              <div key={c.id} className="metric-bar-row">
+                <div className="metric-bar-top">
+                  <span className="metric-bar-name">{c.title}{!c.active && <span className="faint"> · hidden</span>}</span>
+                  <span className="metric-bar-amt">{fmt(c.raised)} <span className="faint">· {c.count}</span></span>
+                </div>
+                <div className="metric-bar-track"><div className="metric-bar-fill" style={{ width: `${Math.round((c.raised / maxRaised) * 100)}%` }} /></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {hasMoney && (
+        <div className="metric-block">
+          <h3 className="metric-h">Last 6 months</h3>
+          <div className="trend-chart" role="img" aria-label="Donations over the last six months">
+            {m.monthly.map((x) => (
+              <div key={x.month} className="trend-col" title={`${x.label}: ${fmt(x.raised)} (${x.count})`}>
+                <div className="trend-bar-wrap"><div className="trend-bar" style={{ height: `${Math.max(2, Math.round((x.raised / maxMonth) * 100))}%` }} /></div>
+                <span className="trend-label">{x.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -344,7 +426,7 @@ function CampaignsCard({ accounts, currency }: { accounts: StripeAccount[]; curr
         <Megaphone size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
           <h2 className="section-title-inline">Campaigns</h2>
-          <p className="muted">Each appeal gets its own shareable link. Point different appeals at different Stripe accounts.</p>
+          <p className="muted">Each appeal gets its own link you choose — e.g. <span className="mono">/zakat</span>. Point different appeals at different Stripe accounts.</p>
         </div>
       </div>
       {noAccount && <p className="hint">Add a Stripe account below first, then create a campaign.</p>}
@@ -393,6 +475,8 @@ function CampaignForm({ campaign, accounts, currency, onDone }: {
 }) {
   const editing = !!campaign;
   const [title, setTitle] = useState(campaign?.title ?? '');
+  const [slug, setSlug] = useState(campaign?.slug ?? '');
+  const [slugInfo, setSlugInfo] = useState<{ slug: string; available: boolean; reserved: boolean } | null>(null);
   const [description, setDescription] = useState(campaign?.description ?? '');
   const [coverImage, setCoverImage] = useState(campaign?.coverImage ?? '');
   const [presets, setPresets] = useState((campaign?.presetAmounts ?? [10, 25, 50, 100]).join(', '));
@@ -407,10 +491,23 @@ function CampaignForm({ campaign, accounts, currency, onDone }: {
   const [del, setDel] = useState(false);
   const [error, setError] = useState('');
 
+  // Live link-availability feedback (debounced). Checks the chosen slug, or the slug
+  // we'd derive from the title when the field is left blank.
+  useEffect(() => {
+    const desired = slug.trim() || title.trim();
+    if (!desired) { setSlugInfo(null); return; }
+    let live = true;
+    const t = setTimeout(() => {
+      checkSlug(desired, campaign?.id).then((r) => live && setSlugInfo(r)).catch(() => {});
+    }, 300);
+    return () => { live = false; clearTimeout(t); };
+  }, [slug, title, campaign?.id]);
+
   const save = async () => {
     setBusy(true); setError('');
     const body: CampaignInput = {
       title: title.trim(),
+      slug: slug.trim() || undefined,
       description: description.trim(),
       coverImage: coverImage.trim(),
       presetAmounts: presets.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0),
@@ -435,6 +532,13 @@ function CampaignForm({ campaign, accounts, currency, onDone }: {
   return (
     <div className="subform glass-inset">
       <Field id="ct" label="Title"><input id="ct" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. General Fund, Zakat, Building Fund" /></Field>
+      <Field id="cslug" label="Link to share">
+        <div className="slug-field">
+          <span className="slug-prefix" aria-hidden="true"><Link2 size={13} /> {linkHost()}/</span>
+          <input id="cslug" className="input mono" value={slug} onChange={(e) => setSlug(e.target.value)} placeholder={slugifyClient(title) || 'zakat'} autoComplete="off" spellCheck={false} />
+        </div>
+        <SlugHint info={slugInfo} hasInput={!!(slug.trim() || title.trim())} />
+      </Field>
       <Field id="cd" label="Description (optional)"><textarea id="cd" className="input" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
       <Field id="cimg" label="Cover image URL (optional)"><input id="cimg" className="input" value={coverImage} onChange={(e) => setCoverImage(e.target.value)} placeholder="https://" /></Field>
       <Field id="cp" label={`Suggested amounts (${currency}, comma-separated)`}><input id="cp" className="input" value={presets} onChange={(e) => setPresets(e.target.value)} placeholder="10, 25, 50, 100" /></Field>
@@ -593,6 +697,26 @@ function Notifications({ embedded }: { embedded: boolean }) {
       {(text || error) && <p className={error ? 'form-error' : 'hint'} role="status" style={{ marginBlockStart: '0.6rem' }}>{error || text}</p>}
     </section>
   );
+}
+
+/** The host shown as the link prefix (e.g. "give.masjid.org"). Falls back gracefully
+ *  when rendered without a window. */
+function linkHost(): string {
+  return typeof location !== 'undefined' ? location.host : 'your-masjid';
+}
+
+/** Client-side mirror of the server slugify, for the live preview placeholder. */
+function slugifyClient(s: string): string {
+  return s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
+/** Friendly availability line under the link field. */
+function SlugHint({ info, hasInput }: { info: { slug: string; available: boolean; reserved: boolean } | null; hasInput: boolean }) {
+  if (!hasInput) return <span className="hint">Leave blank to use the title. Letters, numbers and dashes only.</span>;
+  if (!info) return <span className="hint">Checking…</span>;
+  if (info.reserved) return <span className="form-error" role="status" style={{ margin: 0 }}>“{info.slug}” is reserved — please choose another.</span>;
+  if (!info.available) return <span className="form-error" role="status" style={{ margin: 0 }}>/{info.slug} is already used by another campaign.</span>;
+  return <span className="hint" style={{ color: 'var(--color-success)' }}>✓ /{info.slug} is available.</span>;
 }
 
 function msg(err: unknown): string {
