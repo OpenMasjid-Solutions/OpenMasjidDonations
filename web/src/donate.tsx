@@ -130,6 +130,15 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
   const [error, setError] = useState('');
   const [confirmMonthly, setConfirmMonthly] = useState(false);
 
+  // Lock background scroll while the confirm dialog is open (no scrollbar behind it).
+  useEffect(() => {
+    if (!confirmMonthly) return;
+    const html = document.documentElement;
+    const prev = html.style.overflow;
+    html.style.overflow = 'hidden';
+    return () => { html.style.overflow = prev; };
+  }, [confirmMonthly]);
+
   const monthly = frequency === 'monthly' && campaign.allowMonthly;
   const effective = customMode ? Number(custom) : amount;
   const fmt = (n: number) => money(n, campaign.currency);

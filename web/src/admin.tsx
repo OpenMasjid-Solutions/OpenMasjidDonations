@@ -10,7 +10,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import {
   Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, HandCoins,
   KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw,
-  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet,
+  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet, X,
 } from 'lucide-react';
 import {
   checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations,
@@ -164,6 +164,12 @@ const ADMIN_TABS: { id: AdminTab; label: string; Icon: typeof Megaphone }[] = [
   { id: 'settings', label: 'Settings', Icon: SettingsIcon },
 ];
 
+/** Which tab a URL hash like "#settings" selects (defaults to overview). */
+function tabFromHash(): AdminTab {
+  const h = typeof location !== 'undefined' ? location.hash.replace(/^#/, '') : '';
+  return ADMIN_TABS.some((t) => t.id === h) ? (h as AdminTab) : 'overview';
+}
+
 function Dock({ tab, setTab }: { tab: AdminTab; setTab: (t: AdminTab) => void }) {
   return (
     <div className="dock-wrap">
@@ -190,7 +196,18 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
   info: AppInfo | null; session: Session; settings: Settings; onReload: () => void; onSignedOut: () => void;
 }) {
   const embedded = !!info?.embedded;
-  const [tab, setTab] = useState<AdminTab>('overview');
+  // Tab is reflected in the URL hash so the profile menu's "Settings" (→ /admin#settings)
+  // and refresh/back land on the right section.
+  const [tab, setTabState] = useState<AdminTab>(() => tabFromHash());
+  useEffect(() => {
+    const onHash = () => setTabState(tabFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  const setTab = (t: AdminTab) => {
+    if (typeof location !== 'undefined') history.replaceState(null, '', `${location.pathname}#${t}`);
+    setTabState(t);
+  };
   const [signingOut, setSigningOut] = useState(false);
   const signOut = async () => { setSigningOut(true); try { await logout(); } catch { /* ignore */ } onSignedOut(); };
 
@@ -211,7 +228,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         </div>
 
         {tab === 'overview' && <MetricsDashboard />}
-        {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} masjidName={settings.masjid.name} />}
+        {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} />}
         {tab === 'donations' && <DonationsCard />}
         {tab === 'payments' && (
           <>
@@ -501,7 +518,7 @@ function StripeInstructions() {
 }
 
 // ── Campaigns ───────────────────────────────────────────────────────────────
-function CampaignsCard({ accounts, currency, masjidName }: { accounts: StripeAccount[]; currency: string; masjidName: string }) {
+function CampaignsCard({ accounts, currency, masjidName, masjidLogo }: { accounts: StripeAccount[]; currency: string; masjidName: string; masjidLogo: string }) {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [editId, setEditId] = useState('');
@@ -531,7 +548,7 @@ function CampaignsCard({ accounts, currency, masjidName }: { accounts: StripeAcc
         {(campaigns ?? []).map((c) => (
           <div key={c.id}>
             <div className="list-row">
-              <CampaignPreview variant="thumb" currency={c.currency} data={c} />
+              <CampaignPreview variant="thumb" currency={c.currency} data={c} masjidLogo={masjidLogo} />
               <div className="list-row__main">
                 <div className="row" style={{ gap: '0.4rem', flexWrap: 'wrap' }}>
                   <span className="list-row__title">{c.title}</span>
@@ -542,13 +559,13 @@ function CampaignsCard({ accounts, currency, masjidName }: { accounts: StripeAcc
               </div>
               <button className="icon-btn" title="Edit" onClick={() => setEditId(editId === c.id ? '' : c.id)}><Pencil size={15} /></button>
             </div>
-            {editId === c.id && <CampaignForm campaign={c} accounts={accounts} currency={currency} masjidName={masjidName} shareBase={shareBase} onDone={() => { setEditId(''); reload(); }} onCancel={() => setEditId('')} />}
+            {editId === c.id && <CampaignForm campaign={c} accounts={accounts} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} shareBase={shareBase} onDone={() => { setEditId(''); reload(); }} onCancel={() => setEditId('')} />}
           </div>
         ))}
         {campaigns && campaigns.length === 0 && !creating && <p className="muted" style={{ padding: '0.5rem 0' }}>No campaigns yet.</p>}
       </div>
       {creating ? (
-        <CampaignForm accounts={accounts} currency={currency} masjidName={masjidName} shareBase={shareBase} onDone={() => { setCreating(false); reload(); }} onCancel={() => setCreating(false)} />
+        <CampaignForm accounts={accounts} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} shareBase={shareBase} onDone={() => { setCreating(false); reload(); }} onCancel={() => setCreating(false)} />
       ) : (
         <button className="btn btn--primary btn--sm" disabled={noAccount} onClick={() => setCreating(true)}><Plus size={15} /> New campaign</button>
       )}
@@ -569,8 +586,8 @@ function CampaignLink({ url, base }: { url: string; base: string }) {
   );
 }
 
-function CampaignForm({ campaign, accounts, currency, masjidName, shareBase, onDone, onCancel }: {
-  campaign?: Campaign; accounts: StripeAccount[]; currency: string; masjidName: string; shareBase: string; onDone: () => void; onCancel?: () => void;
+function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, shareBase, onDone, onCancel }: {
+  campaign?: Campaign; accounts: StripeAccount[]; currency: string; masjidName: string; masjidLogo: string; shareBase: string; onDone: () => void; onCancel?: () => void;
 }) {
   const editing = !!campaign;
   const [title, setTitle] = useState(campaign?.title ?? '');
@@ -644,7 +661,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, shareBase, onD
   return (
     <div className="subform glass-inset">
       <div className="cprev-head"><span className="hint">Live preview</span></div>
-      <CampaignPreview variant="full" data={previewData} currency={currency} masjidName={masjidName} />
+      <CampaignPreview variant="full" data={previewData} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} />
       <Field id="ct" label="Title"><input id="ct" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. General Fund, Zakat, Building Fund" /></Field>
       <Field id="cslug" label="Link to share">
         <div className="slug-field">
@@ -766,7 +783,10 @@ function DonationDetail({ donation, all, onClose, onPick }: {
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
+    const html = document.documentElement;
+    const prev = html.style.overflow;
+    html.style.overflow = 'hidden'; // lock background scroll while the window is open
+    return () => { window.removeEventListener('keydown', h); html.style.overflow = prev; };
   }, [onClose]);
 
   const k = donorKey(donation);
@@ -779,7 +799,7 @@ function DonationDetail({ donation, all, onClose, onPick }: {
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal glass-raised win" role="dialog" aria-modal="true" aria-label={`Transaction ${donation.ref}`} onClick={(e) => e.stopPropagation()}>
         <div className="tl-bar">
-          <button className="tl tl--red" onClick={onClose} aria-label="Close" title="Close" />
+          <button className="tl tl--red" onClick={onClose} aria-label="Close" title="Close"><X size={9} strokeWidth={3.5} /></button>
         </div>
         <div className="modal-head">
           <div>
@@ -990,18 +1010,19 @@ interface PreviewData {
 
 /** A faithful mini of the public donation page. `full` is the live editor preview;
  *  `thumb` is the small swatch shown beside each campaign in the list. */
-function CampaignPreview({ data, currency, masjidName, variant }: {
-  data: PreviewData; currency: string; masjidName?: string; variant: 'full' | 'thumb';
+function CampaignPreview({ data, currency, masjidName, masjidLogo, variant }: {
+  data: PreviewData; currency: string; masjidName?: string; masjidLogo?: string; variant: 'full' | 'thumb';
 }) {
   const bg = safeImg(data.backgroundImage);
   const bgStyle = bg ? { backgroundImage: `url("${bg}")` } : undefined;
+  const logo = safeImg(masjidLogo || '');
   // Match the preview's theme to its background so the card text reads (as the donor sees it).
   const readable = useReadableTheme(bg || undefined, 'dark');
   if (variant === 'thumb') {
     return (
       <div className="cprev-thumb" aria-hidden="true">
         <div className={`cprev-bg${bg ? '' : ' cprev-bg--default'}`} style={bgStyle} />
-        <span className="cprev-thumb-ico"><HandCoins size={15} /></span>
+        <span className="cprev-thumb-ico">{logo ? <img className="cprev-thumb-logo" src={logo} alt="" /> : <HandCoins size={15} />}</span>
       </div>
     );
   }
@@ -1014,7 +1035,7 @@ function CampaignPreview({ data, currency, masjidName, variant }: {
       <div className={`cprev-bg${bg ? '' : ' cprev-bg--default'}`} style={bgStyle} />
       <div className="cprev-card glass-raised">
         {cover && <img className="cprev-cover" src={cover} alt="" />}
-        <div className="cprev-emblem" aria-hidden="true"><HandCoins size={18} /></div>
+        {logo ? <img className="cprev-logo" src={logo} alt="" /> : <div className="cprev-emblem" aria-hidden="true"><HandCoins size={18} /></div>}
         <div className="cprev-title">{data.title || 'Your appeal'}</div>
         {masjidName && <div className="cprev-sub">{masjidName}</div>}
         {data.description && <p className="cprev-desc">{data.description}</p>}

@@ -83,13 +83,30 @@ export function ProfileMenu({ info }: { info: AppInfo | null }) {
             {current === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
             <span>{current === 'dark' ? 'Light mode' : 'Dark mode'}</span>
           </button>
-          <a className="menu-item" role="menuitem" href="/admin"><Settings size={17} /><span>Settings</span></a>
+          <a className="menu-item" role="menuitem" href="/admin#settings"><Settings size={17} /><span>Settings</span></a>
           {canSignOut && (
             <button className="menu-item" role="menuitem" onClick={signOut}><LogOut size={17} /><span>Sign out</span></button>
           )}
           <div className="menu-foot">OpenMasjid Donations v{info?.version ?? __APP_VERSION__}</div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Live clock for the top bar, mirroring the OpenMasjidOS dashboard. */
+export function Clock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const iv = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(iv);
+  }, []);
+  const time = now.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const date = now.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  return (
+    <div className="topclock" aria-label={`${time}, ${date}`}>
+      <span className="topclock-time">{time}</span>
+      <span className="topclock-date">{date}</span>
     </div>
   );
 }

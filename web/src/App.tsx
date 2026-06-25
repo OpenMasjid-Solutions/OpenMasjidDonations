@@ -6,7 +6,7 @@ import { motion, useReducedMotion } from 'motion/react';
 import { ShieldCheck } from 'lucide-react';
 import { getAppInfo, type AppInfo } from './api';
 import { resolveTheme, useOmosAppearanceSync, usePrefs, useReadableTheme } from './prefs';
-import { Scene, Brand, ProfileMenu } from './ui';
+import { Scene, Brand, Clock, ProfileMenu } from './ui';
 
 // Code-split the two heavy areas so the initial shell stays tiny and fast: the donor
 // page (which pulls in Stripe.js) and the admin panel each load only when visited.
@@ -90,6 +90,7 @@ export function App() {
       <header className="topbar">
         <Brand />
         <div className="spacer" />
+        <Clock />
         <ProfileMenu info={info} />
       </header>
       {goToSetup ? (
