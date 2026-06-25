@@ -5,7 +5,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { ShieldCheck } from 'lucide-react';
 import { getAppInfo, type AppInfo } from './api';
-import { resolveTheme, useOmosAppearanceSync, usePrefs, useReadableTheme } from './prefs';
+import { useOmosAppearanceSync, usePrefs, useReadableTheme } from './prefs';
 import { Scene, Brand, Clock, ProfileMenu } from './ui';
 
 // Code-split the two heavy areas so the initial shell stays tiny and fast: the donor
@@ -67,14 +67,18 @@ export function App() {
     if (goToSetup) window.location.replace('/admin');
   }, [goToSetup]);
 
-  // Adapt the shell's theme to a custom (inherited) dashboard wallpaper image so text
-  // stays readable over it. With no custom image this just tracks the chosen theme.
-  // The donation page is excluded — it manages its own theme against its own background.
+  // On-scene text colour follows the WALLPAPER (not the light/dark toggle): preset
+  // wallpapers are dark → light on-scene text in both themes; a light custom wallpaper
+  // image flips data-scene to "light" so on-scene text goes dark. The content theme
+  // (glass cards) stays under the user's control. The donate page manages its own scene.
   const prefs = usePrefs();
-  const shellTheme = useReadableTheme(!campaign ? prefs.wallpaperImage.trim() || undefined : undefined, resolveTheme(prefs.theme));
+  const sceneTone = useReadableTheme(!campaign ? prefs.wallpaperImage.trim() || undefined : undefined, 'dark');
   useEffect(() => {
-    if (!campaign) document.documentElement.setAttribute('data-theme', shellTheme);
-  }, [shellTheme, campaign]);
+    if (campaign) return;
+    const html = document.documentElement;
+    if (sceneTone === 'light') html.setAttribute('data-scene', 'light');
+    else html.removeAttribute('data-scene');
+  }, [sceneTone, campaign]);
 
   // A campaign donation page is its own full-screen experience (own Scene + chrome).
   if (campaign)

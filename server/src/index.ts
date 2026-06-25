@@ -704,9 +704,9 @@ async function main(): Promise<void> {
     const monthly = !!p.monthly && c.allowMonthly;
     const donorName = (p.donorName ?? '').slice(0, 120);
     const donorEmail = (p.donorEmail ?? '').slice(0, 200);
-    // Monthly donations need an email — Stripe attaches the subscription to a customer.
-    if (monthly && !donorEmail.trim()) {
-      return reply.code(400).send({ error: 'Please add your email — it’s required for a monthly donation.' });
+    // Monthly donations need a name + email (Stripe attaches the subscription to a customer).
+    if (monthly && (!donorName.trim() || !donorEmail.trim())) {
+      return reply.code(400).send({ error: 'Please add your name and email — both are required for a monthly donation.' });
     }
     const metadata = {
       app: 'donations', campaignId: c.id, campaign: c.title.slice(0, 120),

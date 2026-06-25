@@ -61,14 +61,19 @@ export function DonatePage({ slug, token }: { slug: string; token?: string }) {
     const html = document.documentElement;
     const prevW = html.getAttribute('data-wallpaper');
     const prevT = html.getAttribute('data-theme');
+    const prevS = html.getAttribute('data-scene');
     html.setAttribute('data-wallpaper', 'aurora');
     return () => {
       if (prevW) html.setAttribute('data-wallpaper', prevW); else html.removeAttribute('data-wallpaper');
       if (prevT) html.setAttribute('data-theme', prevT); else html.removeAttribute('data-theme');
+      if (prevS) html.setAttribute('data-scene', prevS); else html.removeAttribute('data-scene');
     };
   }, []);
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', readable);
+    const html = document.documentElement;
+    html.setAttribute('data-theme', readable); // card adapts to the campaign background
+    if (readable === 'light') html.setAttribute('data-scene', 'light'); // on-scene text too
+    else html.removeAttribute('data-scene');
   }, [readable]);
 
   // If Stripe redirected back here (some payment methods do), it appends
@@ -149,6 +154,7 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
     if (!Number.isFinite(effective) || effective <= 0) return 'Please enter an amount.';
     if (campaign.allowCustom && campaign.minAmount && effective < campaign.minAmount) return `The minimum is ${fmt(campaign.minAmount)}.`;
     if (campaign.allowCustom && campaign.maxAmount && effective > campaign.maxAmount) return `The maximum is ${fmt(campaign.maxAmount)}.`;
+    if (monthly && !name.trim()) return 'Please add your name — it’s required for a monthly donation.';
     if (monthly && !email.trim()) return 'Please add your email — it’s required for a monthly donation.';
     return '';
   };
@@ -238,8 +244,8 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
 
         <div className="grid2">
           <div className="field">
-            <label className="label" htmlFor="dn">Your name (optional)</label>
-            <input id="dn" className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
+            <label className="label" htmlFor="dn">{monthly ? 'Your name (required for monthly)' : 'Your name (optional)'}</label>
+            <input id="dn" className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" required={monthly} />
           </div>
           <div className="field">
             <label className="label" htmlFor="de">{monthly ? 'Email (required for monthly)' : 'Email for a receipt (optional)'}</label>
