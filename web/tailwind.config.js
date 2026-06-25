@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Tailwind is additive utilities only. Preflight is OFF so the hand-written token
  *  CSS (styles/app.css, mirrored from OpenMasjidOS) stays authoritative for base
  *  styles. Colours map to the CSS custom properties in styles/tokens.css, so a

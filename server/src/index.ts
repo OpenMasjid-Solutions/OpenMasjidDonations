@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Entry point: a Fastify server that serves the built web app (donor site +
  *  admin) and the JSON API. Slice 1 established the themed shell + health check;
  *  slice 2 adds the OpenMasjidOS Fabric — single sign-on (server→server) with a
@@ -683,9 +686,13 @@ async function main(): Promise<void> {
       if (baseMinor < Math.max(c.minAmount, 1)) return reply.code(400).send({ error: 'That amount is below the minimum.' });
       if (c.maxAmount > 0 && baseMinor > c.maxAmount) return reply.code(400).send({ error: 'That amount is above the maximum.' });
     }
+    // Reject non-finite/non-integer/out-of-range amounts (zod already requires > 0).
+    if (!Number.isInteger(baseMinor) || baseMinor < 1) return reply.code(400).send({ error: 'Please choose a valid amount.' });
     // Stripe rejects very small charges; enforce a floor (~0.50 in 2-decimal currencies).
     const floor = currencyDecimals(currency) === 0 ? 50 : 50;
     if (baseMinor < floor) return reply.code(400).send({ error: 'That amount is too small.' });
+    // …and a sane ceiling (Stripe's per-charge max is 99,999,999 minor units).
+    if (baseMinor > 99_999_999) return reply.code(400).send({ error: 'That amount is too large.' });
 
     const coverFees = !!p.coverFees && c.coverFees;
     const chargeMinor = coverFees ? withCoveredFees(baseMinor, currency) : baseMinor;

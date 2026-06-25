@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Tiny tagged logger. Keep it boring — and never log secrets (Stripe keys, the
  *  per-app Fabric secret, session tokens). */
 type Level = 'debug' | 'info' | 'warn' | 'error';

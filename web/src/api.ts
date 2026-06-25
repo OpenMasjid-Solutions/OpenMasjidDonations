@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Typed client for the OpenMasjid Donations API. Responses use a { data | error }
  *  envelope; this unwraps `data` and turns `error` into a thrown friendly message. */
 

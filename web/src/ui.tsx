@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Small shared UI pieces used by both the public site and the admin area. */
 import { useEffect, useRef, useState } from 'react';
 import { HandCoins, LogOut, Moon, Settings, Sun, User } from 'lucide-react';

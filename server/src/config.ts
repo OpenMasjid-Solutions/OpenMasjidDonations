@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Environment configuration. Install settings seed first-run defaults only; all
  *  ongoing configuration will live in the data volume (a later slice). Secrets are
  *  read here but NEVER logged or sent to the browser. */

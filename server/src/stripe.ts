@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Stripe helpers. The SECRET key lives only here and in the store — it is never
  *  returned to the browser or logged. The publishable key is the only key the
  *  browser ever sees. The Stripe API version is pinned by the SDK version in

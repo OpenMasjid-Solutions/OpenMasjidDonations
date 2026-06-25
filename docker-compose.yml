@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 OpenMasjid-Solutions
+
 # OpenMasjid Donations — one container that runs everything: the donation site,
 # the admin panel, the API, and the SQLite data store. One image to install, one
 # to update. It stays least-privilege: no privileged mode, no host networking, no
@@ -10,7 +13,7 @@ services:
   app:
     # Tag for humans + @sha256 digest for integrity (the digest is the real pin — a
     # moved tag can't repoint it to a different image). Bump both on every release.
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.10.0@sha256:58d712a9e13aa4b1c70c001e8c21b12027624b690469fa6e215bda54a3aa7c5c
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.11.0
     restart: unless-stopped
     environment:
       PORT: "8080"

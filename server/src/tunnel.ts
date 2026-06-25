@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /**
  * Cloudflare Tunnel supervisor. When the admin saves a tunnel token, we run the
  * bundled `cloudflared` as a child process so the masjid can take donations from

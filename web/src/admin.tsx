@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** The login-protected admin area: first-run setup, then manage Stripe accounts,
  *  campaigns (donation pages), and the donations log. Stripe SECRET keys are sent to
  *  the server and never returned to the browser. */

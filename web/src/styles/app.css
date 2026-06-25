@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright (C) 2026 OpenMasjid-Solutions */
+
 /* Base + components for OpenMasjid Donations. Layout uses logical properties so it
    works LTR and RTL. Mirrors the OpenMasjidOS / Display look; values come from
    tokens.css — no raw hex here. */

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** Durable store for all app state, kept in the data volume as a single SQLite file
  *  (better-sqlite3, WAL). Everything goes through this thin repository so a different
  *  backend (e.g. Postgres) could be slotted in later without touching the routes.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 OpenMasjid-Solutions
+
 /** The public donation page for a single campaign, at the clean path /<slug>.
  *  Flow: pick an amount → Stripe Payment Element → confirm on return by asking the
  *  server to RETRIEVE the PaymentIntent (never trusting the client) → thank-you. */
