@@ -596,6 +596,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
   const [description, setDescription] = useState(campaign?.description ?? '');
   const [coverImage, setCoverImage] = useState(campaign?.coverImage ?? '');
   const [backgroundImage, setBackgroundImage] = useState(campaign?.backgroundImage ?? '');
+  const [logo, setLogo] = useState(campaign?.logo ?? '');
   const [presets, setPresets] = useState((campaign?.presetAmounts ?? [10, 25, 50, 100]).join(', '));
   const [allowCustom, setAllowCustom] = useState(campaign?.allowCustom ?? true);
   const [minAmount, setMinAmount] = useState(String(campaign?.minAmount ?? 1));
@@ -628,6 +629,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       description: description.trim(),
       coverImage: coverImage.trim(),
       backgroundImage: backgroundImage.trim(),
+      logo: logo.trim(),
       presetAmounts: presets.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0),
       allowCustom,
       minAmount: Number(minAmount) || 0,
@@ -651,7 +653,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
   // slug and the public (Cloudflare) base when set, else this device's address.
   const previewPresets = presets.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
   const previewData = {
-    title, description, coverImage, backgroundImage,
+    title, description, coverImage, backgroundImage, logo,
     presetAmounts: previewPresets, allowCustom,
     goalAmount: Number(goalAmount) || 0, raised: campaign?.raised ?? 0,
   };
@@ -674,6 +676,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       <Field id="cd" label="Description (optional)"><textarea id="cd" className="input" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
       <ImageField id="cimg" label="Cover image (optional)" hint="Shown inside the page." value={coverImage} onChange={setCoverImage} />
       <ImageField id="cbg" label="Background image (optional)" hint="This page's full background. Leave empty for the default look (it won't use the dashboard wallpaper)." value={backgroundImage} onChange={setBackgroundImage} />
+      <ImageField id="clogo" label="Campaign logo (optional)" hint="Shown as this campaign's icon. Leave empty to use your masjid logo." value={logo} onChange={setLogo} />
       <Field id="cp" label={`Suggested amounts (${currency}, comma-separated)`}><input id="cp" className="input" value={presets} onChange={(e) => setPresets(e.target.value)} placeholder="10, 25, 50, 100" /></Field>
       <div className="grid2">
         <Field id="cmin" label={`Minimum custom amount (${currency})`}><input id="cmin" className="input" type="number" min="0" step="0.01" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} /></Field>
@@ -992,6 +995,7 @@ function ImageField({ id, label, hint, value, onChange }: {
     <div className="field">
       <label className="label" htmlFor={id}>{label}</label>
       <div className="img-field">
+        {safeImg(value) && <img className="img-preview" src={safeImg(value)} alt="" />}
         <input id={id} className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder="https://  — or upload a file" />
         <button type="button" className="btn btn--ghost btn--sm img-upload" onClick={() => inputRef.current?.click()} disabled={busy}>
           {busy ? <span className="spinner" /> : <Upload size={14} />} Upload
@@ -1004,7 +1008,7 @@ function ImageField({ id, label, hint, value, onChange }: {
 }
 
 interface PreviewData {
-  title: string; description: string; coverImage: string; backgroundImage: string;
+  title: string; description: string; coverImage: string; backgroundImage: string; logo: string;
   presetAmounts: number[]; allowCustom: boolean; goalAmount: number; raised: number;
 }
 
@@ -1015,7 +1019,8 @@ function CampaignPreview({ data, currency, masjidName, masjidLogo, variant }: {
 }) {
   const bg = safeImg(data.backgroundImage);
   const bgStyle = bg ? { backgroundImage: `url("${bg}")` } : undefined;
-  const logo = safeImg(masjidLogo || '');
+  // Campaign's own logo wins; otherwise the masjid logo.
+  const logo = safeImg(data.logo || masjidLogo || '');
   // Match the preview's theme to its background so the card text reads (as the donor sees it).
   const readable = useReadableTheme(bg || undefined, 'dark');
   if (variant === 'thumb') {
