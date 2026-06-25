@@ -187,8 +187,8 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
   return (
     <section className="glass-raised donate-card">
       {campaign.coverImage ? <img className="donate-cover" src={campaign.coverImage} alt="" /> : null}
-      {bgUrl(campaign.masjidLogo) ? (
-        <img className="donate-logo" src={bgUrl(campaign.masjidLogo)} alt={campaign.masjidName || 'Masjid logo'} />
+      {bgUrl(campaign.logo || campaign.masjidLogo) ? (
+        <img className="donate-logo" src={bgUrl(campaign.logo || campaign.masjidLogo)} alt={campaign.masjidName || 'Logo'} />
       ) : (
         <div className="donate-emblem" aria-hidden="true"><HandCoins size={30} /></div>
       )}
@@ -299,8 +299,8 @@ function PayStep({
 
   return (
     <section className="glass-raised donate-card">
-      {bgUrl(campaign.masjidLogo) ? (
-        <img className="donate-logo" src={bgUrl(campaign.masjidLogo)} alt="" />
+      {bgUrl(campaign.logo || campaign.masjidLogo) ? (
+        <img className="donate-logo" src={bgUrl(campaign.logo || campaign.masjidLogo)} alt="" />
       ) : (
         <div className="donate-emblem" aria-hidden="true">{intent.recurring ? <Repeat size={30} /> : <HandCoins size={30} />}</div>
       )}

@@ -470,7 +470,8 @@ select.input { appearance: auto; }
   transition: background-color var(--dur-micro) ease, color var(--dur-micro) ease;
 }
 .freq-opt.is-active { background: var(--color-primary); color: var(--color-on-primary); }
-.confirm-modal { width: min(26rem, 100%); text-align: center; align-items: center; }
+/* Short content — never show an inner scrollbar (the detail modal keeps its own). */
+.confirm-modal { width: min(26rem, 100%); max-height: none; overflow: visible; text-align: center; align-items: center; }
 .confirm-actions { display: flex; gap: 0.6rem; margin-block-start: 0.9rem; width: 100%; }
 .confirm-actions .btn { flex: 1; justify-content: center; }
 
@@ -478,6 +479,7 @@ select.input { appearance: auto; }
 .img-field { display: flex; gap: 0.4rem; align-items: stretch; }
 .img-field .input { flex: 1; min-width: 0; }
 .img-upload { flex-shrink: 0; white-space: nowrap; }
+.img-preview { width: 2.5rem; height: 2.5rem; border-radius: 0.45rem; object-fit: cover; flex-shrink: 0; background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border); }
 
 /* ── Readability: lift text that sits directly on the wallpaper ───────────── */
 .page-title, .page-sub, .brand, .don-page, .donate-foot { text-shadow: var(--text-shadow-scene); }
