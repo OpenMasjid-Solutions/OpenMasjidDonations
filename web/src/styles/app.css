@@ -417,3 +417,48 @@ select.input { appearance: auto; }
 .detail-value { font-size: 0.92rem; color: var(--color-ink); word-break: break-word; }
 .detail-value.mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 0.8rem; }
 .detail-section { margin-block-start: 1.1rem; }
+
+/* ── Dashboard as separate widgets (OpenMasjidOS style) ───────────────────── */
+.metrics { display: flex; flex-direction: column; gap: 1rem; }
+.stat-widget { display: flex; flex-direction: column; gap: 0.12rem; padding: 0.95rem 1rem; }
+.stat-widget--accent { background-color: var(--color-primary-subtle); }
+.stat-widget--accent .stat-tile__value { color: var(--color-primary); }
+/* Each analytics block is its own glass widget. */
+.metric-block {
+  margin: 0; padding: 1.1rem 1.2rem; border-radius: var(--radius-card);
+  background-color: var(--glass-bg-raised);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-shadow);
+}
+
+/* ── Donations as a full page (not a boxed widget) ────────────────────────── */
+.admin--wide { max-width: 1100px; }
+.don-page { padding-block-start: 0.25rem; }
+
+/* macOS-style window chrome on the transaction modal */
+.tl-bar { display: flex; align-items: center; gap: 0.5rem; margin-block-end: 0.7rem; }
+.tl { width: 0.8rem; height: 0.8rem; border-radius: 50%; border: 0; padding: 0; flex-shrink: 0; }
+.tl--red { background: #ff5f57; cursor: pointer; }
+.tl--amber { background: #febc2e; }
+.tl--green { background: #28c840; }
+.tl--red:hover { filter: brightness(1.12); }
+.tl--red:active { transform: scale(0.9); }
+
+/* ── Donor: one-time / monthly segmented toggle + confirm dialog ──────────── */
+.freq-toggle { display: flex; gap: 0.3rem; padding: 0.25rem; border-radius: var(--radius-button); background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border); margin-block-end: 0.7rem; }
+.freq-opt {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 0.3rem;
+  padding: 0.5rem; border: 0; border-radius: calc(var(--radius-button) - 0.2rem);
+  background: transparent; color: var(--color-ink-muted); font-weight: 600; font-size: 0.9rem;
+  transition: background-color var(--dur-micro) ease, color var(--dur-micro) ease;
+}
+.freq-opt.is-active { background: var(--color-primary); color: var(--color-on-primary); }
+.confirm-modal { width: min(26rem, 100%); text-align: center; align-items: center; }
+.confirm-actions { display: flex; gap: 0.6rem; margin-block-start: 0.9rem; width: 100%; }
+.confirm-actions .btn { flex: 1; justify-content: center; }
+
+/* ── Image field (URL + upload) ───────────────────────────────────────────── */
+.img-field { display: flex; gap: 0.4rem; align-items: stretch; }
+.img-field .input { flex: 1; min-width: 0; }
+.img-upload { flex-shrink: 0; white-space: nowrap; }

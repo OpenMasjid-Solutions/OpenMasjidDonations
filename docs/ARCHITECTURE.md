@@ -90,7 +90,9 @@ must not be renamed.
    donation recorded. ✅
 6. Cover-the-fees + Gift-Aid toggles. ✅ (Gift-Aid stores the opt-in; full
    declaration/address capture + optional email receipt are follow-ups.)
-7. Recurring (monthly) subscriptions (+ optional webhook path). ⏳
+7. Recurring (monthly) subscriptions (Customer + Subscription, first invoice confirmed
+   via Payment Element; ongoing months via an optional per-account `invoice.paid`
+   webhook at `/api/stripe/webhook/:accountId`). ✅
 8. Donations log + stats + CSV export, plus a **metrics dashboard** (totals, this
    month, average gift, per-appeal breakdown, 6-month trend). ✅
 9. Cloudflare Tunnel helper (bundled `cloudflared`, in-app token, supervised) for

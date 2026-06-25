@@ -6,20 +6,25 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { pipeline } from 'node:stream/promises';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyCookie from '@fastify/cookie';
+import fastifyMultipart from '@fastify/multipart';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify, RESERVED_SLUGS } from './store';
+import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, StripeAccount } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
 import { notify, platformUser } from './fabric';
 import { LoginLimiter } from './rateLimit';
 import { TunnelManager } from './tunnel';
 import {
+  constructWebhookEvent,
   createPaymentIntent,
+  createProduct,
+  createSubscription,
   currencyDecimals,
   looksLikePublishable,
   looksLikeSecret,
@@ -27,6 +32,7 @@ import {
   publicStripeStatus,
   retrievePaymentIntent,
   stripeConfigured,
+  stripeMode,
   toMajor,
   toMinor,
   verifySecretKey,
@@ -66,6 +72,24 @@ async function main(): Promise<void> {
     bodyLimit: 1_048_576, // 1 MiB JSON cap (uploads get their own limit later)
   });
   await app.register(fastifyCookie); // parses req.cookies + decorates reply.setCookie
+  // Multipart, only for image uploads (≤5 MiB, one file). Other routes keep JSON.
+  await app.register(fastifyMultipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 4 } });
+  // Keep the raw JSON body around so we can verify Stripe webhook signatures (Stripe
+  // signs the exact bytes). All other JSON routes still get the parsed object.
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    (req as unknown as { rawBody?: string }).rawBody = body as string;
+    if (!body) return done(null, undefined);
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (e) {
+      done(e as Error, undefined);
+    }
+  });
+
+  // Uploaded images live on the data volume and are served read-only at /uploads/*.
+  const uploadsDir = path.join(config.dataDir, 'uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  await app.register(fastifyStatic, { root: uploadsDir, prefix: '/uploads/', decorateReply: false, index: false });
 
   // A request is authenticated if it carries a valid local session cookie. That
   // cookie is minted by first-run setup, by password login, or by a confirmed
@@ -273,6 +297,33 @@ async function main(): Promise<void> {
     return { data: { ok: true } };
   });
 
+  // ── Image upload (campaign cover/background) — saved to the data volume ──────
+  // Raster images only (no SVG — it can carry scripts and we serve from same origin).
+  const IMG_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+  app.post('/api/admin/upload', { preHandler: requireAdmin }, async (req, reply) => {
+    const file = await req.file().catch(() => null);
+    if (!file) return reply.code(400).send({ error: 'No image was received.' });
+    const ext = IMG_EXT[file.mimetype];
+    if (!ext) {
+      file.file.resume(); // drain the stream we're rejecting
+      return reply.code(415).send({ error: 'Please choose a PNG, JPG, WEBP or GIF image.' });
+    }
+    const name = `${rid('img')}.${ext}`;
+    const dest = path.join(uploadsDir, name);
+    try {
+      await pipeline(file.file, fs.createWriteStream(dest));
+    } catch {
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+      return reply.code(500).send({ error: 'Couldn’t save that image. Please try again.' });
+    }
+    if (file.file.truncated) {
+      try { fs.unlinkSync(dest); } catch { /* ignore */ }
+      return reply.code(413).send({ error: 'That image is too large (max 5 MB).' });
+    }
+    try { fs.chmodSync(dest, 0o644); } catch { /* best-effort */ }
+    return { data: { url: `/uploads/${name}` } };
+  });
+
   // ── Cloudflare Tunnel (optional public access; token is a server-side secret) ─
   // Reduce a pasted value to a bare hostname (strip scheme, port, path); '' if invalid.
   const cleanHostname = (s: string): string => {
@@ -357,6 +408,7 @@ async function main(): Promise<void> {
     stripeAccountId: z.string().max(64).optional(),
     coverFees: z.boolean().optional(),
     giftAid: z.boolean().optional(),
+    allowMonthly: z.boolean().optional(),
     goalAmount: z.number().nonnegative().optional(), // major
     active: z.boolean().optional(),
   });
@@ -389,6 +441,7 @@ async function main(): Promise<void> {
       stripeAccountId: accountId,
       coverFees: p.coverFees,
       giftAid: p.giftAid,
+      allowMonthly: p.allowMonthly,
       active: p.active,
       ...campaignAmountsToMinor(p),
     });
@@ -417,6 +470,7 @@ async function main(): Promise<void> {
       stripeAccountId: p.stripeAccountId,
       coverFees: p.coverFees,
       giftAid: p.giftAid,
+      allowMonthly: p.allowMonthly,
       active: p.active,
       ...campaignAmountsToMinor(p),
     });
@@ -571,6 +625,7 @@ async function main(): Promise<void> {
       maxAmount: toMajorCur(c.maxAmount),
       coverFees: c.coverFees,
       giftAid: c.giftAid,
+      allowMonthly: c.allowMonthly,
       goalAmount: toMajorCur(c.goalAmount),
       raised: toMajorCur(store.raisedForCampaign(c.id)),
       currency: cur(),
@@ -598,6 +653,7 @@ async function main(): Promise<void> {
     amount: z.number().positive(), // major units
     coverFees: z.boolean().optional(),
     giftAid: z.boolean().optional(),
+    monthly: z.boolean().optional(),
     donorName: z.string().max(120).optional(),
     donorEmail: z.string().max(200).optional(),
   });
@@ -632,17 +688,42 @@ async function main(): Promise<void> {
     const coverFees = !!p.coverFees && c.coverFees;
     const chargeMinor = coverFees ? withCoveredFees(baseMinor, currency) : baseMinor;
     const giftAid = !!p.giftAid && c.giftAid;
-    let intent;
+    const monthly = !!p.monthly && c.allowMonthly;
+    const donorName = (p.donorName ?? '').slice(0, 120);
+    const donorEmail = (p.donorEmail ?? '').slice(0, 200);
+    // Monthly donations need an email — Stripe attaches the subscription to a customer.
+    if (monthly && !donorEmail.trim()) {
+      return reply.code(400).send({ error: 'Please add your email — it’s required for a monthly donation.' });
+    }
+    const metadata = {
+      app: 'donations', campaignId: c.id, campaign: c.title.slice(0, 120),
+      coverFees: String(coverFees), giftAid: String(giftAid), recurring: String(monthly),
+    };
+    const idempotencyKey = crypto.randomUUID();
+    let clientSecret = '';
+    let paymentIntentId = '';
+    let subscriptionId = '';
     try {
-      intent = await createPaymentIntent(
-        acct,
-        chargeMinor,
-        currency,
-        { app: 'donations', campaignId: c.id, campaign: c.title.slice(0, 120), coverFees: String(coverFees), giftAid: String(giftAid) },
-        crypto.randomUUID(),
-      );
+      if (monthly) {
+        // Resolve (and cache) a reusable Stripe Product for this account + key mode.
+        const mode = stripeMode(acct);
+        let productId = store.getStripeProduct(acct.id, mode);
+        if (!productId) {
+          productId = await createProduct(acct, `Donations — ${store.getMasjid().name || 'Masjid'}`);
+          store.setStripeProduct(acct.id, mode, productId);
+        }
+        const sub = await createSubscription(acct, chargeMinor, currency, donorEmail, donorName, productId, metadata, idempotencyKey);
+        clientSecret = sub.clientSecret;
+        paymentIntentId = sub.paymentIntentId;
+        subscriptionId = sub.subscriptionId;
+        if (!clientSecret || !paymentIntentId) throw new Error('subscription has no payment intent');
+      } else {
+        const intent = await createPaymentIntent(acct, chargeMinor, currency, metadata, idempotencyKey);
+        clientSecret = intent.clientSecret;
+        paymentIntentId = intent.id;
+      }
     } catch (e) {
-      log.warn('createPaymentIntent failed: ' + (e instanceof Error ? e.message : String(e)));
+      log.warn('payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createDonation({
@@ -651,14 +732,16 @@ async function main(): Promise<void> {
       amount: chargeMinor,
       currency,
       status: 'pending',
-      donorName: (p.donorName ?? '').slice(0, 120),
-      donorEmail: (p.donorEmail ?? '').slice(0, 200),
+      donorName,
+      donorEmail,
       coverFees,
       giftAid,
-      paymentIntentId: intent.id,
+      paymentIntentId,
+      recurring: monthly,
+      subscriptionId,
     });
     return {
-      data: { clientSecret: intent.clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency },
+      data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency, recurring: monthly },
     };
   };
   app.post('/api/public/campaign/:slug/intent', intentHandler);
@@ -698,8 +781,60 @@ async function main(): Promise<void> {
         currency: pi.currency,
         campaignTitle: c.title,
         donorName: updated?.donorName ?? '',
+        recurring: don.recurring,
       },
     };
+  });
+
+  // ── Stripe webhook (optional, per-account secret) ───────────────────────────
+  // Only needed when the app is publicly reachable. It records ongoing monthly
+  // charges (invoice.paid on renewal) and resiliently confirms one-time payments.
+  // The signature is verified with the account's own webhook secret.
+  app.post('/api/stripe/webhook/:accountId', async (req, reply) => {
+    const acct = store.getStripeAccount((req.params as { accountId: string }).accountId);
+    if (!acct || !acct.webhookSecret) return reply.code(400).send({ error: 'Webhook not configured.' });
+    const sig = req.headers['stripe-signature'];
+    const raw = (req as unknown as { rawBody?: string }).rawBody;
+    if (typeof sig !== 'string' || !raw) return reply.code(400).send({ error: 'Bad webhook request.' });
+    const event = constructWebhookEvent(acct.secretKey, raw, sig, acct.webhookSecret);
+    if (!event) return reply.code(400).send({ error: 'Signature verification failed.' });
+    try {
+      if (event.type === 'payment_intent.succeeded') {
+        const pi = event.data.object as { id: string };
+        const don = store.getDonationByPaymentIntent(pi.id);
+        if (don && don.status !== 'succeeded') store.markDonation(pi.id, 'succeeded');
+      } else if (event.type === 'invoice.paid' || event.type === 'invoice.payment_succeeded') {
+        const inv = event.data.object as { billing_reason?: string; subscription?: string; payment_intent?: string; amount_paid?: number; currency?: string };
+        // Only renewals here — the FIRST invoice is recorded via the donor's confirm flow.
+        if (inv.billing_reason === 'subscription_cycle' && inv.subscription) {
+          const original = store.getDonationBySubscription(inv.subscription);
+          const piId = typeof inv.payment_intent === 'string' ? inv.payment_intent : '';
+          if (original && piId && !store.getDonationByPaymentIntent(piId)) {
+            const ccy = (inv.currency ?? original.currency).toUpperCase();
+            const amt = inv.amount_paid ?? original.amount;
+            store.createDonation({
+              campaignId: original.campaignId,
+              stripeAccountId: original.stripeAccountId,
+              amount: amt,
+              currency: ccy,
+              status: 'succeeded',
+              donorName: original.donorName,
+              donorEmail: original.donorEmail,
+              coverFees: original.coverFees,
+              giftAid: original.giftAid,
+              paymentIntentId: piId,
+              recurring: true,
+              subscriptionId: inv.subscription,
+            });
+            const camp = store.getCampaign(original.campaignId);
+            void notify({ title: 'Recurring donation', text: `A monthly donation of ${formatMoney(amt, ccy)} to “${camp?.title ?? 'your masjid'}” was received.`, level: 'success' });
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('webhook handling error: ' + (e instanceof Error ? e.message : String(e)));
+    }
+    return { received: true };
   });
 
   // ── Static web app (built by Vite into ./public) ────────────────────────────

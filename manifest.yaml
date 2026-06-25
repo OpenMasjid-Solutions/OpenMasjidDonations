@@ -2,7 +2,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.8.0
+version: 0.9.0
 author: hasan-ismail
 license: AGPL-3.0
 icon: icon.svg

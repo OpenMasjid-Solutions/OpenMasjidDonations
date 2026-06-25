@@ -10,22 +10,23 @@ appeals, amounts, theme, Stripe keys, and a donations log — from a polished,
 login-protected panel. It runs as **one container** on a cheap mini-PC or a
 Raspberry Pi, on your masjid's own network.
 
-> **Status:** early development (v0.8.0). Working: OpenMasjidOS single sign-on (with a
+> **Status:** early development (v0.9.0). Working: OpenMasjidOS single sign-on (with a
 > local admin-password fallback), the notifications relay, a guided first-run setup, a
 > tabbed admin with a bottom **dock** (Overview · Campaigns · Donations · Payments ·
-> Settings) like the rest of the family, a **metrics dashboard** (totals, this month,
-> average gift, a per-appeal breakdown and a 6-month trend), **multiple Stripe accounts**
-> (e.g. separate Zakat vs general funds), **campaigns** — each with **a clean link you
-> choose** (e.g. `/zakat`), a **live preview** while you edit (plus a thumbnail in the
-> list), preset + custom amounts, optional goal/cover-fees, and **its own background
-> image** (text colour adapts to the image for readability) — a **shareable link with a
-> QR code** that uses your Cloudflare domain when public access is on, the **public
-> donation page** with Stripe's Payment Element (one-time card payments, confirmed by
-> server-side retrieve), a **detailed donations log** (each transaction has a unique ID
-> you can open to see full details — card, contact, status — and that donor's other
-> gifts) with **CSV export**, and an optional **Cloudflare Tunnel** for public access
-> (paste a tunnel token + your public domain — secure HTTPS, no port-forwarding). Still
-> to come: recurring (monthly) donations (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)).
+> Settings) like the rest of the family, a **dashboard of metric widgets** (totals, this
+> month, average gift, a per-appeal breakdown and a 6-month trend), **multiple Stripe
+> accounts** (e.g. separate Zakat vs general funds), **campaigns** — each with **a clean
+> link you choose** (e.g. `/zakat`), a **live preview** while you edit (plus a list
+> thumbnail), preset + custom amounts, **one-time *or* monthly** giving, optional
+> goal/cover-fees, and **its own background image** (upload or link; text colour adapts
+> for readability) — a **shareable link with a QR code** that uses your Cloudflare domain
+> when public access is on, the **public donation page** with Stripe's Payment Element
+> (**one-time and monthly** card payments via Subscriptions, confirmed by server-side
+> retrieve, with an optional per-account webhook for ongoing months), a **full-page
+> donations ledger** (each transaction has a unique ID — click it for a window with full
+> details and that donor's other gifts) with **CSV export**, and an optional **Cloudflare
+> Tunnel** for public access (paste a tunnel token + your public domain — secure HTTPS,
+> no port-forwarding). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 

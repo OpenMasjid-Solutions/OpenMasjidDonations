@@ -1,18 +1,18 @@
 /** The login-protected admin area: first-run setup, then manage Stripe accounts,
  *  campaigns (donation pages), and the donations log. Stripe SECRET keys are sent to
  *  the server and never returned to the browser. */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, HandCoins,
   KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw,
-  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Wallet, X,
+  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet,
 } from 'lucide-react';
 import {
   checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations,
   getMetrics, getSession, getSettings, getTunnel, listCampaigns, login, logout, money, saveMasjid, saveTunnel,
-  sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign,
+  sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
   type AccountInput, type AppInfo, type Campaign, type CampaignInput, type Donation, type DonationsResult,
   type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type TunnelStatus, type VerifyResult,
 } from './api';
@@ -201,7 +201,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
 
   return (
     <>
-      <main className="admin">
+      <main className={`admin${tab === 'donations' ? ' admin--wide' : ''}`}>
         <div className="page-head">
           <h1 className="page-title">{meta[tab].title}</h1>
           <p className="page-sub">{meta[tab].sub}</p>
@@ -267,18 +267,10 @@ function MetricsDashboard() {
     reduce ? {} : { initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 }, transition: { delay: 0.05 * i, duration: 0.4, ease: 'easeOut' as const } };
 
   return (
-    <section className="glass panel metrics">
-      <div className="card-head">
-        <TrendingUp size={18} className="panel-ico" aria-hidden="true" />
-        <div className="card-head__main">
-          <h2 className="section-title-inline">Overview</h2>
-          <p className="muted">{hasMoney ? 'How your appeals are doing.' : 'Your totals will appear here as donations come in.'}</p>
-        </div>
-      </div>
-
+    <section className="metrics">
       <div className="stat-grid">
         {tiles.map((t, i) => (
-          <motion.div key={t.label} className={`stat-tile${t.accent ? ' stat-tile--accent' : ''}`} {...rise(i)}>
+          <motion.div key={t.label} className={`glass stat-widget${t.accent ? ' stat-widget--accent' : ''}`} {...rise(i)}>
             <span className="stat-tile__icon" aria-hidden="true">{t.icon}</span>
             <span className="stat-tile__label">{t.label}</span>
             <span className="stat-tile__value">{t.value}</span>
@@ -359,6 +351,12 @@ function ModeBadge({ a }: { a: StripeAccount }) {
 function StripeAccountsCard({ accounts, onChanged }: { accounts: StripeAccount[]; onChanged: () => void }) {
   const [adding, setAdding] = useState(false);
   const [editId, setEditId] = useState('');
+  const [webhookBase, setWebhookBase] = useState('');
+  useEffect(() => {
+    getTunnel()
+      .then((t) => setWebhookBase(t.enabled && t.publicHostname ? `https://${t.publicHostname}` : originBase()))
+      .catch(() => setWebhookBase(originBase()));
+  }, []);
   return (
     <section className="glass panel">
       <div className="card-head">
@@ -384,13 +382,13 @@ function StripeAccountsCard({ accounts, onChanged }: { accounts: StripeAccount[]
               </div>
               <button className="icon-btn" title="Edit" onClick={() => setEditId(editId === a.id ? '' : a.id)}><Pencil size={15} /></button>
             </div>
-            {editId === a.id && <AccountForm account={a} onDone={() => { setEditId(''); onChanged(); }} />}
+            {editId === a.id && <AccountForm account={a} webhookBase={webhookBase} onDone={() => { setEditId(''); onChanged(); }} />}
           </div>
         ))}
         {accounts.length === 0 && <p className="muted" style={{ padding: '0.5rem 0' }}>No Stripe accounts yet.</p>}
       </div>
       {adding ? (
-        <AccountForm onDone={() => { setAdding(false); onChanged(); }} />
+        <AccountForm webhookBase={webhookBase} onDone={() => { setAdding(false); onChanged(); }} />
       ) : (
         <button className="btn btn--ghost btn--sm" onClick={() => setAdding(true)}><Plus size={15} /> Add Stripe account</button>
       )}
@@ -398,16 +396,20 @@ function StripeAccountsCard({ accounts, onChanged }: { accounts: StripeAccount[]
   );
 }
 
-function AccountForm({ account, onDone }: { account?: StripeAccount; onDone: () => void }) {
+function AccountForm({ account, webhookBase, onDone }: { account?: StripeAccount; webhookBase?: string; onDone: () => void }) {
   const editing = !!account;
   const [label, setLabel] = useState(account?.label ?? '');
   const [pk, setPk] = useState(account?.publishableKey ?? '');
   const [sk, setSk] = useState('');
   const [showSk, setShowSk] = useState(false);
+  const [whsec, setWhsec] = useState('');
+  const [showWh, setShowWh] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [del, setDel] = useState(false);
   const [error, setError] = useState('');
   const [verify, setVerify] = useState<VerifyResult | null>(null);
+  const webhookUrl = account ? `${webhookBase || originBase()}/api/stripe/webhook/${account.id}` : '';
 
   const save = async () => {
     setBusy(true); setError(''); setVerify(null);
@@ -415,6 +417,7 @@ function AccountForm({ account, onDone }: { account?: StripeAccount; onDone: () 
       const body: AccountInput = { label: label.trim() || 'Stripe account' };
       if (!editing || pk !== account?.publishableKey) body.publishableKey = pk.trim();
       if (sk.trim()) body.secretKey = sk.trim();
+      if (whsec.trim()) body.webhookSecret = whsec.trim();
       const res = editing ? await updateAccount(account!.id, body) : await createAccount(body);
       if (res.verify) setVerify(res.verify);
       if (!res.verify || res.verify.ok) { onDone(); return; }
@@ -442,6 +445,27 @@ function AccountForm({ account, onDone }: { account?: StripeAccount; onDone: () 
           <button type="button" className="affix-btn" onClick={() => setShowSk((s) => !s)} aria-label={showSk ? 'Hide' : 'Show'}>{showSk ? <EyeOff size={16} /> : <Eye size={16} />}</button>
         </div>
       </Field>
+      {editing && (
+        <details className="steps-details">
+          <summary>Recurring webhook (optional)</summary>
+          <p className="hint" style={{ marginBlock: '0.3rem 0.5rem' }}>
+            Only needed to log ongoing monthly charges, and only when public access is on. In Stripe, add a webhook to the
+            URL below (events <code>invoice.paid</code>), then paste its signing secret here.
+          </p>
+          <Field id="awhurl" label="Webhook URL — paste into Stripe">
+            <div className="input-affix">
+              <input id="awhurl" className="input mono" readOnly value={webhookUrl} onFocus={(e) => e.currentTarget.select()} />
+              <button type="button" className="affix-btn" aria-label="Copy" onClick={async () => { try { await navigator.clipboard.writeText(webhookUrl); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ } }}>{copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}</button>
+            </div>
+          </Field>
+          <Field id="awh" label={account?.hasWebhookSecret ? 'Signing secret (whsec_…) — saved; blank keeps it' : 'Signing secret (whsec_…)'}>
+            <div className="input-affix">
+              <input id="awh" className="input mono" type={showWh ? 'text' : 'password'} value={whsec} onChange={(e) => setWhsec(e.target.value)} placeholder={account?.hasWebhookSecret ? '•••••••• (unchanged)' : 'whsec_…'} autoComplete="off" spellCheck={false} />
+              <button type="button" className="affix-btn" onClick={() => setShowWh((s) => !s)} aria-label={showWh ? 'Hide' : 'Show'}>{showWh ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+            </div>
+          </Field>
+        </details>
+      )}
       {error && <p className="form-error" role="alert">{error}</p>}
       {verify && <p className={verify.ok ? 'hint' : 'form-error'} role="status">{verify.ok ? `Stripe accepted your key${verify.mode ? ` (${verify.mode} mode)` : ''}. ✓` : verify.message}</p>}
       <div className="row-between" style={{ marginBlockStart: '0.4rem' }}>
@@ -553,6 +577,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, shareBase, onD
   const [minAmount, setMinAmount] = useState(String(campaign?.minAmount ?? 1));
   const [stripeAccountId, setStripeAccountId] = useState(campaign?.stripeAccountId ?? accounts[0]?.id ?? '');
   const [coverFees, setCoverFees] = useState(campaign?.coverFees ?? false);
+  const [allowMonthly, setAllowMonthly] = useState(campaign?.allowMonthly ?? false);
   const [goalAmount, setGoalAmount] = useState(String(campaign?.goalAmount ?? 0));
   const [active, setActive] = useState(campaign?.active ?? true);
   const [busy, setBusy] = useState(false);
@@ -584,6 +609,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, shareBase, onD
       minAmount: Number(minAmount) || 0,
       stripeAccountId,
       coverFees,
+      allowMonthly,
       goalAmount: Number(goalAmount) || 0,
       active,
     };
@@ -622,11 +648,8 @@ function CampaignForm({ campaign, accounts, currency, masjidName, shareBase, onD
       </Field>
       {shareUrl && <ShareLink url={shareUrl} isPublic={!!shareBase && /^https:/.test(shareBase)} />}
       <Field id="cd" label="Description (optional)"><textarea id="cd" className="input" rows={3} value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
-      <Field id="cimg" label="Cover image URL (optional)"><input id="cimg" className="input" value={coverImage} onChange={(e) => setCoverImage(e.target.value)} placeholder="https://  — shown inside the page" /></Field>
-      <Field id="cbg" label="Background image URL (optional)">
-        <input id="cbg" className="input" value={backgroundImage} onChange={(e) => setBackgroundImage(e.target.value)} placeholder="https://  — leave empty for the default look" />
-        <span className="hint">This page's full background. Leave empty to use the default theme (it won't use the dashboard wallpaper).</span>
-      </Field>
+      <ImageField id="cimg" label="Cover image (optional)" hint="Shown inside the page." value={coverImage} onChange={setCoverImage} />
+      <ImageField id="cbg" label="Background image (optional)" hint="This page's full background. Leave empty for the default look (it won't use the dashboard wallpaper)." value={backgroundImage} onChange={setBackgroundImage} />
       <Field id="cp" label={`Suggested amounts (${currency}, comma-separated)`}><input id="cp" className="input" value={presets} onChange={(e) => setPresets(e.target.value)} placeholder="10, 25, 50, 100" /></Field>
       <div className="grid2">
         <Field id="cmin" label={`Minimum custom amount (${currency})`}><input id="cmin" className="input" type="number" min="0" step="0.01" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} /></Field>
@@ -639,6 +662,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, shareBase, onD
       </Field>
       <label className="check-row"><input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} /><span>Allow donors to enter their own amount</span></label>
       <label className="check-row"><input type="checkbox" checked={coverFees} onChange={(e) => setCoverFees(e.target.checked)} /><span>Offer donors the option to cover card fees</span></label>
+      <label className="check-row"><input type="checkbox" checked={allowMonthly} onChange={(e) => setAllowMonthly(e.target.checked)} /><span>Offer a monthly (recurring) option</span></label>
       <label className="check-row"><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /><span>Live (visible to donors)</span></label>
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="row-between" style={{ marginBlockStart: '0.4rem' }}>
@@ -672,7 +696,7 @@ function DonationsCard() {
   const [sel, setSel] = useState<Donation | null>(null);
   useEffect(() => { getDonations().then(setData).catch(() => setData(null)); }, []);
   return (
-    <section className="glass panel">
+    <section className="don-page">
       <div className="card-head">
         <ReceiptText size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
@@ -702,7 +726,7 @@ function DonationsCard() {
                   <td>{d.donorEmail ? <span className="don-contact">{d.donorEmail}</span> : <span className="faint">—</span>}</td>
                   <td>{d.donorName ? <button className="don-id" onClick={() => setSel(d)}>{d.donorName}</button> : <span className="faint">—</span>}</td>
                   <td>{money(d.amount, d.currency)}</td>
-                  <td><span className="don-type">Stripe<span className="faint"> · One-time · Web</span></span></td>
+                  <td><span className="don-type">Stripe<span className="faint"> · {d.recurring ? 'Monthly' : 'One-time'} · Web</span></span></td>
                   <td>{cardLabel(d) || <span className="faint">—</span>}</td>
                   <td><span className={`don-status don-status--${d.status}`}>{d.status}</span></td>
                 </tr>
@@ -743,20 +767,24 @@ function DonationDetail({ donation, all, onClose, onPick }: {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal glass-raised" role="dialog" aria-modal="true" aria-label={`Transaction ${donation.ref}`} onClick={(e) => e.stopPropagation()}>
+      <div className="modal glass-raised win" role="dialog" aria-modal="true" aria-label={`Transaction ${donation.ref}`} onClick={(e) => e.stopPropagation()}>
+        <div className="tl-bar">
+          <button className="tl tl--red" onClick={onClose} aria-label="Close" title="Close" />
+          <span className="tl tl--amber" aria-hidden="true" />
+          <span className="tl tl--green" aria-hidden="true" />
+        </div>
         <div className="modal-head">
           <div>
             <h3 className="modal-title">Transaction {donation.ref}</h3>
             <p className="muted" style={{ fontSize: '0.85rem' }}>{fmtDateTime(donation.createdAt)}</p>
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
         </div>
 
         <div className="detail-grid">
           <DetailRow label="Amount" value={money(donation.amount, donation.currency)} />
           <DetailRow label="Status" value={<span className={`don-status don-status--${donation.status}`}>{donation.status}</span>} />
           <DetailRow label="Campaign" value={donation.campaignTitle} />
-          <DetailRow label="Type" value="Stripe · One-time · Web" />
+          <DetailRow label="Type" value={`Stripe · ${donation.recurring ? 'Monthly' : 'One-time'} · Web`} />
           <DetailRow label="Card" value={cardLabel(donation) || '—'} />
           <DetailRow label="Covered fees" value={donation.coverFees ? 'Yes' : 'No'} />
           <DetailRow label="Donor" value={donation.donorName || '—'} />
@@ -914,7 +942,37 @@ function linkHost(): string {
 /** Accept only safe image URLs for a CSS url() / <img>, else ''. Mirrors the donor page. */
 function safeImg(v: string): string {
   const s = (v ?? '').trim();
+  if (/^\/uploads\/[\w.-]+$/.test(s)) return s; // same-origin uploaded image
   return /^(https?:\/\/|data:image\/)/i.test(s) && !/["\\\s]/.test(s) ? s : '';
+}
+
+/** An image input that accepts a URL OR an uploaded file (stored on the data volume). */
+function ImageField({ id, label, hint, value, onChange }: {
+  id: string; label: string; hint?: string; value: string; onChange: (v: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file
+    if (!f) return;
+    setBusy(true); setErr('');
+    try { onChange(await uploadImage(f)); } catch (x) { setErr(msg(x)); } finally { setBusy(false); }
+  };
+  return (
+    <div className="field">
+      <label className="label" htmlFor={id}>{label}</label>
+      <div className="img-field">
+        <input id={id} className="input" value={value} onChange={(e) => onChange(e.target.value)} placeholder="https://  — or upload a file" />
+        <button type="button" className="btn btn--ghost btn--sm img-upload" onClick={() => inputRef.current?.click()} disabled={busy}>
+          {busy ? <span className="spinner" /> : <Upload size={14} />} Upload
+        </button>
+        <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={onFile} />
+      </div>
+      {err ? <span className="form-error" style={{ margin: 0 }}>{err}</span> : hint ? <span className="hint">{hint}</span> : null}
+    </div>
+  );
 }
 
 interface PreviewData {

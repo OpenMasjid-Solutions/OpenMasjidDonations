@@ -112,6 +112,7 @@ export interface Campaign {
   stripeAccountId: string;
   coverFees: boolean;
   giftAid: boolean;
+  allowMonthly: boolean;
   goalAmount: number;
   active: boolean;
   sortOrder: number;
@@ -138,6 +139,7 @@ export interface Donation {
   paymentIntentId: string;
   cardBrand: string;
   cardLast4: string;
+  recurring: boolean;
   createdAt: string;
 }
 export interface DonationsResult {
@@ -204,6 +206,17 @@ export const updateCampaign = (id: string, body: CampaignInput) =>
 export const deleteCampaign = (id: string) =>
   request<{ ok: true }>(`/api/admin/campaigns/${id}`, { method: 'DELETE' });
 
+// ── Image upload (admin) ────────────────────────────────────────────────────
+/** Upload an image file; returns its served URL (e.g. /uploads/img_…png). */
+export async function uploadImage(file: File): Promise<string> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch('/api/admin/upload', { method: 'POST', body: form });
+  const body = (await res.json().catch(() => ({}))) as { data?: { url: string }; error?: string };
+  if (!res.ok || body.error || !body.data) throw new Error(body.error || 'Upload failed.');
+  return body.data.url;
+}
+
 // ── Donations + metrics (admin) ─────────────────────────────────────────────
 export const getDonations = () => request<DonationsResult>('/api/admin/donations');
 export const getMetrics = () => request<Metrics>('/api/admin/metrics');
@@ -225,6 +238,7 @@ export interface PublicCampaign {
   maxAmount: number;
   coverFees: boolean;
   giftAid: boolean;
+  allowMonthly: boolean;
   goalAmount: number;
   raised: number;
   currency: string;
@@ -237,6 +251,7 @@ export interface IntentResponse {
   publishableKey: string;
   amount: number;
   currency: string;
+  recurring: boolean;
 }
 export interface ConfirmResponse {
   status: string;
@@ -245,6 +260,7 @@ export interface ConfirmResponse {
   currency: string;
   campaignTitle: string;
   donorName: string;
+  recurring: boolean;
 }
 /** Build the public campaign API path. New links use the clean /<slug>; an optional
  *  `token` (only present on legacy /c/<slug>-<token> links) is appended for the
@@ -256,7 +272,7 @@ export const getPublicCampaign = (slug: string, token?: string) =>
   request<PublicCampaign>(campaignPath(slug, token));
 export const createIntent = (
   slug: string,
-  body: { amount: number; coverFees?: boolean; giftAid?: boolean; donorName?: string; donorEmail?: string },
+  body: { amount: number; coverFees?: boolean; giftAid?: boolean; monthly?: boolean; donorName?: string; donorEmail?: string },
   token?: string,
 ) =>
   request<IntentResponse>(`${campaignPath(slug, token)}/intent`, {

@@ -74,6 +74,8 @@ export interface Campaign {
   stripeAccountId: string;
   coverFees: boolean;
   giftAid: boolean;
+  /** Offer donors a monthly (recurring) option in addition to one-time. */
+  allowMonthly: boolean;
   /** Goal in minor units, 0 = no goal/progress bar. */
   goalAmount: number;
   active: boolean;
@@ -97,6 +99,9 @@ export interface Donation {
   /** Card brand + last 4, captured from Stripe on confirm (when paid by card). */
   cardBrand: string;
   cardLast4: string;
+  /** True for monthly (subscription) donations; subscriptionId is the Stripe sub. */
+  recurring: boolean;
+  subscriptionId: string;
   createdAt: string;
 }
 
@@ -174,6 +179,7 @@ export class Store {
         stripe_account_id TEXT NOT NULL,
         cover_fees INTEGER NOT NULL DEFAULT 0,
         gift_aid INTEGER NOT NULL DEFAULT 0,
+        allow_monthly INTEGER NOT NULL DEFAULT 0,
         goal_amount INTEGER NOT NULL DEFAULT 0,
         active INTEGER NOT NULL DEFAULT 1,
         sort_order INTEGER NOT NULL DEFAULT 0,
@@ -195,6 +201,8 @@ export class Store {
         payment_intent_id TEXT NOT NULL DEFAULT '',
         card_brand TEXT NOT NULL DEFAULT '',
         card_last4 TEXT NOT NULL DEFAULT '',
+        recurring INTEGER NOT NULL DEFAULT 0,
+        subscription_id TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_donations_campaign ON donations(campaign_id);
@@ -208,8 +216,11 @@ export class Store {
     }
     // Add columns introduced after first release (CREATE TABLE IF NOT EXISTS won't).
     this.ensureColumn('campaigns', 'background_image', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('campaigns', 'allow_monthly', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('donations', 'card_brand', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'card_last4', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('donations', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('donations', 'subscription_id', "TEXT NOT NULL DEFAULT ''");
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
@@ -324,6 +335,14 @@ export class Store {
     };
     this.setRaw('stripe', JSON.stringify(merged));
     return merged;
+  }
+
+  /** Cached Stripe Product id per account + mode (test/live), for recurring prices. */
+  getStripeProduct(accountId: string, mode: string): string | null {
+    return this.getRaw(`stripe_product:${accountId}:${mode}`);
+  }
+  setStripeProduct(accountId: string, mode: string, id: string): void {
+    this.setRaw(`stripe_product:${accountId}:${mode}`, id);
   }
 
   isOnboarded(): boolean {
@@ -488,6 +507,7 @@ export class Store {
       stripeAccountId: String(r.stripe_account_id),
       coverFees: !!r.cover_fees,
       giftAid: !!r.gift_aid,
+      allowMonthly: !!r.allow_monthly,
       goalAmount: Number(r.goal_amount),
       active: !!r.active,
       sortOrder: Number(r.sort_order),
@@ -500,16 +520,16 @@ export class Store {
       .prepare(
         `INSERT INTO campaigns
           (id, slug, token, title, description, cover_image, background_image, preset_amounts, allow_custom, min_amount,
-           max_amount, stripe_account_id, cover_fees, gift_aid, goal_amount, active, sort_order, created_at)
+           max_amount, stripe_account_id, cover_fees, gift_aid, allow_monthly, goal_amount, active, sort_order, created_at)
          VALUES
           (@id, @slug, @token, @title, @description, @coverImage, @backgroundImage, @presetAmounts, @allowCustom, @minAmount,
-           @maxAmount, @stripeAccountId, @coverFees, @giftAid, @goalAmount, @active, @sortOrder, @createdAt)
+           @maxAmount, @stripeAccountId, @coverFees, @giftAid, @allowMonthly, @goalAmount, @active, @sortOrder, @createdAt)
          ON CONFLICT(id) DO UPDATE SET
            slug=excluded.slug, title=excluded.title, description=excluded.description, cover_image=excluded.cover_image,
            background_image=excluded.background_image, preset_amounts=excluded.preset_amounts, allow_custom=excluded.allow_custom,
            min_amount=excluded.min_amount, max_amount=excluded.max_amount, stripe_account_id=excluded.stripe_account_id,
-           cover_fees=excluded.cover_fees, gift_aid=excluded.gift_aid, goal_amount=excluded.goal_amount, active=excluded.active,
-           sort_order=excluded.sort_order`,
+           cover_fees=excluded.cover_fees, gift_aid=excluded.gift_aid, allow_monthly=excluded.allow_monthly,
+           goal_amount=excluded.goal_amount, active=excluded.active, sort_order=excluded.sort_order`,
       )
       .run({
         ...c,
@@ -517,6 +537,7 @@ export class Store {
         allowCustom: c.allowCustom ? 1 : 0,
         coverFees: c.coverFees ? 1 : 0,
         giftAid: c.giftAid ? 1 : 0,
+        allowMonthly: c.allowMonthly ? 1 : 0,
         active: c.active ? 1 : 0,
       });
   }
@@ -563,6 +584,7 @@ export class Store {
       stripeAccountId: input.stripeAccountId,
       coverFees: input.coverFees ?? false,
       giftAid: input.giftAid ?? false,
+      allowMonthly: input.allowMonthly ?? false,
       goalAmount: input.goalAmount ?? 0,
       active: input.active ?? true,
       sortOrder: maxSort + 1,
@@ -601,26 +623,53 @@ export class Store {
       paymentIntentId: String(r.payment_intent_id),
       cardBrand: String(r.card_brand ?? ''),
       cardLast4: String(r.card_last4 ?? ''),
+      recurring: !!r.recurring,
+      subscriptionId: String(r.subscription_id ?? ''),
       createdAt: String(r.created_at),
     };
   }
 
-  createDonation(input: Omit<Donation, 'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4'> & { status?: Donation['status'] }): Donation {
+  createDonation(
+    input: Omit<Donation, 'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4' | 'recurring' | 'subscriptionId'> & {
+      status?: Donation['status'];
+      recurring?: boolean;
+      subscriptionId?: string;
+    },
+  ): Donation {
     // Card details are unknown until the payment confirms — start blank, filled in by markDonation.
-    const d: Donation = { id: rid('don'), status: input.status ?? 'pending', cardBrand: '', cardLast4: '', createdAt: new Date().toISOString(), ...input };
+    const d: Donation = {
+      id: rid('don'),
+      status: input.status ?? 'pending',
+      cardBrand: '',
+      cardLast4: '',
+      recurring: input.recurring ?? false,
+      subscriptionId: input.subscriptionId ?? '',
+      createdAt: new Date().toISOString(),
+      ...input,
+    };
     this.db
       .prepare(
         `INSERT INTO donations
-          (id, campaign_id, stripe_account_id, amount, currency, status, donor_name, donor_email, cover_fees, gift_aid, payment_intent_id, created_at)
+          (id, campaign_id, stripe_account_id, amount, currency, status, donor_name, donor_email, cover_fees, gift_aid,
+           payment_intent_id, recurring, subscription_id, created_at)
          VALUES
-          (@id, @campaignId, @stripeAccountId, @amount, @currency, @status, @donorName, @donorEmail, @coverFees, @giftAid, @paymentIntentId, @createdAt)`,
+          (@id, @campaignId, @stripeAccountId, @amount, @currency, @status, @donorName, @donorEmail, @coverFees, @giftAid,
+           @paymentIntentId, @recurring, @subscriptionId, @createdAt)`,
       )
-      .run({ ...d, coverFees: d.coverFees ? 1 : 0, giftAid: d.giftAid ? 1 : 0 });
+      .run({ ...d, coverFees: d.coverFees ? 1 : 0, giftAid: d.giftAid ? 1 : 0, recurring: d.recurring ? 1 : 0 });
     return d;
   }
 
   getDonationByPaymentIntent(pi: string): Donation | null {
     const r = this.db.prepare('SELECT * FROM donations WHERE payment_intent_id = ?').get(pi) as Record<string, unknown> | undefined;
+    return r ? this.rowToDonation(r) : null;
+  }
+
+  /** The original donation for a subscription (used to attribute renewal charges). */
+  getDonationBySubscription(subscriptionId: string): Donation | null {
+    const r = this.db.prepare('SELECT * FROM donations WHERE subscription_id = ? ORDER BY created_at LIMIT 1').get(subscriptionId) as
+      | Record<string, unknown>
+      | undefined;
     return r ? this.rowToDonation(r) : null;
   }
 

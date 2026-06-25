@@ -1,7 +1,7 @@
 {
   "name": "openmasjid-donations-server",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "API + Stripe + storage + static web host for OpenMasjid Donations",
   "license": "AGPL-3.0",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
+    "@fastify/multipart": "^9.4.0",
     "@fastify/static": "^8.0.4",
     "better-sqlite3": "^12.2.0",
     "fastify": "^5.2.1",

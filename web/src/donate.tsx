@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadStripe, type Stripe } from '@stripe/stripe-js';
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
-import { HandCoins, HeartHandshake, Lock, ShieldCheck } from 'lucide-react';
+import { HandCoins, HeartHandshake, Lock, Repeat, ShieldCheck } from 'lucide-react';
 import {
   confirmDonation,
   createIntent,
@@ -20,6 +20,7 @@ import { useReadableTheme } from './prefs';
  *  http(s)/data:image; reject quotes, backslashes and whitespace), else ''. */
 function bgUrl(image?: string): string {
   const v = (image ?? '').trim();
+  if (/^\/uploads\/[\w.-]+$/.test(v)) return v; // same-origin uploaded image
   return /^(https?:\/\/|data:image\/)/i.test(v) && !/["\\\s]/.test(v) ? v : '';
 }
 
@@ -118,29 +119,37 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
   const [amount, setAmount] = useState<number>(presets[0] ?? 10);
   const [customMode, setCustomMode] = useState(false);
   const [custom, setCustom] = useState('');
+  const [frequency, setFrequency] = useState<'once' | 'monthly'>('once');
   const [coverFees, setCoverFees] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [confirmMonthly, setConfirmMonthly] = useState(false);
 
+  const monthly = frequency === 'monthly' && campaign.allowMonthly;
   const effective = customMode ? Number(custom) : amount;
   const fmt = (n: number) => money(n, campaign.currency);
+  const amountLabel = (n: number) => `${fmt(n)}${monthly ? ' / month' : ''}`;
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    if (!campaign.ready) return setError('Donations aren’t set up for this page yet.');
-    if (!Number.isFinite(effective) || effective <= 0) return setError('Please enter an amount.');
-    if (campaign.allowCustom && campaign.minAmount && effective < campaign.minAmount)
-      return setError(`The minimum is ${fmt(campaign.minAmount)}.`);
-    if (campaign.allowCustom && campaign.maxAmount && effective > campaign.maxAmount)
-      return setError(`The maximum is ${fmt(campaign.maxAmount)}.`);
+  const validate = (): string => {
+    if (!campaign.ready) return 'Donations aren’t set up for this page yet.';
+    if (!Number.isFinite(effective) || effective <= 0) return 'Please enter an amount.';
+    if (campaign.allowCustom && campaign.minAmount && effective < campaign.minAmount) return `The minimum is ${fmt(campaign.minAmount)}.`;
+    if (campaign.allowCustom && campaign.maxAmount && effective > campaign.maxAmount) return `The maximum is ${fmt(campaign.maxAmount)}.`;
+    if (monthly && !email.trim()) return 'Please add your email — it’s required for a monthly donation.';
+    return '';
+  };
+
+  const runIntent = async () => {
+    setConfirmMonthly(false);
     setBusy(true);
+    setError('');
     try {
       const i = await createIntent(campaign.slug, {
         amount: effective,
         coverFees: coverFees && campaign.coverFees,
+        monthly,
         donorName: name.trim() || undefined,
         donorEmail: email.trim() || undefined,
       });
@@ -149,6 +158,16 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
       setError(err instanceof Error ? err.message : 'Something went wrong.');
       setBusy(false);
     }
+  };
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const err = validate();
+    if (err) return setError(err);
+    setError('');
+    // Remind the donor before committing to a recurring charge.
+    if (monthly) setConfirmMonthly(true);
+    else void runIntent();
   };
 
   const pct = campaign.goalAmount > 0 ? Math.min(100, Math.round((campaign.raised / campaign.goalAmount) * 100)) : 0;
@@ -169,6 +188,13 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
       )}
 
       <form onSubmit={submit}>
+        {campaign.allowMonthly && (
+          <div className="freq-toggle" role="group" aria-label="How often to give">
+            <button type="button" className={`freq-opt${!monthly ? ' is-active' : ''}`} onClick={() => setFrequency('once')}>One-time</button>
+            <button type="button" className={`freq-opt${monthly ? ' is-active' : ''}`} onClick={() => setFrequency('monthly')}><Repeat size={13} /> Monthly</button>
+          </div>
+        )}
+
         <div className="amount-grid">
           {presets.map((p) => (
             <button
@@ -200,8 +226,8 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
             <input id="dn" className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
           </div>
           <div className="field">
-            <label className="label" htmlFor="de">Email for a receipt (optional)</label>
-            <input id="de" className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+            <label className="label" htmlFor="de">{monthly ? 'Email (required for monthly)' : 'Email for a receipt (optional)'}</label>
+            <input id="de" className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required={monthly} />
           </div>
         </div>
 
@@ -214,10 +240,27 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
 
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={busy || !campaign.ready}>
-          {busy ? <span className="spinner" /> : <HeartHandshake size={18} />}
-          {Number.isFinite(effective) && effective > 0 ? ` Donate ${fmt(effective)}` : ' Donate'}
+          {busy ? <span className="spinner" /> : monthly ? <Repeat size={18} /> : <HeartHandshake size={18} />}
+          {Number.isFinite(effective) && effective > 0 ? ` Donate ${amountLabel(effective)}` : ' Donate'}
         </button>
       </form>
+
+      {confirmMonthly && (
+        <div className="modal-backdrop" onClick={() => setConfirmMonthly(false)}>
+          <div className="modal glass-raised confirm-modal" role="dialog" aria-modal="true" aria-label="Confirm monthly donation" onClick={(e) => e.stopPropagation()}>
+            <div className="donate-emblem" aria-hidden="true"><Repeat size={28} /></div>
+            <h3 className="donate-title">Set up a monthly donation?</h3>
+            <p className="donate-desc">
+              You’re about to give <b>{fmt(effective)} every month</b> to {campaign.title}. Your card will be charged
+              today and on the same day each month, until you ask the masjid to stop.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn btn--ghost" type="button" onClick={() => setConfirmMonthly(false)}>Cancel</button>
+              <button className="btn btn--primary glow-accent" type="button" onClick={runIntent}><Repeat size={16} /> Yes, give monthly</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -240,9 +283,9 @@ function PayStep({
 
   return (
     <section className="glass-raised donate-card">
-      <div className="donate-emblem" aria-hidden="true"><HandCoins size={30} /></div>
-      <h1 className="donate-title">Donate {money(intent.amount, intent.currency)}</h1>
-      <p className="donate-sub muted">{campaign.title}</p>
+      <div className="donate-emblem" aria-hidden="true">{intent.recurring ? <Repeat size={30} /> : <HandCoins size={30} />}</div>
+      <h1 className="donate-title">Donate {money(intent.amount, intent.currency)}{intent.recurring ? ' / month' : ''}</h1>
+      <p className="donate-sub muted">{campaign.title}{intent.recurring ? ' · monthly' : ''}</p>
       <Elements stripe={stripePromise} options={{ clientSecret: intent.clientSecret, appearance: { theme } }}>
         <PayForm campaign={campaign} intent={intent} onDone={onDone} />
       </Elements>
@@ -297,7 +340,7 @@ function PayForm({
       <PaymentElement />
       {error && <p className="form-error" role="alert">{error}</p>}
       <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={!stripe || busy}>
-        {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {money(intent.amount, intent.currency)}
+        {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {money(intent.amount, intent.currency)}{intent.recurring ? ' / month' : ''}
       </button>
       <p className="hint pay-hint"><ShieldCheck size={12} /> Your card details go straight to Stripe — never to this app.</p>
     </form>
@@ -314,7 +357,7 @@ function ThankYou({ result }: { result: ConfirmResponse }) {
       <h1 className="donate-title">{ok ? 'JazākAllāhu khayran!' : 'Thank you'}</h1>
       {ok ? (
         <p className="donate-desc">
-          Your donation of <b>{money(result.amount, result.currency)}</b> to <b>{result.campaignTitle}</b> was received.
+          Your {result.recurring ? <><b>monthly</b> donation of <b>{money(result.amount, result.currency)}</b></> : <>donation of <b>{money(result.amount, result.currency)}</b></>} to <b>{result.campaignTitle}</b> {result.recurring ? 'is set up' : 'was received'}.
           May Allah accept it and reward you.
         </p>
       ) : result.status === 'processing' ? (

@@ -132,6 +132,72 @@ export async function createPaymentIntent(
   return { id: pi.id, clientSecret: pi.client_secret ?? '' };
 }
 
+export interface SubscriptionResult {
+  subscriptionId: string;
+  paymentIntentId: string;
+  clientSecret: string;
+}
+
+/** Create (once) a reusable Stripe Product to hang recurring donation prices off. */
+export async function createProduct(account: StripeConfig, name: string): Promise<string> {
+  const product = await client(account.secretKey).products.create({ name });
+  return product.id;
+}
+
+/** Create a monthly (recurring) donation: a Customer + a Subscription with an inline
+ *  monthly price (on the given product) for the chosen amount. Returns the first
+ *  invoice's PaymentIntent so the donor can confirm it; Stripe then charges monthly. */
+export async function createSubscription(
+  account: StripeConfig,
+  amountMinor: number,
+  currency: string,
+  email: string,
+  name: string,
+  productId: string,
+  metadata: Record<string, string>,
+  idempotencyKey: string,
+): Promise<SubscriptionResult> {
+  const stripe = client(account.secretKey);
+  const customer = await stripe.customers.create(
+    { email: email || undefined, name: name || undefined, metadata },
+    { idempotencyKey: `${idempotencyKey}:cust` },
+  );
+  const sub = await stripe.subscriptions.create(
+    {
+      customer: customer.id,
+      items: [
+        {
+          price_data: {
+            currency: currency.toLowerCase(),
+            product: productId,
+            unit_amount: amountMinor,
+            recurring: { interval: 'month' },
+          },
+        },
+      ],
+      payment_behavior: 'default_incomplete',
+      payment_settings: { save_default_payment_method: 'on_subscription' },
+      metadata,
+      expand: ['latest_invoice.payment_intent'],
+    },
+    { idempotencyKey },
+  );
+  const inv = sub.latest_invoice && typeof sub.latest_invoice !== 'string' ? sub.latest_invoice : null;
+  const piRaw = inv ? (inv as { payment_intent?: unknown }).payment_intent : null;
+  const pi = piRaw && typeof piRaw !== 'string' ? (piRaw as { id?: string; client_secret?: string }) : null;
+  return { subscriptionId: sub.id, paymentIntentId: pi?.id ?? '', clientSecret: pi?.client_secret ?? '' };
+}
+
+/** Verify a Stripe webhook signature and return the event, or null if it doesn't
+ *  verify. The webhook secret is per-account. */
+export function constructWebhookEvent(secretKey: string, rawBody: string, signature: string, webhookSecret: string): Stripe.Event | null {
+  try {
+    return client(secretKey).webhooks.constructEvent(rawBody, signature, webhookSecret);
+  } catch {
+    return null;
+  }
+}
+
 export interface RetrievedIntent {
   status: string;
   amount: number;
