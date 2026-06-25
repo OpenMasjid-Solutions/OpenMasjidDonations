@@ -138,6 +138,9 @@ export interface RetrievedIntent {
   currency: string;
   receiptEmail: string;
   billingName: string;
+  /** Card brand (e.g. "visa", "mastercard") + last 4 digits, when paid by card. */
+  cardBrand: string;
+  cardLast4: string;
 }
 
 /** Retrieve a PaymentIntent to verify its real status server-side (never trust the
@@ -147,12 +150,15 @@ export async function retrievePaymentIntent(account: StripeConfig, id: string): 
     const stripe = client(account.secretKey);
     const pi = await stripe.paymentIntents.retrieve(id, { expand: ['latest_charge'] });
     const charge = pi.latest_charge && typeof pi.latest_charge !== 'string' ? pi.latest_charge : null;
+    const card = charge?.payment_method_details?.card ?? null;
     return {
       status: pi.status,
       amount: pi.amount,
       currency: pi.currency.toUpperCase(),
       receiptEmail: pi.receipt_email ?? charge?.billing_details?.email ?? '',
       billingName: charge?.billing_details?.name ?? '',
+      cardBrand: card?.brand ?? '',
+      cardLast4: card?.last4 ?? '',
     };
   } catch {
     return null;

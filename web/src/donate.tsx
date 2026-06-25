@@ -14,16 +14,20 @@ import {
   type IntentResponse,
   type PublicCampaign,
 } from './api';
-import { resolveTheme, usePrefs } from './prefs';
+import { useReadableTheme } from './prefs';
+
+/** Sanitise an admin-entered image URL for use in a CSS url()/<img> (accept only
+ *  http(s)/data:image; reject quotes, backslashes and whitespace), else ''. */
+function bgUrl(image?: string): string {
+  const v = (image ?? '').trim();
+  return /^(https?:\/\/|data:image\/)/i.test(v) && !/["\\\s]/.test(v) ? v : '';
+}
 
 /** The donation page's own background. Unlike the rest of the app it does NOT inherit
  *  the dashboard wallpaper: it shows the campaign's own background image when set, and
- *  otherwise the default theme scene. The URL can be admin-entered, so sanitise it
- *  before putting it in a CSS url() (accept only http(s)/data:image; reject quotes,
- *  backslashes and whitespace). */
+ *  otherwise the default theme scene. */
 function DonateScene({ image }: { image?: string }) {
-  const v = (image ?? '').trim();
-  const safe = /^(https?:\/\/|data:image\/)/i.test(v) && !/["\\\s]/.test(v) ? v : '';
+  const safe = bgUrl(image);
   if (safe) return <div className="scene-img" aria-hidden="true" style={{ backgroundImage: `url("${safe}")` }} />;
   return <div className="scene" aria-hidden="true" />;
 }
@@ -46,17 +50,22 @@ export function DonatePage({ slug, token }: { slug: string; token?: string }) {
   const [result, setResult] = useState<ConfirmResponse | null>(null);
 
   // The public donation page is its own world: pin the scene to the default wallpaper
-  // so it never shows the dashboard's inherited wallpaper. The actual backdrop is the
-  // campaign's own background image (or the default theme scene) via <DonateScene>.
+  // (never the dashboard's inherited one) and pick a theme that reads on the campaign's
+  // background — light text on dark images, dark text on light ones, as readable as can be.
+  const readable = useReadableTheme(bgUrl(campaign?.backgroundImage) || undefined, 'dark');
   useEffect(() => {
     const html = document.documentElement;
-    const prev = html.getAttribute('data-wallpaper');
+    const prevW = html.getAttribute('data-wallpaper');
+    const prevT = html.getAttribute('data-theme');
     html.setAttribute('data-wallpaper', 'aurora');
     return () => {
-      if (prev) html.setAttribute('data-wallpaper', prev);
-      else html.removeAttribute('data-wallpaper');
+      if (prevW) html.setAttribute('data-wallpaper', prevW); else html.removeAttribute('data-wallpaper');
+      if (prevT) html.setAttribute('data-theme', prevT); else html.removeAttribute('data-theme');
     };
   }, []);
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', readable);
+  }, [readable]);
 
   // If Stripe redirected back here (some payment methods do), it appends
   // ?payment_intent=…&redirect_status=…. Confirm it with the server on mount.
@@ -224,9 +233,10 @@ function PayStep({
   onBack: () => void;
   onDone: (r: ConfirmResponse) => void;
 }) {
-  const prefs = usePrefs();
   const stripePromise = useMemo(() => stripeFor(intent.publishableKey), [intent.publishableKey]);
-  const theme = resolveTheme(prefs.theme) === 'light' ? 'stripe' : 'night';
+  // Match Stripe's Payment Element to the page's (readability-adjusted) theme.
+  const isLight = typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light';
+  const theme = isLight ? 'stripe' : 'night';
 
   return (
     <section className="glass-raised donate-card">

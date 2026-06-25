@@ -124,6 +124,8 @@ export type CampaignInput = Partial<Omit<Campaign, 'id' | 'token' | 'createdAt' 
 
 export interface Donation {
   id: string;
+  /** Short human-friendly reference shown in the table (e.g. "0065A17F"). */
+  ref: string;
   campaignId: string;
   campaignTitle: string;
   amount: number;
@@ -134,6 +136,8 @@ export interface Donation {
   coverFees: boolean;
   giftAid: boolean;
   paymentIntentId: string;
+  cardBrand: string;
+  cardLast4: string;
   createdAt: string;
 }
 export interface DonationsResult {

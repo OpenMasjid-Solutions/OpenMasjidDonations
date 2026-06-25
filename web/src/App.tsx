@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { ShieldCheck } from 'lucide-react';
 import { getAppInfo, type AppInfo } from './api';
-import { useOmosAppearanceSync } from './prefs';
+import { resolveTheme, useOmosAppearanceSync, usePrefs, useReadableTheme } from './prefs';
 import { Scene, Brand, ThemeToggle } from './ui';
 
 // Code-split the two heavy areas so the initial shell stays tiny and fast: the donor
@@ -63,6 +63,15 @@ export function App() {
   useEffect(() => {
     if (goToSetup) window.location.replace('/admin');
   }, [goToSetup]);
+
+  // Adapt the shell's theme to a custom (inherited) dashboard wallpaper image so text
+  // stays readable over it. With no custom image this just tracks the chosen theme.
+  // The donation page is excluded — it manages its own theme against its own background.
+  const prefs = usePrefs();
+  const shellTheme = useReadableTheme(!campaign ? prefs.wallpaperImage.trim() || undefined : undefined, resolveTheme(prefs.theme));
+  useEffect(() => {
+    if (!campaign) document.documentElement.setAttribute('data-theme', shellTheme);
+  }, [shellTheme, campaign]);
 
   // A campaign donation page is its own full-screen experience (own Scene + chrome).
   if (campaign)

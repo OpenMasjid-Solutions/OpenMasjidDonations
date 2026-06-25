@@ -5,17 +5,18 @@ import { useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, ExternalLink, Eye, EyeOff, Globe, HandCoins, KeyRound,
-  Landmark, LayoutDashboard, Link2, LogIn, LogOut, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw,
-  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Wallet,
+  Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, HandCoins,
+  KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw,
+  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Wallet, X,
 } from 'lucide-react';
 import {
   checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations,
   getMetrics, getSession, getSettings, getTunnel, listCampaigns, login, logout, money, saveMasjid, saveTunnel,
   sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign,
-  type AccountInput, type AppInfo, type Campaign, type CampaignInput, type DonationsResult, type MasjidProfile,
-  type Metrics, type Session, type Settings, type StripeAccount, type TunnelStatus, type VerifyResult,
+  type AccountInput, type AppInfo, type Campaign, type CampaignInput, type Donation, type DonationsResult,
+  type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type TunnelStatus, type VerifyResult,
 } from './api';
+import { useReadableTheme } from './prefs';
 
 const SOURCE_URL = 'https://github.com/hasan-ismail/OpenMasjidDonations';
 const STRIPE_KEYS_URL = 'https://dashboard.stripe.com/apikeys';
@@ -649,34 +650,60 @@ function CampaignForm({ campaign, accounts, currency, masjidName, shareBase, onD
 }
 
 // ── Donations log ───────────────────────────────────────────────────────────
+/** Compact "06/20/2026 10:04"-style stamp. */
+function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+/** "Mastercard - 5319" or '—'. */
+function cardLabel(d: Donation): string {
+  if (!d.cardBrand && !d.cardLast4) return '';
+  const brand = d.cardBrand ? d.cardBrand.charAt(0).toUpperCase() + d.cardBrand.slice(1) : 'Card';
+  return d.cardLast4 ? `${brand} - ${d.cardLast4}` : brand;
+}
+/** Identify a donor across transactions: prefer email, fall back to name. */
+function donorKey(d: Donation): string {
+  return (d.donorEmail || '').trim().toLowerCase() || (d.donorName || '').trim().toLowerCase();
+}
+
 function DonationsCard() {
   const [data, setData] = useState<DonationsResult | null>(null);
+  const [sel, setSel] = useState<Donation | null>(null);
   useEffect(() => { getDonations().then(setData).catch(() => setData(null)); }, []);
   return (
     <section className="glass panel">
       <div className="card-head">
-        <Wallet size={18} className="panel-ico" aria-hidden="true" />
+        <ReceiptText size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
           <div className="row-between">
             <h2 className="section-title-inline">Donations</h2>
-            {data && data.donations.length > 0 && <a className="btn btn--ghost btn--sm" href="/api/admin/donations.csv">Export CSV</a>}
+            {data && data.donations.length > 0 && <a className="btn btn--ghost btn--sm" href="/api/admin/donations.csv"><Download size={14} /> Export CSV</a>}
           </div>
           {data && <p className="muted">{money(data.stats.totalRaised, data.stats.currency)} raised · {data.stats.count} donation{data.stats.count === 1 ? '' : 's'}</p>}
         </div>
       </div>
       {!data ? <span className="spinner" /> : data.donations.length === 0 ? (
-        <p className="muted">No donations yet.</p>
+        <p className="muted">No donations yet. When someone gives, it’ll appear here with full details.</p>
       ) : (
         <div className="don-scroll">
           <table className="don-table">
-            <thead><tr><th>Date</th><th>Campaign</th><th>Amount</th><th>Donor</th><th>Status</th></tr></thead>
+            <thead><tr>
+              <th>ID &amp; Date</th><th>Campaign</th><th>Contact</th><th>Donor</th><th>Amount</th><th>Type</th><th>Card</th><th>Status</th>
+            </tr></thead>
             <tbody>
-              {data.donations.slice(0, 100).map((d) => (
+              {data.donations.slice(0, 200).map((d) => (
                 <tr key={d.id}>
-                  <td>{new Date(d.createdAt).toLocaleDateString()}</td>
+                  <td>
+                    <button className="don-id" onClick={() => setSel(d)} title="View transaction details">{d.ref}</button>
+                    <div className="don-date">{fmtDateTime(d.createdAt)}</div>
+                  </td>
                   <td>{d.campaignTitle}</td>
+                  <td>{d.donorEmail ? <span className="don-contact">{d.donorEmail}</span> : <span className="faint">—</span>}</td>
+                  <td>{d.donorName ? <button className="don-id" onClick={() => setSel(d)}>{d.donorName}</button> : <span className="faint">—</span>}</td>
                   <td>{money(d.amount, d.currency)}</td>
-                  <td>{d.donorName || '—'}</td>
+                  <td><span className="don-type">Stripe<span className="faint"> · One-time · Web</span></span></td>
+                  <td>{cardLabel(d) || <span className="faint">—</span>}</td>
                   <td><span className={`don-status don-status--${d.status}`}>{d.status}</span></td>
                 </tr>
               ))}
@@ -684,7 +711,88 @@ function DonationsCard() {
           </table>
         </div>
       )}
+      {sel && data && <DonationDetail donation={sel} all={data.donations} onClose={() => setSel(null)} onPick={setSel} />}
     </section>
+  );
+}
+
+function DetailRow({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  return (
+    <div className="detail-row">
+      <span className="detail-label">{label}</span>
+      <span className={`detail-value${mono ? ' mono' : ''}`}>{value}</span>
+    </div>
+  );
+}
+
+/** Full details for one transaction + every other donation from the same donor. */
+function DonationDetail({ donation, all, onClose, onPick }: {
+  donation: Donation; all: Donation[]; onClose: () => void; onPick: (d: Donation) => void;
+}) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const k = donorKey(donation);
+  const related = k ? all.filter((x) => donorKey(x) === k) : [donation];
+  const others = related.filter((x) => x.id !== donation.id);
+  const succeeded = related.filter((x) => x.status === 'succeeded');
+  const lifetime = succeeded.reduce((s, x) => s + x.amount, 0);
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal glass-raised" role="dialog" aria-modal="true" aria-label={`Transaction ${donation.ref}`} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h3 className="modal-title">Transaction {donation.ref}</h3>
+            <p className="muted" style={{ fontSize: '0.85rem' }}>{fmtDateTime(donation.createdAt)}</p>
+          </div>
+          <button className="icon-btn" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+
+        <div className="detail-grid">
+          <DetailRow label="Amount" value={money(donation.amount, donation.currency)} />
+          <DetailRow label="Status" value={<span className={`don-status don-status--${donation.status}`}>{donation.status}</span>} />
+          <DetailRow label="Campaign" value={donation.campaignTitle} />
+          <DetailRow label="Type" value="Stripe · One-time · Web" />
+          <DetailRow label="Card" value={cardLabel(donation) || '—'} />
+          <DetailRow label="Covered fees" value={donation.coverFees ? 'Yes' : 'No'} />
+          <DetailRow label="Donor" value={donation.donorName || '—'} />
+          <DetailRow label="Contact" value={donation.donorEmail || '—'} />
+          <DetailRow label="Payment reference" value={donation.paymentIntentId || '—'} mono />
+        </div>
+
+        <div className="detail-section">
+          <h4 className="metric-h">From this donor</h4>
+          {!k ? (
+            <p className="muted">No name or email was given, so we can’t link other donations.</p>
+          ) : (
+            <>
+              <p className="hint">{related.length} donation{related.length === 1 ? '' : 's'} · {money(lifetime, donation.currency)} given in total.</p>
+              {others.length > 0 && (
+                <div className="don-scroll">
+                  <table className="don-table">
+                    <thead><tr><th>ID &amp; Date</th><th>Campaign</th><th>Amount</th><th>Status</th></tr></thead>
+                    <tbody>
+                      {others.map((o) => (
+                        <tr key={o.id}>
+                          <td><button className="don-id" onClick={() => onPick(o)}>{o.ref}</button><div className="don-date">{fmtDateTime(o.createdAt)}</div></td>
+                          <td>{o.campaignTitle}</td>
+                          <td>{money(o.amount, o.currency)}</td>
+                          <td><span className={`don-status don-status--${o.status}`}>{o.status}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -821,6 +929,8 @@ function CampaignPreview({ data, currency, masjidName, variant }: {
 }) {
   const bg = safeImg(data.backgroundImage);
   const bgStyle = bg ? { backgroundImage: `url("${bg}")` } : undefined;
+  // Match the preview's theme to its background so the card text reads (as the donor sees it).
+  const readable = useReadableTheme(bg || undefined, 'dark');
   if (variant === 'thumb') {
     return (
       <div className="cprev-thumb" aria-hidden="true">
@@ -834,7 +944,7 @@ function CampaignPreview({ data, currency, masjidName, variant }: {
   const cover = safeImg(data.coverImage);
   const pct = data.goalAmount > 0 ? Math.min(100, Math.round((data.raised / data.goalAmount) * 100)) : 0;
   return (
-    <div className="cprev" aria-label="Live preview of your donation page">
+    <div className="cprev" data-theme={readable} aria-label="Live preview of your donation page">
       <div className={`cprev-bg${bg ? '' : ' cprev-bg--default'}`} style={bgStyle} />
       <div className="cprev-card glass-raised">
         {cover && <img className="cprev-cover" src={cover} alt="" />}

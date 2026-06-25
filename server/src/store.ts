@@ -94,6 +94,9 @@ export interface Donation {
   coverFees: boolean;
   giftAid: boolean;
   paymentIntentId: string;
+  /** Card brand + last 4, captured from Stripe on confirm (when paid by card). */
+  cardBrand: string;
+  cardLast4: string;
   createdAt: string;
 }
 
@@ -190,6 +193,8 @@ export class Store {
         cover_fees INTEGER NOT NULL DEFAULT 0,
         gift_aid INTEGER NOT NULL DEFAULT 0,
         payment_intent_id TEXT NOT NULL DEFAULT '',
+        card_brand TEXT NOT NULL DEFAULT '',
+        card_last4 TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_donations_campaign ON donations(campaign_id);
@@ -203,6 +208,8 @@ export class Store {
     }
     // Add columns introduced after first release (CREATE TABLE IF NOT EXISTS won't).
     this.ensureColumn('campaigns', 'background_image', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('donations', 'card_brand', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('donations', 'card_last4', "TEXT NOT NULL DEFAULT ''");
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
@@ -592,12 +599,15 @@ export class Store {
       coverFees: !!r.cover_fees,
       giftAid: !!r.gift_aid,
       paymentIntentId: String(r.payment_intent_id),
+      cardBrand: String(r.card_brand ?? ''),
+      cardLast4: String(r.card_last4 ?? ''),
       createdAt: String(r.created_at),
     };
   }
 
-  createDonation(input: Omit<Donation, 'id' | 'createdAt' | 'status'> & { status?: Donation['status'] }): Donation {
-    const d: Donation = { id: rid('don'), status: input.status ?? 'pending', createdAt: new Date().toISOString(), ...input };
+  createDonation(input: Omit<Donation, 'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4'> & { status?: Donation['status'] }): Donation {
+    // Card details are unknown until the payment confirms — start blank, filled in by markDonation.
+    const d: Donation = { id: rid('don'), status: input.status ?? 'pending', cardBrand: '', cardLast4: '', createdAt: new Date().toISOString(), ...input };
     this.db
       .prepare(
         `INSERT INTO donations
@@ -614,13 +624,28 @@ export class Store {
     return r ? this.rowToDonation(r) : null;
   }
 
-  /** Mark a donation's outcome (idempotent — safe to call repeatedly on confirm). */
-  markDonation(pi: string, status: Donation['status'], donorName?: string, donorEmail?: string): Donation | null {
+  /** Mark a donation's outcome (idempotent — safe to call repeatedly on confirm).
+   *  Also records the donor name/email and card brand/last4 from Stripe when given. */
+  markDonation(
+    pi: string,
+    status: Donation['status'],
+    opts: { donorName?: string; donorEmail?: string; cardBrand?: string; cardLast4?: string } = {},
+  ): Donation | null {
     const cur = this.getDonationByPaymentIntent(pi);
     if (!cur) return null;
     this.db
-      .prepare(`UPDATE donations SET status=@status, donor_name=@donorName, donor_email=@donorEmail WHERE payment_intent_id=@pi`)
-      .run({ pi, status, donorName: donorName ?? cur.donorName, donorEmail: donorEmail ?? cur.donorEmail });
+      .prepare(
+        `UPDATE donations SET status=@status, donor_name=@donorName, donor_email=@donorEmail,
+         card_brand=@cardBrand, card_last4=@cardLast4 WHERE payment_intent_id=@pi`,
+      )
+      .run({
+        pi,
+        status,
+        donorName: opts.donorName ?? cur.donorName,
+        donorEmail: opts.donorEmail ?? cur.donorEmail,
+        cardBrand: opts.cardBrand || cur.cardBrand,
+        cardLast4: opts.cardLast4 || cur.cardLast4,
+      });
     return this.getDonationByPaymentIntent(pi);
   }
 

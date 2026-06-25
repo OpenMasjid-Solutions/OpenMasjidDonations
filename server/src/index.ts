@@ -436,24 +436,28 @@ async function main(): Promise<void> {
   });
 
   // ── Donations log + CSV ─────────────────────────────────────────────────────
+  // A short, human-friendly transaction reference derived from the donation id
+  // (stable + unique enough for display; the full id stays the real key).
+  const donationRef = (id: string) => id.replace(/^don_/, '').slice(0, 8).toUpperCase();
   app.get('/api/admin/donations', { preHandler: requireAdmin }, async () => {
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
     const list = store.listDonations();
     const succeeded = list.filter((d) => d.status === 'succeeded');
     return {
       data: {
-        donations: list.map((d) => ({ ...d, amount: toMajorCur(d.amount), campaignTitle: titles.get(d.campaignId) ?? '—' })),
+        donations: list.map((d) => ({ ...d, ref: donationRef(d.id), amount: toMajorCur(d.amount), campaignTitle: titles.get(d.campaignId) ?? '—' })),
         stats: { totalRaised: toMajorCur(succeeded.reduce((s, d) => s + d.amount, 0)), count: succeeded.length, currency: cur() },
       },
     };
   });
   app.get('/api/admin/donations.csv', { preHandler: requireAdmin }, async (_req, reply) => {
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
-    const rows = [['Date', 'Campaign', 'Amount', 'Currency', 'Status', 'Donor', 'Email', 'Gift Aid', 'Covered fees', 'PaymentIntent']];
+    const rows = [['Ref', 'Date', 'Campaign', 'Amount', 'Currency', 'Status', 'Donor', 'Email', 'Card', 'Covered fees', 'PaymentIntent']];
     for (const d of store.listDonations()) {
+      const card = d.cardBrand ? `${d.cardBrand} ${d.cardLast4}`.trim() : '';
       rows.push([
-        d.createdAt, titles.get(d.campaignId) ?? '', String(toMajorCur(d.amount)), d.currency, d.status,
-        d.donorName, d.donorEmail, d.giftAid ? 'yes' : 'no', d.coverFees ? 'yes' : 'no', d.paymentIntentId,
+        donationRef(d.id), d.createdAt, titles.get(d.campaignId) ?? '', String(toMajorCur(d.amount)), d.currency, d.status,
+        d.donorName, d.donorEmail, card, d.coverFees ? 'yes' : 'no', d.paymentIntentId,
       ]);
     }
     reply.header('content-type', 'text/csv; charset=utf-8').header('content-disposition', 'attachment; filename="donations.csv"');
@@ -677,7 +681,12 @@ async function main(): Promise<void> {
     const succeeded = pi.status === 'succeeded';
     const wasPending = don.status === 'pending';
     const status: 'succeeded' | 'failed' | 'pending' = succeeded ? 'succeeded' : pi.status === 'processing' ? 'pending' : 'failed';
-    const updated = store.markDonation(paymentIntentId, status, pi.billingName || don.donorName, pi.receiptEmail || don.donorEmail);
+    const updated = store.markDonation(paymentIntentId, status, {
+      donorName: pi.billingName || don.donorName,
+      donorEmail: pi.receiptEmail || don.donorEmail,
+      cardBrand: pi.cardBrand,
+      cardLast4: pi.cardLast4,
+    });
     if (succeeded && wasPending) {
       void notify({ title: 'New donation', text: `A donation of ${formatMoney(pi.amount, pi.currency)} to “${c.title}” was received.`, level: 'success' });
     }

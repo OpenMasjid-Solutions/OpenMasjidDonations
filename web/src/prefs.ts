@@ -9,7 +9,7 @@
  * The `#omos=…` fragment is attacker-craftable presentation input — we only ever
  * read theme/wallpaper from it, never anything security-relevant.
  */
-import { useEffect, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 
 export interface Prefs {
   theme: 'system' | 'dark' | 'light';
@@ -191,6 +191,68 @@ export async function fetchOmosAppearance(): Promise<void> {
   } catch {
     /* platform offline — keep the current look (the #omos fragment already themed us) */
   }
+}
+
+// ── Background-aware readability ──────────────────────────────────────────────
+// Sample a background image's average luminance so text on top of it stays readable
+// (dark text on light images, light text on dark). Works for same-origin / CORS-enabled
+// images and data: URLs; if the canvas is tainted (host sent no CORS header) we can't
+// read the pixels, so we fall back to the caller's default theme.
+const lumCache = new Map<string, 'light' | 'dark'>();
+
+function sampleLuminance(url: string): Promise<'light' | 'dark' | null> {
+  const cached = lumCache.get(url);
+  if (cached) return Promise.resolve(cached);
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const n = 16;
+        const canvas = document.createElement('canvas');
+        canvas.width = n;
+        canvas.height = n;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return resolve(null);
+        ctx.drawImage(img, 0, 0, n, n);
+        const { data } = ctx.getImageData(0, 0, n, n);
+        let sum = 0;
+        let count = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+          count++;
+        }
+        const avg = count ? sum / count : 0; // 0..255
+        const res: 'light' | 'dark' = avg > 140 ? 'light' : 'dark';
+        lumCache.set(url, res);
+        resolve(res);
+      } catch {
+        resolve(null); // tainted canvas — image host sent no CORS header
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
+/** The theme ('light'|'dark') that reads best over a background image. Returns
+ *  `fallback` when there's no image or it can't be sampled (cross-origin). */
+export function useReadableTheme(imageUrl: string | undefined, fallback: 'light' | 'dark'): 'light' | 'dark' {
+  const [theme, setTheme] = useState<'light' | 'dark'>(fallback);
+  useEffect(() => {
+    if (!imageUrl) {
+      setTheme(fallback);
+      return;
+    }
+    let live = true;
+    void sampleLuminance(imageUrl).then((r) => {
+      if (live) setTheme(r ?? fallback);
+    });
+    return () => {
+      live = false;
+    };
+  }, [imageUrl, fallback]);
+  return theme;
 }
 
 /** While embedded under OpenMasjidOS and "follow" is on, keep theme + wallpaper +
