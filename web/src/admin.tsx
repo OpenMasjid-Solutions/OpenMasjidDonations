@@ -20,7 +20,7 @@ import {
   type FabricStripeStatus, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type TunnelStatus, type VerifyResult,
 } from './api';
 import { useReadableTheme } from './prefs';
-import { asset, withBase } from './base';
+import { BASE, asset, withBase } from './base';
 
 const SOURCE_URL = 'https://github.com/OpenMasjid-Solutions/OpenMasjidDonations';
 const STRIPE_KEYS_URL = 'https://dashboard.stripe.com/apikeys';
@@ -165,11 +165,11 @@ function AdminConsole({ info, session, onSignedOut }: { info: AppInfo | null; se
 
   if (!loaded) return <Centered><span className="spinner" aria-label="Loading" /></Centered>;
   if (!settings) return <Centered><p className="muted">Couldn’t load your settings. Please refresh.</p></Centered>;
-  if (!settings.onboarded) return <Onboarding settings={settings} publicBase={info?.publicUrl ?? ''} onReload={reload} />;
+  if (!settings.onboarded) return <Onboarding settings={settings} publicBase={info?.publicUrl ?? ''} embedded={!!info?.embedded} onReload={reload} />;
   return <AdminHome info={info} session={session} settings={settings} onReload={reload} onSignedOut={onSignedOut} />;
 }
 
-function Onboarding({ settings, publicBase, onReload }: { settings: Settings; publicBase: string; onReload: () => void }) {
+function Onboarding({ settings, publicBase, embedded, onReload }: { settings: Settings; publicBase: string; embedded: boolean; onReload: () => void }) {
   const [finishing, setFinishing] = useState(false);
   const finish = async () => { setFinishing(true); try { await completeOnboarding(); onReload(); } catch { setFinishing(false); } };
   return (
@@ -179,7 +179,7 @@ function Onboarding({ settings, publicBase, onReload }: { settings: Settings; pu
         <p className="page-sub">Your masjid details and a Stripe account — then create your first appeal.</p>
       </div>
       <MasjidCard masjid={settings.masjid} onSaved={onReload} />
-      <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} publicBase={publicBase} onChanged={onReload} />
+      <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} publicBase={publicBase} embedded={embedded} onChanged={onReload} />
       <section className="glass panel">
         <div className="row-between">
           <p className="muted" style={{ margin: 0 }}>
@@ -280,8 +280,10 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         {tab === 'donations' && <DonationsCard />}
         {tab === 'payments' && (
           <>
-            <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} publicBase={publicBase} onChanged={onReload} />
-            <PublicAccessCard />
+            <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} publicBase={publicBase} embedded={embedded} onChanged={onReload} />
+            {/* Remote access is the platform's job when embedded (the OS runs Cloudflare and
+                we get our public URL from the Fabric). Only show the app's own tunnel standalone. */}
+            {!embedded && <PublicAccessCard />}
           </>
         )}
         {tab === 'settings' && (
@@ -417,7 +419,7 @@ function ModeBadge({ a }: { a: StripeAccount }) {
   return null;
 }
 
-function StripeAccountsCard({ accounts, fabric, publicBase, onChanged }: { accounts: StripeAccount[]; fabric?: FabricStripeStatus; publicBase?: string; onChanged: () => void }) {
+function StripeAccountsCard({ accounts, fabric, publicBase, embedded, onChanged }: { accounts: StripeAccount[]; fabric?: FabricStripeStatus; publicBase?: string; embedded?: boolean; onChanged: () => void }) {
   const [adding, setAdding] = useState(false);
   const [editId, setEditId] = useState('');
   const [showLocal, setShowLocal] = useState(false);
@@ -428,10 +430,12 @@ function StripeAccountsCard({ accounts, fabric, publicBase, onChanged }: { accou
       .then((t) => setWebhookBase(t.enabled && t.publicHostname ? `https://${t.publicHostname}` : originBase()))
       .catch(() => setWebhookBase(originBase()));
   }, [publicBase]);
-  // When OpenMasjidOS provides a Stripe account from its vault, that's the source of
-  // truth — the admin set it up once in the platform and every app shares it. We show
-  // it (read-only, no keys to paste) and tuck the local fallback away behind a toggle.
-  const fabricOn = !!fabric?.available;
+  // When embedded under OpenMasjidOS, payments are the platform's job: the admin sets Stripe
+  // up ONCE in OpenMasjidOS (Settings → Payments) and every app shares it via the Fabric. We
+  // lead with that — whether or not it's connected yet — and tuck the on-device keys (the
+  // standalone fallback) behind a toggle. Standalone, we show the local accounts directly.
+  const osManaged = !!embedded;
+  const fabricConfigured = !!fabric?.configured;
   return (
     <section className="glass panel">
       <div className="card-head">
@@ -439,37 +443,41 @@ function StripeAccountsCard({ accounts, fabric, publicBase, onChanged }: { accou
         <div className="card-head__main">
           <h2 className="section-title-inline">Payments (Stripe accounts)</h2>
           <p className="muted">
-            {fabricOn
-              ? 'Connected through OpenMasjidOS — set up once in your dashboard and shared with every app. Nothing to enter here.'
+            {osManaged
+              ? 'Managed in OpenMasjidOS — set up Stripe once in your dashboard (Settings → Payments) and every app shares it. Nothing to enter here.'
               : 'Add one or more Stripe accounts — e.g. a separate account for Zakat. Secret keys stay on this device.'}
           </p>
         </div>
       </div>
-      {fabricOn && (
+      {osManaged && (
         <>
           <div className="list">
             <div className="list-row">
               <Landmark size={16} className="muted" aria-hidden="true" />
               <div className="list-row__main">
                 <div className="row" style={{ gap: '0.4rem', flexWrap: 'wrap' }}>
-                  <span className="list-row__title">{fabric?.label || 'OpenMasjidOS account'}</span>
+                  <span className="list-row__title">{fabric?.label || 'OpenMasjidOS payments'}</span>
                   {fabric?.mode === 'test' && <span className="badge badge--test">TEST</span>}
                   {fabric?.mode === 'live' && <span className="badge badge--live">LIVE</span>}
-                  {fabric?.configured
+                  {fabricConfigured
                     ? <span className="status-pill status-pill--ok"><CheckCircle2 size={12} /> Connected via OpenMasjidOS</span>
-                    : <span className="status-pill">Finish in OpenMasjidOS → Settings → Payments</span>}
+                    : <span className="status-pill">Set up in OpenMasjidOS → Settings → Payments</span>}
                 </div>
-                <p className="muted" style={{ margin: '0.2rem 0 0' }}>Manage these keys in OpenMasjidOS — they’re backed up and moved with your dashboard.</p>
+                <p className="muted" style={{ margin: '0.2rem 0 0' }}>
+                  {fabricConfigured
+                    ? 'Manage these keys in OpenMasjidOS — they’re backed up and moved with your dashboard.'
+                    : 'Add a Stripe account in OpenMasjidOS and it’ll appear here automatically.'}
+                </p>
               </div>
             </div>
           </div>
           <button className="btn btn--ghost btn--sm" onClick={() => setShowLocal((v) => !v)}>
             {showLocal ? 'Hide' : 'Use a Stripe account stored on this device instead'}
           </button>
-          {!showLocal && <p className="hint" style={{ marginTop: '0.4rem' }}>Local keys are only used if the connection to OpenMasjidOS is unavailable.</p>}
+          {!showLocal && <p className="hint" style={{ marginTop: '0.4rem' }}>Only needed if OpenMasjidOS payments aren’t set up — keys entered here stay on this device.</p>}
         </>
       )}
-      {(!fabricOn || showLocal) && (
+      {(!osManaged || showLocal) && (
         <>
       <StripeInstructions />
       <div className="list">
@@ -1047,9 +1055,11 @@ function Notifications({ embedded }: { embedded: boolean }) {
   );
 }
 
-/** This device's address (scheme + host), or '' when rendered without a window. */
+/** This device's address (scheme + host + any tunnel base path), or '' when rendered
+ *  without a window. Including BASE keeps share links correct when the app is reached on
+ *  the LAN under a path prefix (e.g. https://box:8443/donations) with no public URL set. */
 function originBase(): string {
-  return typeof location !== 'undefined' ? location.origin : '';
+  return typeof location !== 'undefined' ? location.origin + BASE : '';
 }
 
 /** The host shown as the link prefix (e.g. "give.masjid.org"). Falls back gracefully

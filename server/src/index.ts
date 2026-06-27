@@ -1010,11 +1010,17 @@ async function main(): Promise<void> {
   log.info(`OpenMasjid Donations listening on http://${config.host}:${config.port}`);
   log.info(ssoConfigured() ? 'running embedded under OpenMasjidOS (Fabric available)' : 'running standalone (local password)');
 
-  // Bring up the Cloudflare Tunnel if the admin has enabled it (no-op otherwise). Now the
-  // STANDALONE fallback only — when embedded, remote access is the platform's job (the OS
-  // owns Cloudflare and we read our public URL from /api/fabric/site).
+  // The app's own Cloudflare Tunnel is the STANDALONE fallback only. When embedded, remote
+  // access is the platform's job (the OS runs Cloudflare and we read our public URL from
+  // /api/fabric/site), so we do NOT start a second, redundant tunnel — even if one was
+  // configured in-app before this box was adopted by OpenMasjidOS.
   const tcfg = store.getTunnel();
-  tunnel.apply(tcfg.token, tcfg.enabled);
+  if (ssoConfigured()) {
+    tunnel.stop();
+    if (tcfg.enabled) log.info("remote access is managed by OpenMasjidOS (Fabric) — not starting the app's own Cloudflare tunnel");
+  } else {
+    tunnel.apply(tcfg.token, tcfg.enabled);
+  }
 
   const shutdown = () => {
     log.info('shutting down');
