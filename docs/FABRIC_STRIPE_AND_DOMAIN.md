@@ -3,7 +3,18 @@
 
 # Adopt the OS Fabric for Stripe + public URL (stop managing your own)
 
-**Status:** ready to integrate. Platform support is live — **Stripe vault (OpenMasjidOS v0.29.0)**
+> **Status: IMPLEMENTED.** Stripe-via-Fabric shipped in **v0.16.0**; the public-URL /
+> base-path capability (`domain: true`) shipped in **v0.17.0**. For `domain`: `manifest.yaml`
+> sets `domain: true`; the server fetches `GET /api/fabric/site` (`server/src/fabric.ts`
+> `fetchFabricSite`, cached/last-good/fail-soft, never persisted) and is **base-path aware** —
+> Fastify `rewriteUrl` strips the admin-chosen prefix (e.g. `/donate`) that Cloudflare
+> forwards, and `index.html` is served with an injected `<base href>` + `window.__OMOS_BASE__`
+> (Vite `base:'./'`). The web reads the base (`web/src/base.ts`) and prefixes API/nav/asset
+> URLs; share links, QR codes and the Stripe webhook URL use the Fabric `publicUrl`. The
+> in-app Cloudflare tunnel remains only as the **standalone fallback**. Verified end-to-end
+> against the real built UI by `scratchpad/verify-domain.mjs`.
+
+**Status (original brief):** ready to integrate. Platform support is live — **Stripe vault (OpenMasjidOS v0.29.0)**
 and **Cloudflare Tunnel / remote access (v0.30.0)**.
 **Why:** the admin now configures Stripe **once** in OpenMasjidOS (Settings → Payments) and runs the
 tunnel/domain **once** (Settings → Remote access). Every app shares them via the Fabric — so the

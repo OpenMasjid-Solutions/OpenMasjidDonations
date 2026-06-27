@@ -18,12 +18,14 @@ import {
   type PublicCampaign,
 } from './api';
 import { useReadableTheme } from './prefs';
+import { asset } from './base';
 
 /** Sanitise an admin-entered image URL for use in a CSS url()/<img> (accept only
- *  http(s)/data:image; reject quotes, backslashes and whitespace), else ''. */
+ *  http(s)/data:image; reject quotes, backslashes and whitespace), else ''. A same-origin
+ *  uploaded image is prefixed with the tunnel base path so it loads behind the tunnel too. */
 function bgUrl(image?: string): string {
   const v = (image ?? '').trim();
-  if (/^\/uploads\/[\w.-]+$/.test(v)) return v; // same-origin uploaded image
+  if (/^\/uploads\/[\w.-]+$/.test(v)) return asset(v); // same-origin uploaded image
   return /^(https?:\/\/|data:image\/)/i.test(v) && !/["\\\s]/.test(v) ? v : '';
 }
 
@@ -192,7 +194,7 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
 
   return (
     <section className="glass-raised donate-card">
-      {campaign.coverImage ? <img className="donate-cover" src={campaign.coverImage} alt="" /> : null}
+      {bgUrl(campaign.coverImage) ? <img className="donate-cover" src={bgUrl(campaign.coverImage)} alt="" /> : null}
       {bgUrl(campaign.logo || campaign.masjidLogo) ? (
         <img className="donate-logo" src={bgUrl(campaign.logo || campaign.masjidLogo)} alt={campaign.masjidName || 'Logo'} />
       ) : (

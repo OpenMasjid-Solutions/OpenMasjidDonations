@@ -3,6 +3,7 @@
 
 /** Typed client for the OpenMasjid Donations API. Responses use a { data | error }
  *  envelope; this unwraps `data` and turns `error` into a thrown friendly message. */
+import { withBase } from './base';
 
 export interface AppInfo {
   name: string;
@@ -15,6 +16,12 @@ export interface AppInfo {
   donationsConfigured: boolean;
   /** Whether the admin has completed first-run setup. */
   onboarded: boolean;
+  /** Public base URL from the OS Fabric remote-access tunnel (manifest `domain: true`),
+   *  e.g. "https://omos.example.org/donate". '' when remote access is off → use this
+   *  device's address for share links. */
+  publicUrl?: string;
+  /** The path prefix this app is served under behind the tunnel, e.g. "/donate". */
+  basePath?: string;
 }
 
 export interface Session {
@@ -40,7 +47,7 @@ export interface NotifyTestResult {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(withBase(path), {
     ...init,
     headers: { accept: 'application/json', ...(init?.body ? { 'content-type': 'application/json' } : {}), ...init?.headers },
   });
@@ -235,7 +242,7 @@ export const deleteCampaign = (id: string) =>
 export async function uploadImage(file: File): Promise<string> {
   const form = new FormData();
   form.append('file', file);
-  const res = await fetch('/api/admin/upload', { method: 'POST', body: form });
+  const res = await fetch(withBase('/api/admin/upload'), { method: 'POST', body: form });
   const body = (await res.json().catch(() => ({}))) as { data?: { url: string }; error?: string };
   if (!res.ok || body.error || !body.data) throw new Error(body.error || 'Upload failed.');
   return body.data.url;

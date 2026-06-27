@@ -125,3 +125,30 @@ optional — the app works fully standalone.
   bricked** — `/api/setup` allows the recovery password when SSO is unconfigured or the
   platform is unreachable, and refuses it only while the platform is reachable (which also
   closes the pre-setup admin-claim window). See `docs/RESTORE_SSO_FIX.md`.
+
+## Fabric remote access & base-path awareness (v0.17.0, manifest `domain: true`)
+
+The OS owns Cloudflare now: the admin runs ONE tunnel in OpenMasjidOS (Settings → Remote
+access) and each app is reached on one hostname under an admin-chosen **path** (default the
+app id), e.g. `https://omos.<domain>/donate/…`. The app asks the platform for its public
+address via `GET /api/fabric/site` → `{ enabled, domain, publicUrl, basePath }`
+(`server/src/fabric.ts` `fetchFabricSite`; cached, last-good, fail-soft, never persisted).
+
+Cloudflare forwards the **full** path prefix without stripping it, so the app is base-path
+aware on **both** ends:
+
+- **Server**: a Fastify `rewriteUrl` strips the current `basePath` prefix before routing, so
+  every route stays written at the root and works identically on the LAN (no prefix) and
+  behind the tunnel. `index.html` is served (not via static-index) with an injected
+  `<base href="${basePath}/">` + `window.__OMOS_BASE__`. The base path is warmed before
+  `listen` and refreshed every 15s, so the prefix is stripped from the first request and
+  recovers quickly after a restart-during-outage.
+- **Client**: Vite builds with `base:'./'` (assets resolve against the injected `<base href>`,
+  so dynamic-import chunks follow the prefix via `import.meta.url`). `web/src/base.ts` exposes
+  `BASE`/`withBase`/`asset`/`stripBase`; API/nav/asset/upload URLs are prefixed, the router
+  strips the prefix off `location.pathname`, and share links / QR codes / the Stripe webhook
+  URL use the Fabric `publicUrl`.
+
+Standalone (or remote access off), `basePath`/`publicUrl` are empty and everything behaves
+exactly as before (root paths, this device's address); the in-app Cloudflare tunnel
+(`tunnel.ts`) stays only as the standalone fallback.

@@ -20,6 +20,7 @@ import {
   type FabricStripeStatus, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type TunnelStatus, type VerifyResult,
 } from './api';
 import { useReadableTheme } from './prefs';
+import { asset, withBase } from './base';
 
 const SOURCE_URL = 'https://github.com/OpenMasjid-Solutions/OpenMasjidDonations';
 const STRIPE_KEYS_URL = 'https://dashboard.stripe.com/apikeys';
@@ -164,11 +165,11 @@ function AdminConsole({ info, session, onSignedOut }: { info: AppInfo | null; se
 
   if (!loaded) return <Centered><span className="spinner" aria-label="Loading" /></Centered>;
   if (!settings) return <Centered><p className="muted">Couldn’t load your settings. Please refresh.</p></Centered>;
-  if (!settings.onboarded) return <Onboarding settings={settings} onReload={reload} />;
+  if (!settings.onboarded) return <Onboarding settings={settings} publicBase={info?.publicUrl ?? ''} onReload={reload} />;
   return <AdminHome info={info} session={session} settings={settings} onReload={reload} onSignedOut={onSignedOut} />;
 }
 
-function Onboarding({ settings, onReload }: { settings: Settings; onReload: () => void }) {
+function Onboarding({ settings, publicBase, onReload }: { settings: Settings; publicBase: string; onReload: () => void }) {
   const [finishing, setFinishing] = useState(false);
   const finish = async () => { setFinishing(true); try { await completeOnboarding(); onReload(); } catch { setFinishing(false); } };
   return (
@@ -178,7 +179,7 @@ function Onboarding({ settings, onReload }: { settings: Settings; onReload: () =
         <p className="page-sub">Your masjid details and a Stripe account — then create your first appeal.</p>
       </div>
       <MasjidCard masjid={settings.masjid} onSaved={onReload} />
-      <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} onChanged={onReload} />
+      <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} publicBase={publicBase} onChanged={onReload} />
       <section className="glass panel">
         <div className="row-between">
           <p className="muted" style={{ margin: 0 }}>
@@ -239,6 +240,10 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
   info: AppInfo | null; session: Session; settings: Settings; onReload: () => void; onSignedOut: () => void;
 }) {
   const embedded = !!info?.embedded;
+  // Public base for share links / QR / the Stripe webhook URL: the OS Fabric remote-access
+  // address (manifest `domain: true`) when the admin has turned remote access on in
+  // OpenMasjidOS; '' otherwise (cards fall back to the in-app tunnel or this device).
+  const publicBase = info?.publicUrl ?? '';
   // Tab is reflected in the URL hash so the profile menu's "Settings" (→ /admin#settings)
   // and refresh/back land on the right section.
   const [tab, setTabState] = useState<AdminTab>(() => tabFromHash());
@@ -271,11 +276,11 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         </div>
 
         {tab === 'overview' && <MetricsDashboard />}
-        {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} />}
+        {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
         {tab === 'donations' && <DonationsCard />}
         {tab === 'payments' && (
           <>
-            <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} onChanged={onReload} />
+            <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} publicBase={publicBase} onChanged={onReload} />
             <PublicAccessCard />
           </>
         )}
@@ -412,16 +417,17 @@ function ModeBadge({ a }: { a: StripeAccount }) {
   return null;
 }
 
-function StripeAccountsCard({ accounts, fabric, onChanged }: { accounts: StripeAccount[]; fabric?: FabricStripeStatus; onChanged: () => void }) {
+function StripeAccountsCard({ accounts, fabric, publicBase, onChanged }: { accounts: StripeAccount[]; fabric?: FabricStripeStatus; publicBase?: string; onChanged: () => void }) {
   const [adding, setAdding] = useState(false);
   const [editId, setEditId] = useState('');
   const [showLocal, setShowLocal] = useState(false);
-  const [webhookBase, setWebhookBase] = useState('');
+  const [webhookBase, setWebhookBase] = useState(publicBase ?? '');
   useEffect(() => {
+    if (publicBase) { setWebhookBase(publicBase); return; }
     getTunnel()
       .then((t) => setWebhookBase(t.enabled && t.publicHostname ? `https://${t.publicHostname}` : originBase()))
       .catch(() => setWebhookBase(originBase()));
-  }, []);
+  }, [publicBase]);
   // When OpenMasjidOS provides a Stripe account from its vault, that's the source of
   // truth — the admin set it up once in the platform and every app shares it. We show
   // it (read-only, no keys to paste) and tuck the local fallback away behind a toggle.
@@ -598,20 +604,22 @@ function StripeInstructions() {
 }
 
 // ── Campaigns ───────────────────────────────────────────────────────────────
-function CampaignsCard({ accounts, currency, masjidName, masjidLogo }: { accounts: StripeAccount[]; currency: string; masjidName: string; masjidLogo: string }) {
+function CampaignsCard({ accounts, currency, masjidName, masjidLogo, publicBase }: { accounts: StripeAccount[]; currency: string; masjidName: string; masjidLogo: string; publicBase: string }) {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [editId, setEditId] = useState('');
-  // The base for shareable links: the Cloudflare public address when public access is
-  // on, otherwise this device's address. Drives the link text + QR codes below.
-  const [shareBase, setShareBase] = useState('');
+  // The base for shareable links + QR codes: the OpenMasjidOS public address when the
+  // admin has enabled remote access there; else the in-app Cloudflare tunnel (standalone);
+  // else this device's address. Seed from publicBase so the QR isn't briefly path-less.
+  const [shareBase, setShareBase] = useState(publicBase || '');
   const reload = () => listCampaigns().then(setCampaigns).catch(() => setCampaigns([]));
   useEffect(() => void reload(), []);
   useEffect(() => {
+    if (publicBase) { setShareBase(publicBase); return; }
     getTunnel()
       .then((t) => setShareBase(t.enabled && t.publicHostname ? `https://${t.publicHostname}` : originBase()))
       .catch(() => setShareBase(originBase()));
-  }, []);
+  }, [publicBase]);
 
   const noAccount = accounts.length === 0;
   return (
@@ -812,7 +820,7 @@ function DonationsCard() {
         <div className="card-head__main">
           <div className="row-between">
             <h2 className="section-title-inline">Donations</h2>
-            {data && data.donations.length > 0 && <a className="btn btn--ghost btn--sm" href="/api/admin/donations.csv"><Download size={14} /> Export CSV</a>}
+            {data && data.donations.length > 0 && <a className="btn btn--ghost btn--sm" href={withBase('/api/admin/donations.csv')}><Download size={14} /> Export CSV</a>}
           </div>
           {data && <p className="muted">{money(data.stats.totalRaised, data.stats.currency)} raised · {data.stats.count} donation{data.stats.count === 1 ? '' : 's'}</p>}
         </div>
@@ -1050,10 +1058,12 @@ function linkHost(): string {
   return typeof location !== 'undefined' ? location.host : 'your-masjid';
 }
 
-/** Accept only safe image URLs for a CSS url() / <img>, else ''. Mirrors the donor page. */
+/** Accept only safe image URLs for a CSS url() / <img>, else ''. Mirrors the donor page.
+ *  A same-origin uploaded image is prefixed with the tunnel base path so previews load
+ *  whether the admin is on the LAN or behind the OpenMasjidOS tunnel. */
 function safeImg(v: string): string {
   const s = (v ?? '').trim();
-  if (/^\/uploads\/[\w.-]+$/.test(s)) return s; // same-origin uploaded image
+  if (/^\/uploads\/[\w.-]+$/.test(s)) return asset(s); // same-origin uploaded image
   return /^(https?:\/\/|data:image\/)/i.test(s) && !/["\\\s]/.test(s) ? s : '';
 }
 

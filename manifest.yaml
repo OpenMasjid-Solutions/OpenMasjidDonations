@@ -5,7 +5,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.16.0
+version: 0.17.0
 author: OpenMasjid-Solutions
 license: AGPL-3.0-only
 icon: icon.svg
@@ -56,6 +56,15 @@ https: true
 # and migrated with the platform). Falls back to locally-entered keys when run
 # standalone. The platform issues the per-app secret used to fetch them.
 stripe: true
+# Opt into the Fabric remote-access/public-URL capability. The admin runs ONE
+# Cloudflare Tunnel in OpenMasjidOS (Settings → Remote access); the platform reaches
+# this app on a single hostname under an admin-chosen path (default the app id), e.g.
+# https://omos.<domain>/donate/…. We ask the platform for our public base + path via
+# GET /api/fabric/site and use it for share links, QR codes and the Stripe webhook URL.
+# Cloudflare forwards the FULL path prefix (it does not strip it), so the server is
+# base-path aware (strips the prefix before routing; injects <base href> into the SPA).
+# Falls back to this device's own address when remote access is off / standalone.
+domain: true
 
 # Install stays effectively one-click. The only (optional) setting picks WHICH named
 # Stripe account from OpenMasjidOS this app should use — leave it blank to use your

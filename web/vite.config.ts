@@ -12,6 +12,12 @@ const version = JSON.parse(readFileSync(new URL('./package.json', import.meta.ur
 // fetches work locally and in production.
 export default defineConfig({
   plugins: [react()],
+  // Relative asset base: the built index.html references assets as ./assets/… so they
+  // resolve against the runtime `<base href>` the server injects. This makes one build
+  // work at the root (LAN) AND under any OpenMasjidOS tunnel path (e.g. /donate) without
+  // baking the path in. Dynamic import() chunks resolve via import.meta.url, so they
+  // follow the prefix too. Do NOT change to an absolute base — that breaks behind the tunnel.
+  base: './',
   define: { __APP_VERSION__: JSON.stringify(version) },
   server: {
     port: 5173,

@@ -326,3 +326,85 @@ export async function fetchFabricStripe(accountName: string): Promise<FabricStri
 export function cachedFabricStripe(): FabricStripeAccount | null {
   return stripeCache?.value ?? stripeLastGood?.value ?? null;
 }
+
+// ── Remote access / public URL via the Fabric (manifest `domain: true`) ─────────
+// The admin runs a Cloudflare Tunnel once in OpenMasjidOS (Settings → Remote access);
+// every app is reached on one hostname under an admin-chosen path (default the app id),
+// e.g. https://omos.example.org/donate/…. We ask the platform for OUR public base + path
+// instead of guessing, and use it for share links, QR codes and the Stripe webhook URL.
+// Cloudflare forwards the FULL path (it does not strip the prefix), so the server must be
+// base-path aware (see index.ts rewriteUrl + HTML injection). Never persisted; fails soft.
+
+/** The platform's answer for this app's public address. `basePath` is normalised to a
+ *  leading slash with no trailing slash (e.g. "/donate"), or "" when remote access is off. */
+export interface FabricSite {
+  enabled: boolean;
+  domain: string;
+  publicUrl: string;
+  basePath: string;
+}
+
+const SITE_OFF: FabricSite = { enabled: false, domain: '', publicUrl: '', basePath: '' };
+
+/** Normalise a path to "" or "/seg[/seg…]" (leading slash, no trailing slash). */
+function normBasePath(raw: unknown): string {
+  let p = (typeof raw === 'string' ? raw : '').trim();
+  if (!p || p === '/') return '';
+  if (!p.startsWith('/')) p = '/' + p;
+  return p.replace(/\/+$/, '');
+}
+
+let siteCache: { at: number; value: FabricSite } | null = null;
+const SITE_CACHE_MS = 60_000;
+
+function parseSite(j: unknown): FabricSite {
+  if (!j || typeof j !== 'object') return SITE_OFF;
+  const o = j as Record<string, unknown>;
+  const enabled = o.enabled === true;
+  if (!enabled) return SITE_OFF;
+  return {
+    enabled: true,
+    domain: typeof o.domain === 'string' ? o.domain : '',
+    publicUrl: typeof o.publicUrl === 'string' ? o.publicUrl.replace(/\/+$/, '') : '',
+    basePath: normBasePath(o.basePath),
+  };
+}
+
+/**
+ * Fetch this app's public address from the platform (server→server). Returns SITE_OFF
+ * when the Fabric isn't configured, the platform is unreachable, or remote access is off
+ * — callers then derive URLs from the incoming request host (today's behaviour). Cached
+ * ~60s; on a transient error serves the last cached value so base-path routing stays
+ * stable through a blip. NEVER throws; NEVER persists the domain/publicUrl.
+ */
+export async function fetchFabricSite(): Promise<FabricSite> {
+  if (!config.omosBaseUrl || !config.omosAppSecret) return SITE_OFF;
+  const now = Date.now();
+  if (siteCache && now - siteCache.at < SITE_CACHE_MS) return siteCache.value;
+  warnIfCleartextSecret();
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch(`${config.omosBaseUrl}/api/fabric/site`, {
+      headers: { 'x-openmasjid-app-secret': config.omosAppSecret },
+      signal: ctrl.signal,
+      redirect: 'error',
+    });
+    clearTimeout(t);
+    const value = res.ok ? parseSite(await res.json().catch(() => null)) : SITE_OFF;
+    siteCache = { at: now, value };
+    return value;
+  } catch (err) {
+    log.debug(`Fabric site fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+    // Keep the last known base path stable through a transient outage so routing behind
+    // the tunnel doesn't flap; only forget it after the cache window lapses.
+    if (siteCache && now - siteCache.at < SITE_CACHE_MS * 5) return siteCache.value;
+    return SITE_OFF;
+  }
+}
+
+/** The last fetched site WITHOUT a network call — for the synchronous URL-rewrite hook
+ *  that must decide, per request, whether to strip a base-path prefix. */
+export function cachedFabricSite(): FabricSite {
+  return siteCache?.value ?? SITE_OFF;
+}

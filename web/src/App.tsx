@@ -7,6 +7,7 @@ import { ShieldCheck } from 'lucide-react';
 import { getAppInfo, type AppInfo } from './api';
 import { useOmosAppearanceSync, usePrefs, useReadableTheme } from './prefs';
 import { Scene, Brand, Clock, ProfileMenu } from './ui';
+import { withBase, stripBase } from './base';
 
 // Code-split the two heavy areas so the initial shell stays tiny and fast: the donor
 // page (which pulls in Stripe.js) and the admin panel each load only when visited.
@@ -56,7 +57,9 @@ export function App() {
   // via our same-origin relay so it isn't mixed-content-blocked on our HTTPS page).
   useOmosAppearanceSync(info?.embedded);
 
-  const path = typeof location !== 'undefined' ? location.pathname.replace(/\/+$/, '') : '/';
+  // Strip any tunnel base path (e.g. /donate) so route matching is identical on the LAN
+  // and behind the OpenMasjidOS tunnel.
+  const path = stripBase((typeof location !== 'undefined' ? location.pathname : '/').replace(/\/+$/, '') || '/');
   const isAdmin = path === '/admin' || path.startsWith('/admin/');
   const campaign = isAdmin ? null : parseCampaignPath(path);
   // First boot: until setup is done there's nothing for donors at the root, so send
@@ -64,7 +67,7 @@ export function App() {
   const goToSetup = !!info && !info.onboarded && !isAdmin && !campaign;
 
   useEffect(() => {
-    if (goToSetup) window.location.replace('/admin');
+    if (goToSetup) window.location.replace(withBase('/admin'));
   }, [goToSetup]);
 
   // On-scene text colour follows the WALLPAPER (not the light/dark toggle): preset
@@ -129,7 +132,7 @@ function PublicHome({ info, reduce }: { info: AppInfo | null; reduce: boolean })
           {info?.embedded ? 'Connected to OpenMasjidOS' : 'Running standalone'}
           {' · '}v{info?.version ?? __APP_VERSION__}
           {' · '}
-          <a href="/admin">Admin</a>
+          <a href={withBase('/admin')}>Admin</a>
         </p>
       </motion.section>
     </main>

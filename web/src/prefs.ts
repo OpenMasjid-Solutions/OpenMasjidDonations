@@ -13,6 +13,7 @@
  * read theme/wallpaper from it, never anything security-relevant.
  */
 import { useEffect, useState, useSyncExternalStore } from 'react';
+import { withBase } from './base';
 
 export interface Prefs {
   theme: 'system' | 'dark' | 'light';
@@ -187,7 +188,7 @@ export function usePrefs(): Prefs {
  *  The server fetches the platform side. Only theme + wallpaper + accent are applied. */
 export async function fetchOmosAppearance(): Promise<void> {
   try {
-    const res = await fetch('/api/public/appearance', { credentials: 'omit' });
+    const res = await fetch(withBase('/api/public/appearance'), { credentials: 'omit' });
     if (!res.ok) return;
     if (!prefsStore.get().followOmos) return;
     prefsStore.patch(appearancePatch((await res.json()) as OmosAppearance));

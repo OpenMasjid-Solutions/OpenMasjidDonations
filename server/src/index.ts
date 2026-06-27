@@ -20,7 +20,7 @@ import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, StripeAccount, StripeConfig } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
-import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe } from './fabric';
+import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricSite, cachedFabricSite } from './fabric';
 import { LoginLimiter } from './rateLimit';
 import { TunnelManager } from './tunnel';
 import {
@@ -73,6 +73,21 @@ async function main(): Promise<void> {
     // the real TCP peer below. (A future reverse-proxy deployment would set this to
     // the specific trusted proxy CIDR, not `true`.)
     bodyLimit: 1_048_576, // 1 MiB JSON cap (uploads get their own limit later)
+    // Base-path awareness (manifest `domain: true`): when OpenMasjidOS exposes us behind
+    // its Cloudflare tunnel it forwards the FULL admin-chosen path prefix (e.g. /donate)
+    // WITHOUT stripping it, so requests arrive as /donate/api/x, /donate/assets/y, etc.
+    // We strip that prefix here, before routing, so every route below stays written at the
+    // root and works identically on the LAN (no prefix) and behind the tunnel. The prefix
+    // comes from the Fabric `basePath` (cached, refreshed below); empty = nothing to strip.
+    rewriteUrl(req) {
+      const url = req.url ?? '/';
+      const base = cachedFabricSite().basePath;
+      if (!base) return url;
+      if (url === base) return '/';
+      if (url.startsWith(base + '/')) return url.slice(base.length);
+      if (url.startsWith(base + '?')) return '/' + url.slice(base.length);
+      return url;
+    },
   });
   await app.register(fastifyCookie); // parses req.cookies + decorates reply.setCookie
   // Multipart, only for image uploads (≤5 MiB, one file). Other routes keep JSON.
@@ -122,6 +137,11 @@ async function main(): Promise<void> {
       donationsConfigured:
         store.listStripeAccounts().some((a) => stripeConfigured(a)) ||
         (() => { const f = cachedFabricStripe(); return !!f && stripeConfigured(f); })(),
+      // Public address from the OS Fabric remote-access tunnel (manifest `domain: true`),
+      // used by the web for share links + QR. Empty when remote access is off → the web
+      // falls back to this device's address. Not secret.
+      publicUrl: cachedFabricSite().publicUrl,
+      basePath: cachedFabricSite().basePath,
       // Before the admin finishes first-run setup, the landing page sends them
       // straight to /admin (where they log in / set a password, then the wizard).
       onboarded: store.isOnboarded(),
@@ -923,22 +943,37 @@ async function main(): Promise<void> {
   });
 
   // ── Static web app (built by Vite into ./public) ────────────────────────────
-  const havePublic = fs.existsSync(path.join(config.publicDir, 'index.html'));
+  const indexPath = path.join(config.publicDir, 'index.html');
+  const havePublic = fs.existsSync(indexPath);
   if (havePublic) {
-    await app.register(fastifyStatic, { root: config.publicDir, index: ['index.html'] });
+    // index:false — we serve index.html ourselves (below) so we can inject the base path.
+    await app.register(fastifyStatic, { root: config.publicDir, index: false });
   } else {
     log.warn(`no built web app at ${config.publicDir} — run "cd web && npm run build" (dev uses the Vite server)`);
   }
 
-  // SPA fallback: client-side routes (e.g. /admin) resolve to index.html; requests
-  // that look like a file (have an extension, e.g. a stale /assets/x.js) still 404
-  // rather than silently returning the app shell; unknown API routes return JSON.
+  // The built index.html, read once; the placeholder is replaced per-request with the
+  // current base path so a single image works at the root (LAN) and under any tunnel path.
+  const rawIndex = havePublic ? fs.readFileSync(indexPath, 'utf8') : '';
+  /** Serve index.html with the base path injected: a `<base href>` (so the relative-built
+   *  Vite assets resolve under the tunnel prefix) plus `window.__OMOS_BASE__` (read by the
+   *  web for API/nav/asset URLs). basePath is sanitised to a safe URL-path charset. */
+  const sendIndexHtml = (reply: import('fastify').FastifyReply) => {
+    const base = cachedFabricSite().basePath.replace(/[^\w/-]/g, ''); // defensive: path charset only
+    const head = `<base href="${base}/">\n    <script>window.__OMOS_BASE__=${JSON.stringify(base)}</script>`;
+    reply.type('text/html').send(rawIndex.replace('<head>', `<head>\n    ${head}`));
+  };
+  if (havePublic) app.get('/', async (_req, reply) => sendIndexHtml(reply));
+
+  // SPA fallback: client-side routes (e.g. /admin, /zakat) resolve to index.html; requests
+  // that look like a file (have an extension, e.g. a stale /assets/x.js) still 404 rather
+  // than silently returning the app shell; unknown API routes return JSON.
   app.setNotFoundHandler((req, reply) => {
     const url = req.raw.url ?? '/';
     const pathname = url.split('?')[0];
     const looksLikeFile = path.extname(pathname) !== '';
     if (req.method === 'GET' && havePublic && !looksLikeFile && !url.startsWith('/api') && !url.startsWith('/healthz')) {
-      return reply.type('text/html').sendFile('index.html');
+      return sendIndexHtml(reply);
     }
     return reply.code(404).send({ error: 'Not found.' });
   });
@@ -955,19 +990,31 @@ async function main(): Promise<void> {
     reply.code(status).send({ error: e.expose && e.message ? e.message : friendly });
   });
 
+  // Learn our base path BEFORE serving so the URL-rewrite hook strips the tunnel prefix
+  // from the very first request (not only once something warms the cache). This is
+  // awaited but fail-soft: fetchFabricSite has its own ~4s timeout and never throws, so a
+  // slow/unreachable platform delays startup by at most that, then we serve at the root.
+  if (ssoConfigured()) {
+    await fetchFabricSite().catch(() => {});
+    void fetchFabricStripe(config.stripeAccount); // not routing-critical → don't block
+    // Refresh every 15s: the 60s response cache means this is ~1 network call/min in steady
+    // state, but after a (re)start during a platform blip — when the cache is empty and the
+    // tunnel prefix isn't being stripped yet — each tick actually re-fetches, so base-path
+    // routing recovers within ~15s of the platform coming back rather than being broken for
+    // up to a minute. Picks up an admin changing the remote-access path quickly too.
+    const siteRefresh = setInterval(() => void fetchFabricSite(), 15_000);
+    siteRefresh.unref?.(); // don't keep the process alive just for this timer
+  }
+
   await app.listen({ port: config.port, host: config.host });
   log.info(`OpenMasjid Donations listening on http://${config.host}:${config.port}`);
   log.info(ssoConfigured() ? 'running embedded under OpenMasjidOS (Fabric available)' : 'running standalone (local password)');
 
-  // Bring up the Cloudflare Tunnel if the admin has enabled it (no-op otherwise).
+  // Bring up the Cloudflare Tunnel if the admin has enabled it (no-op otherwise). Now the
+  // STANDALONE fallback only — when embedded, remote access is the platform's job (the OS
+  // owns Cloudflare and we read our public URL from /api/fabric/site).
   const tcfg = store.getTunnel();
   tunnel.apply(tcfg.token, tcfg.enabled);
-
-  // Warm the Fabric Stripe cache (fire-and-forget) so the very first public request
-  // after a (re)start — including right after a restore onto a new machine — already
-  // knows donations are set up, instead of reporting "not configured" until something
-  // warms it. Fails soft; never blocks startup.
-  if (ssoConfigured()) void fetchFabricStripe(config.stripeAccount);
 
   const shutdown = () => {
     log.info('shutting down');

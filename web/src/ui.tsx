@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { HandCoins, LogOut, Moon, Settings, Sun, User } from 'lucide-react';
 import { prefsStore, resolveTheme, usePrefs } from './prefs';
 import { getSession, logout, type AppInfo, type Session } from './api';
+import { withBase } from './base';
 
 /** Ambient background. A custom wallpaper image (inherited from the dashboard or set
  *  in the app) fully replaces the preset gradient; otherwise we show the preset scene
@@ -68,7 +69,7 @@ export function ProfileMenu({ info }: { info: AppInfo | null }) {
   }, [open]);
 
   const toggleTheme = () => prefsStore.patch({ theme: current === 'dark' ? 'light' : 'dark', followOmos: false });
-  const signOut = async () => { try { await logout(); } catch { /* ignore */ } window.location.href = '/'; };
+  const signOut = async () => { try { await logout(); } catch { /* ignore */ } window.location.href = withBase('/') || '/'; };
   // Under SSO the platform owns the session, so a local sign-out wouldn't stick.
   const canSignOut = !!session?.authed && !session?.sso.enabled;
 
@@ -83,7 +84,7 @@ export function ProfileMenu({ info }: { info: AppInfo | null }) {
             {current === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
             <span>{current === 'dark' ? 'Light mode' : 'Dark mode'}</span>
           </button>
-          <a className="menu-item" role="menuitem" href="/admin#settings"><Settings size={17} /><span>Settings</span></a>
+          <a className="menu-item" role="menuitem" href={withBase('/admin#settings')}><Settings size={17} /><span>Settings</span></a>
           {canSignOut && (
             <button className="menu-item" role="menuitem" onClick={signOut}><LogOut size={17} /><span>Sign out</span></button>
           )}
