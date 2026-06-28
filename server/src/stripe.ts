@@ -114,13 +114,17 @@ export interface IntentResult {
   clientSecret: string;
 }
 
-/** Create a one-time PaymentIntent on the given account. Amount in minor units. */
+/** Create a one-time PaymentIntent on the given account. Amount in minor units. When a
+ *  donor email is given, set `receipt_email` so Stripe sends its own built-in receipt on
+ *  success (the masjid must have "successful payment" receipts enabled in their Stripe
+ *  settings; Stripe does not email receipts for TEST-mode payments). */
 export async function createPaymentIntent(
   account: StripeConfig,
   amountMinor: number,
   currency: string,
   metadata: Record<string, string>,
   idempotencyKey: string,
+  receiptEmail?: string,
 ): Promise<IntentResult> {
   const stripe = client(account.secretKey);
   const pi = await stripe.paymentIntents.create(
@@ -129,6 +133,7 @@ export async function createPaymentIntent(
       currency: currency.toLowerCase(),
       metadata,
       automatic_payment_methods: { enabled: true },
+      ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
     },
     { idempotencyKey },
   );

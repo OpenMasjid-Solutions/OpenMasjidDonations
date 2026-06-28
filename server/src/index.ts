@@ -20,7 +20,7 @@ import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, StripeAccount, StripeConfig } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
-import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, fetchFabricSite, cachedFabricSite } from './fabric';
+import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature } from './fabric';
 import { LoginLimiter } from './rateLimit';
 import { TunnelManager } from './tunnel';
 import {
@@ -64,6 +64,13 @@ async function main(): Promise<void> {
   const store = new Store();
   const loginLimiter = new LoginLimiter();
   const tunnel = new TunnelManager();
+
+  // Baseline fingerprint of the OpenMasjidOS Fabric config (Stripe account + remote-access
+  // site). The watcher (started after listen) compares this over time and restarts the app
+  // when the admin changes Stripe/remote-access IN OPENMASJIDOS, so the new config applies
+  // without a manual container restart. Reset to null after an IN-APP change so that change
+  // (already applied via a cache clear) doesn't itself trigger a restart.
+  let fabricBaseline: string | null = null;
 
   const app = Fastify({
     logger: false, // we log ourselves and never log secrets
@@ -495,6 +502,11 @@ async function main(): Promise<void> {
     const parsed = z.object({ accountId: z.string().max(120) }).safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose an account.' });
     store.setFabricStripeChoice(parsed.data.accountId.trim());
+    // Apply the new choice immediately: drop the cached keys so the next fetch (this status
+    // call, then campaign-create / charges) re-reads the OS vault — no restart needed. Reset
+    // the watcher baseline so this in-app change isn't mistaken for an external one + rebooted.
+    clearFabricStripeCache();
+    fabricBaseline = null;
     return { data: await fabricStripeStatus() };
   });
 
@@ -834,7 +846,8 @@ async function main(): Promise<void> {
         subscriptionId = sub.subscriptionId;
         if (!clientSecret || !paymentIntentId) throw new Error('subscription has no payment intent');
       } else {
-        const intent = await createPaymentIntent(acct, chargeMinor, currency, metadata, idempotencyKey);
+        // Pass the donor email (if given) so Stripe emails its built-in receipt on success.
+        const intent = await createPaymentIntent(acct, chargeMinor, currency, metadata, idempotencyKey, donorEmail.trim() || undefined);
         clientSecret = intent.clientSecret;
         paymentIntentId = intent.id;
       }
@@ -1011,14 +1024,7 @@ async function main(): Promise<void> {
   // slow/unreachable platform delays startup by at most that, then we serve at the root.
   if (ssoConfigured()) {
     await fetchFabricSite().catch(() => {});
-    void fetchFabricStripe(config.stripeAccount); // not routing-critical → don't block
-    // Refresh every 15s: the 60s response cache means this is ~1 network call/min in steady
-    // state, but after a (re)start during a platform blip — when the cache is empty and the
-    // tunnel prefix isn't being stripped yet — each tick actually re-fetches, so base-path
-    // routing recovers within ~15s of the platform coming back rather than being broken for
-    // up to a minute. Picks up an admin changing the remote-access path quickly too.
-    const siteRefresh = setInterval(() => void fetchFabricSite(), 15_000);
-    siteRefresh.unref?.(); // don't keep the process alive just for this timer
+    void fetchFabricStripe(store.getFabricStripeChoice()); // not routing-critical → don't block
   }
 
   await app.listen({ port: config.port, host: config.host });
@@ -1037,14 +1043,39 @@ async function main(): Promise<void> {
     tunnel.apply(tcfg.token, tcfg.enabled);
   }
 
-  const shutdown = () => {
+  const shutdown = (code = 0) => {
     log.info('shutting down');
     tunnel.stop();
-    store.close();
-    app.close().finally(() => setTimeout(() => process.exit(0), 200));
+    try { store.close(); } catch { /* already closed */ }
+    app.close().finally(() => setTimeout(() => process.exit(code), 200));
+    // Hard backstop in case app.close() hangs, so the container actually cycles.
+    setTimeout(() => process.exit(code), 2000).unref?.();
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => shutdown(0));
+  process.on('SIGINT', () => shutdown(0));
+
+  // Watch the OpenMasjidOS Fabric config (embedded only). When the admin changes the Stripe
+  // account or remote-access settings IN OPENMASJIDOS, the fingerprint changes and we restart
+  // so the new config is applied cleanly — `restart: unless-stopped` brings us right back.
+  // (In-app changes apply instantly via a cache clear and reset the baseline, so they don't
+  // trigger this.) We ignore changes seen while the platform is unreachable, so a transient
+  // outage never causes a restart loop; the first tick just records the baseline.
+  if (ssoConfigured()) {
+    const watch = async () => {
+      try {
+        const { sig, reachable } = await fabricConfigSignature(store.getFabricStripeChoice());
+        if (!reachable) return; // can't trust a signature taken during an outage
+        if (fabricBaseline === null) { fabricBaseline = sig; return; }
+        if (sig !== fabricBaseline) {
+          fabricBaseline = sig; // avoid re-triggering if the exit is delayed
+          log.info('OpenMasjidOS Stripe/remote-access settings changed — restarting to apply them.');
+          shutdown(0);
+        }
+      } catch { /* fail soft — never let the watcher crash the app */ }
+    };
+    const iv = setInterval(() => void watch(), 20_000);
+    iv.unref?.();
+  }
 }
 
 main().catch((err) => {

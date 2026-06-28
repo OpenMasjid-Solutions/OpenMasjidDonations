@@ -211,7 +211,7 @@ export async function probePlatform(cookieHeader: string | undefined): Promise<P
 /** Cheap, unauthenticated "is the platform up?" check, used only when there's no session
  *  cookie to validate. The appearance endpoint is public + CORS-enabled; any response
  *  (even an error status) proves we reached it. */
-async function platformReachable(): Promise<boolean> {
+export async function platformReachable(): Promise<boolean> {
   if (!config.omosBaseUrl) return false;
   try {
     const ctrl = new AbortController();
@@ -283,10 +283,10 @@ function parseFabricStripe(j: unknown): FabricStripeAccount | null {
  * to local keys. Caches the result in memory (~60s); on a transient error serves the last
  * good copy (~10min) so a blip doesn't stop donations. NEVER throws; NEVER persists.
  */
-export async function fetchFabricStripe(accountName: string): Promise<FabricStripeAccount | null> {
+export async function fetchFabricStripe(accountName: string, force = false): Promise<FabricStripeAccount | null> {
   if (!config.omosBaseUrl || !config.omosAppSecret) return null;
   const now = Date.now();
-  if (stripeCache && stripeCache.account === accountName && now - stripeCache.at < STRIPE_CACHE_MS) {
+  if (!force && stripeCache && stripeCache.account === accountName && now - stripeCache.at < STRIPE_CACHE_MS) {
     return stripeCache.value;
   }
   warnIfCleartextSecret();
@@ -325,6 +325,14 @@ export async function fetchFabricStripe(accountName: string): Promise<FabricStri
  *  frequently-hit sync paths (e.g. the public landing hint). May be stale or null. */
 export function cachedFabricStripe(): FabricStripeAccount | null {
   return stripeCache?.value ?? stripeLastGood?.value ?? null;
+}
+
+/** Drop the in-memory Stripe-keys cache so the next fetch re-reads the OS vault. Called
+ *  when the admin changes the chosen account in-app, so a freshly-connected/rotated
+ *  account takes effect immediately — no container restart needed. */
+export function clearFabricStripeCache(): void {
+  stripeCache = null;
+  stripeLastGood = null;
 }
 
 /** A non-secret reference to a vaulted Stripe account, for the in-app account picker. */
@@ -417,10 +425,10 @@ function parseSite(j: unknown): FabricSite {
  * ~60s; on a transient error serves the last cached value so base-path routing stays
  * stable through a blip. NEVER throws; NEVER persists the domain/publicUrl.
  */
-export async function fetchFabricSite(): Promise<FabricSite> {
+export async function fetchFabricSite(force = false): Promise<FabricSite> {
   if (!config.omosBaseUrl || !config.omosAppSecret) return SITE_OFF;
   const now = Date.now();
-  if (siteCache && now - siteCache.at < SITE_CACHE_MS) return siteCache.value;
+  if (!force && siteCache && now - siteCache.at < SITE_CACHE_MS) return siteCache.value;
   warnIfCleartextSecret();
   try {
     const ctrl = new AbortController();
@@ -447,4 +455,31 @@ export async function fetchFabricSite(): Promise<FabricSite> {
  *  that must decide, per request, whether to strip a base-path prefix. */
 export function cachedFabricSite(): FabricSite {
   return siteCache?.value ?? SITE_OFF;
+}
+
+/**
+ * A fingerprint of the Fabric config that affects this app — the vaulted Stripe account
+ * (which one, and whether its keys are present) and the remote-access site (base path +
+ * public URL). The reboot watcher compares this over time: when the admin changes Stripe
+ * or remote access IN OPENMASJIDOS, the fingerprint changes and the app restarts so the
+ * new config is applied cleanly. `reachable` lets the watcher ignore transient outages
+ * (a fingerprint that only changed because the platform was briefly down). Force-refreshes
+ * both, so it sees changes promptly rather than through the normal cache.
+ */
+export async function fabricConfigSignature(accountName: string): Promise<{ sig: string; reachable: boolean }> {
+  const [stripe, site, reachable] = await Promise.all([
+    fetchFabricStripe(accountName, true),
+    fetchFabricSite(true),
+    platformReachable(),
+  ]);
+  const sig = JSON.stringify({
+    s_id: stripe?.id ?? '',
+    s_pk: stripe?.publishableKey ?? '',
+    s_hasSecret: !!stripe?.secretKey,
+    s_hasWebhook: !!stripe?.webhookSecret,
+    site_enabled: site.enabled,
+    site_base: site.basePath,
+    site_url: site.publicUrl,
+  });
+  return { sig, reachable };
 }

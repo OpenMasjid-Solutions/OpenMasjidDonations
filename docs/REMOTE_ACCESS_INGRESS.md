@@ -39,6 +39,13 @@ curl https://omos.<domain>/<basePath>/api/...      →  your API
 
 (`<basePath>` = `/api/fabric/site`'s value. 404? Confirm the path in **Settings → Remote access**.)
 
+## Getting a 502 from `omos.<domain>`?
+
+The single Cloudflare route's **Service Type must be HTTP** (URL `localhost:<OS port>`, default 80) —
+that's the OS plain-HTTP front door. **HTTPS** there makes cloudflared do TLS against a non-TLS port →
+**502**, and every app's path-routing probe then fails. Set Type **HTTP**; "No TLS Verify" isn't needed.
+(Stripe still gets its secure context — Cloudflare serves the public side over HTTPS.)
+
 ## To pick it up
 
 Admin: update OpenMasjidOS to **v0.37.0**; **Settings → Remote access** shows the one route to add +
