@@ -119,7 +119,9 @@ For Stripe work (later slices) use **test keys** and Stripe's test cards.
 - **`web/`** — **React + Vite + TypeScript**, styled with the OpenMasjidOS design
   tokens (so it matches the dashboard) plus Tailwind utilities, Motion for gentle
   animation, and Stripe's Payment Element for card entry.
-- **License: [AGPL-3.0](LICENSE).**
+- **License: [AGPL-3.0](LICENSE).** Contributions are under AGPL-3.0 + a **Contributor License
+  Agreement** ([CLA.md](CLA.md)) that allows commercial/dual licensing while the public tree stays
+  AGPL-3.0; it's signed automatically on your first PR. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This is an OpenMasjidOS **app**; the platform that runs it lives in
 [OpenMasjidOS](https://github.com/OpenMasjid-Solutions/OpenMasjidOS), and apps are listed in

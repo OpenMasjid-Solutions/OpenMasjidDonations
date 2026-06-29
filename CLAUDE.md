@@ -19,7 +19,7 @@ You are building an OpenMasjidOS app. Two repositories define how that is done. 
 2. **`OpenMasjid-Solutions/OpenMasjidAPPS`** — the catalog contract. Read **`OpenMasjidOS/docs/APP_MANIFEST_SPEC.md`** for the manifest, the `docker-compose.yml` rules (labels, project naming, volumes, ports, restart policy, banned settings), and validation. The app is registered by adding an entry to **`registry.yaml`** in OpenMasjidAPPS: `id`, `repo`, `ref` (a git tag). **Do not** hand-build a `catalog.json` — the registry model supersedes the older folder/catalog model in places; follow what Display does.
 
 **Hard rules that override everything except safety:**
-- **License: AGPL-3.0.** Add the full AGPL-3.0 `LICENSE`. Include a visible "Source code" link to this repo in the admin UI.
+- **License: AGPL-3.0 + CLA.** The full AGPL-3.0 `LICENSE` plus a **Contributor License Agreement** (`CLA.md`, enforced by `.github/workflows/cla.yml`): contributions are AGPL-3.0 inbound and grant OpenMasjid-Solutions the right to **also** offer commercial/dual licenses (public tree stays AGPL-3.0). Keep every file's SPDX header; include a visible "Source code" link to this repo in the admin UI. See `CONTRIBUTING.md`.
 - **Never copy code from umbrelOS / `umbrel-apps` (PolyForm-Noncommercial)** — incompatible with AGPL. Reimplement from behaviour.
 - **Stripe secret keys are server-side only.** They must never reach the browser, never be logged, never be committed. The browser only ever sees the **publishable** key.
 - **Never touch raw card data.** Card entry happens inside Stripe's own elements/hosted pages (PCI scope SAQ-A). We only handle tokens/IDs.
