@@ -1,14 +1,15 @@
 {
   "name": "openmasjid-donations-server",
   "private": true,
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "API + Stripe + storage + static web host for OpenMasjid Donations",
   "license": "AGPL-3.0-only",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/csv.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
