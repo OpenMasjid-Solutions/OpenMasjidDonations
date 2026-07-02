@@ -206,6 +206,11 @@ Match the OpenMasjid family — the polish must equal Display and the dashboard.
 - Least-privilege container (per §10). Outbound HTTPS to Stripe only; assume no inbound by default.
 - Note for admins (in docs): taking donations from outside the masjid network means exposing the app publicly — recommend doing so only behind HTTPS (e.g. the platform's remote-access/tunnel helper).
 
+**Security invariants — DO NOT REGRESS** (v0.39.0 sweep):
+- **CSV/spreadsheet injection:** donor name/email come from the *unauthenticated* public intent endpoint. Any cell exported to CSV must be run through `csvCell`, which prefixes a leading formula trigger (`= + - @` tab CR) with a quote. Never write donor-controlled values to an export without it.
+- **First-run `/api/setup` under SSO:** when SSO is configured and the platform is **reachable**, refuse an anonymous local-admin claim (only allow the local-password recovery when the platform is *unreachable*). Under SSO the local admin is never set, so an unguarded setup stays open forever = permanent unauthenticated takeover. Keep the `probePlatform` guard.
+- Behind the OS proxy you may trust `X-Forwarded-Proto`/`-Host`/`-For` **only because the platform's ingress now sanitises them** — never trust them when reached directly.
+
 ---
 
 ## 14. Coding conventions
