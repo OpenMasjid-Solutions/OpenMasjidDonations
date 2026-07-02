@@ -46,9 +46,15 @@ const log = makeLog('main');
 
 const LOOPBACK_RE = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[?::1)/i;
 
-/** Quote a CSV cell (escape quotes; wrap if it contains comma/quote/newline). */
+/** Quote a CSV cell (escape quotes; wrap if it contains comma/quote/newline).
+ *  Also neutralise spreadsheet formula/DDE injection: donor name/email come from
+ *  the public, unauthenticated intent endpoint, so a value like
+ *  `=HYPERLINK(...)` or `=cmd|'/C ...'!A1` would execute when an admin opens the
+ *  export in Excel/Sheets/LibreOffice. Prefix a leading formula trigger with a
+ *  single quote (the OWASP mitigation) — harmless for every legitimate value. */
 function csvCell(v: string): string {
-  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  const s = /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 /** Friendly money string for a minor-unit amount, e.g. "£50.00". */
