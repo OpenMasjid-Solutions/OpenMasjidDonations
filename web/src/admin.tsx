@@ -279,7 +279,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         </div>
 
         {tab === 'overview' && <MetricsDashboard />}
-        {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
+        {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
         {tab === 'donations' && <DonationsCard />}
         {tab === 'thankyou' && <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />}
         {tab === 'payments' && (
@@ -639,7 +639,7 @@ function StripeInstructions() {
 }
 
 // ── Campaigns ───────────────────────────────────────────────────────────────
-function CampaignsCard({ accounts, currency, masjidName, masjidLogo, publicBase }: { accounts: StripeAccount[]; currency: string; masjidName: string; masjidLogo: string; publicBase: string }) {
+function CampaignsCard({ accounts, fabric, currency, masjidName, masjidLogo, publicBase }: { accounts: StripeAccount[]; fabric?: FabricStripeStatus; currency: string; masjidName: string; masjidLogo: string; publicBase: string }) {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [editId, setEditId] = useState('');
@@ -656,7 +656,9 @@ function CampaignsCard({ accounts, currency, masjidName, masjidLogo, publicBase 
       .catch(() => setShareBase(originBase()));
   }, [publicBase]);
 
-  const noAccount = accounts.length === 0;
+  // A campaign needs somewhere for money to go: a local Stripe account OR the
+  // OpenMasjidOS Fabric account (embedded installs have no local account at all).
+  const noAccount = accounts.length === 0 && !fabric?.available;
   return (
     <section className="glass panel">
       <div className="card-head">
@@ -666,7 +668,7 @@ function CampaignsCard({ accounts, currency, masjidName, masjidLogo, publicBase 
           <p className="muted">Each appeal gets its own link you choose — e.g. <span className="mono">/zakat</span>. Point different appeals at different Stripe accounts.</p>
         </div>
       </div>
-      {noAccount && <p className="hint">Add a Stripe account below first, then create a campaign.</p>}
+      {noAccount && <p className="hint">Connect Stripe first (Payments tab, or in OpenMasjidOS → Settings → Payments), then create a campaign.</p>}
       <div className="list">
         {(campaigns ?? []).map((c) => (
           <div key={c.id}>
@@ -810,11 +812,17 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
         <Field id="cmin" label={`Minimum custom amount (${currency})`}><input id="cmin" className="input" type="number" min="0" step="0.01" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} /></Field>
         <Field id="cgoal" label={`Goal (${currency}, 0 = none)`}><input id="cgoal" className="input" type="number" min="0" step="0.01" value={goalAmount} onChange={(e) => setGoalAmount(e.target.value)} /></Field>
       </div>
-      <Field id="cacct" label="Stripe account (where money goes)">
-        <select id="cacct" className="input" value={stripeAccountId} onChange={(e) => setStripeAccountId(e.target.value)}>
-          {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}{a.configured ? '' : ' (needs keys)'}</option>)}
-        </select>
-      </Field>
+      {accounts.length > 0 ? (
+        <Field id="cacct" label="Stripe account (where money goes)">
+          <select id="cacct" className="input" value={stripeAccountId} onChange={(e) => setStripeAccountId(e.target.value)}>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}{a.configured ? '' : ' (needs keys)'}</option>)}
+          </select>
+        </Field>
+      ) : (
+        // No local account → this is an embedded install; money goes to the OpenMasjidOS
+        // Fabric account (the server resolves it at pay time regardless of this field).
+        <p className="hint">Payments go to your OpenMasjidOS Stripe account (Payments tab).</p>
+      )}
       <label className="check-row"><input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} /><span>Allow donors to enter their own amount</span></label>
       <label className="check-row"><input type="checkbox" checked={coverFees} onChange={(e) => setCoverFees(e.target.checked)} /><span>Offer donors the option to cover card fees</span></label>
       <label className="check-row"><input type="checkbox" checked={allowMonthly} onChange={(e) => setAllowMonthly(e.target.checked)} /><span>Offer a monthly (recurring) option</span></label>
