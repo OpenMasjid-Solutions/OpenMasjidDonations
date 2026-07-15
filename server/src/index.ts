@@ -563,6 +563,7 @@ async function main(): Promise<void> {
     forceCoverFees: z.boolean().optional(),
     giftAid: z.boolean().optional(),
     allowMonthly: z.boolean().optional(),
+    widgetEnabled: z.boolean().optional(),
     goalAmount: z.number().nonnegative().optional(), // major
     active: z.boolean().optional(),
     // Per-campaign thank-you override; any empty field inherits the global default.
@@ -617,6 +618,7 @@ async function main(): Promise<void> {
       forceCoverFees: p.forceCoverFees,
       giftAid: p.giftAid,
       allowMonthly: p.allowMonthly,
+      widgetEnabled: p.widgetEnabled,
       active: p.active,
       thankYou: thankYouOverride(p.thankYou),
       ...campaignAmountsToMinor(p),
@@ -650,6 +652,7 @@ async function main(): Promise<void> {
       forceCoverFees: p.forceCoverFees,
       giftAid: p.giftAid,
       allowMonthly: p.allowMonthly,
+      widgetEnabled: p.widgetEnabled,
       active: p.active,
       thankYou: thankYouOverride(p.thankYou),
       ...campaignAmountsToMinor(p),
@@ -1065,13 +1068,29 @@ async function main(): Promise<void> {
   const rawIndex = havePublic ? fs.readFileSync(indexPath, 'utf8') : '';
   /** Serve index.html with the base path injected: a `<base href>` (so the relative-built
    *  Vite assets resolve under the tunnel prefix) plus `window.__OMOS_BASE__` (read by the
-   *  web for API/nav/asset URLs). basePath is sanitised to a safe URL-path charset. */
-  const sendIndexHtml = (reply: import('fastify').FastifyReply) => {
+   *  web for API/nav/asset URLs). basePath is sanitised to a safe URL-path charset. When
+   *  `widgetSlug` is given, also inject `window.__OMOS_WIDGET__` so the SPA renders that
+   *  campaign in the compact, chrome-less widget layout for embedding. */
+  const sendIndexHtml = (reply: import('fastify').FastifyReply, widgetSlug?: string) => {
     const base = cachedFabricSite().basePath.replace(/[^\w/-]/g, ''); // defensive: path charset only
-    const head = `<base href="${base}/">\n    <script>window.__OMOS_BASE__=${JSON.stringify(base)}</script>`;
+    let head = `<base href="${base}/">\n    <script>window.__OMOS_BASE__=${JSON.stringify(base)}</script>`;
+    if (widgetSlug) head += `\n    <script>window.__OMOS_WIDGET__=${JSON.stringify({ slug: widgetSlug })}</script>`;
     reply.type('text/html').send(rawIndex.replace('<head>', `<head>\n    ${head}`));
   };
   if (havePublic) app.get('/', async (_req, reply) => sendIndexHtml(reply));
+
+  // ── Public embeddable widget: /w/<slug> (base-path aware behind the tunnel) ──
+  // A masjid pastes an <iframe src=".../w/<slug>"> into their own site. We serve the SPA
+  // in widget mode and allow framing anywhere (frame-ancestors *). 404 — not 403 — when the
+  // campaign is missing, inactive, or its widget is off, so a slug isn't probeable.
+  if (havePublic) app.get('/w/:slug', async (req, reply) => {
+    const slug = String((req.params as { slug: string }).slug || '');
+    const c = store.getCampaignBySlug(slug);
+    if (!c || !c.active || !c.widgetEnabled) return reply.code(404).type('text/plain').send('Not found.');
+    reply.header('content-security-policy', 'frame-ancestors *'); // meant to be embedded
+    reply.header('cache-control', 'no-store');
+    return sendIndexHtml(reply, c.slug);
+  });
 
   // SPA fallback: client-side routes (e.g. /admin, /zakat) resolve to index.html; requests
   // that look like a file (have an extension, e.g. a stale /assets/x.js) still 404 rather

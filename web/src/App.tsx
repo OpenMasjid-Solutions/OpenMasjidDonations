@@ -57,13 +57,17 @@ export function App() {
   // via our same-origin relay so it isn't mixed-content-blocked on our HTTPS page).
   useOmosAppearanceSync(info?.embedded);
 
+  // Embeddable widget: the server serves /w/<slug> with window.__OMOS_WIDGET__ set, so a
+  // masjid can iframe a single campaign into their own site. It renders like a campaign page.
+  const widgetSlug = typeof window !== 'undefined' ? window.__OMOS_WIDGET__?.slug : undefined;
+
   // Strip any tunnel base path (e.g. /donate) so route matching is identical on the LAN
   // and behind the OpenMasjidOS tunnel.
   const path = stripBase((typeof location !== 'undefined' ? location.pathname : '/').replace(/\/+$/, '') || '/');
-  const isAdmin = path === '/admin' || path.startsWith('/admin/');
-  const campaign = isAdmin ? null : parseCampaignPath(path);
+  const isAdmin = !widgetSlug && (path === '/admin' || path.startsWith('/admin/'));
+  const campaign = widgetSlug ? { slug: widgetSlug } : isAdmin ? null : parseCampaignPath(path);
   // First boot: until setup is done there's nothing for donors at the root, so send
-  // the admin straight to setup. Never redirect a campaign link.
+  // the admin straight to setup. Never redirect a campaign/widget link.
   const goToSetup = !!info && !info.onboarded && !isAdmin && !campaign;
 
   useEffect(() => {
@@ -83,11 +87,12 @@ export function App() {
     else html.removeAttribute('data-scene');
   }, [sceneTone, campaign]);
 
-  // A campaign donation page is its own full-screen experience (own Scene + chrome).
+  // A campaign donation page — and the embeddable widget — are their own full-screen
+  // experience (own Scene, no admin chrome). The widget is the same page in an iframe.
   if (campaign)
     return (
       <Suspense fallback={<div className="shell"><Scene /><LoadFallback /></div>}>
-        <DonatePage slug={campaign.slug} token={campaign.token} />
+        <DonatePage slug={campaign.slug} token={'token' in campaign ? campaign.token : undefined} widget={!!widgetSlug} />
       </Suspense>
     );
 

@@ -94,6 +94,9 @@ export interface Campaign {
   giftAid: boolean;
   /** Offer donors a monthly (recurring) option in addition to one-time. */
   allowMonthly: boolean;
+  /** Opt this campaign in to the public embeddable widget (served at /w/<slug>). Off by
+   *  default so a campaign's widget id isn't reachable until the admin turns it on. */
+  widgetEnabled: boolean;
   /** Goal in minor units, 0 = no goal/progress bar. */
   goalAmount: number;
   active: boolean;
@@ -277,6 +280,7 @@ export class Store {
     // required type) with fees not forced — the back-compat answer for existing campaigns.
     this.ensureColumn('campaigns', 'type', "TEXT NOT NULL DEFAULT 'donation'");
     this.ensureColumn('campaigns', 'force_cover_fees', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('campaigns', 'widget_enabled', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('donations', 'card_brand', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'card_last4', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
@@ -583,6 +587,7 @@ export class Store {
       forceCoverFees: !!r.force_cover_fees,
       giftAid: !!r.gift_aid,
       allowMonthly: !!r.allow_monthly,
+      widgetEnabled: !!r.widget_enabled,
       goalAmount: Number(r.goal_amount),
       active: !!r.active,
       sortOrder: Number(r.sort_order),
@@ -651,17 +656,17 @@ export class Store {
       .prepare(
         `INSERT INTO campaigns
           (id, slug, token, title, type, description, cover_image, background_image, logo, preset_amounts, allow_custom, min_amount,
-           max_amount, stripe_account_id, cover_fees, force_cover_fees, gift_aid, allow_monthly, goal_amount, active, sort_order, thank_you, created_at)
+           max_amount, stripe_account_id, cover_fees, force_cover_fees, gift_aid, allow_monthly, widget_enabled, goal_amount, active, sort_order, thank_you, created_at)
          VALUES
           (@id, @slug, @token, @title, @type, @description, @coverImage, @backgroundImage, @logo, @presetAmounts, @allowCustom, @minAmount,
-           @maxAmount, @stripeAccountId, @coverFees, @forceCoverFees, @giftAid, @allowMonthly, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
+           @maxAmount, @stripeAccountId, @coverFees, @forceCoverFees, @giftAid, @allowMonthly, @widgetEnabled, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
          ON CONFLICT(id) DO UPDATE SET
            slug=excluded.slug, title=excluded.title, type=excluded.type, description=excluded.description, cover_image=excluded.cover_image,
            background_image=excluded.background_image, logo=excluded.logo, preset_amounts=excluded.preset_amounts,
            allow_custom=excluded.allow_custom, min_amount=excluded.min_amount, max_amount=excluded.max_amount,
            stripe_account_id=excluded.stripe_account_id, cover_fees=excluded.cover_fees, force_cover_fees=excluded.force_cover_fees,
-           gift_aid=excluded.gift_aid, allow_monthly=excluded.allow_monthly, goal_amount=excluded.goal_amount, active=excluded.active,
-           sort_order=excluded.sort_order, thank_you=excluded.thank_you`,
+           gift_aid=excluded.gift_aid, allow_monthly=excluded.allow_monthly, widget_enabled=excluded.widget_enabled,
+           goal_amount=excluded.goal_amount, active=excluded.active, sort_order=excluded.sort_order, thank_you=excluded.thank_you`,
       )
       .run({
         ...c,
@@ -671,6 +676,7 @@ export class Store {
         forceCoverFees: c.forceCoverFees ? 1 : 0,
         giftAid: c.giftAid ? 1 : 0,
         allowMonthly: c.allowMonthly ? 1 : 0,
+        widgetEnabled: c.widgetEnabled ? 1 : 0,
         active: c.active ? 1 : 0,
         thankYou: JSON.stringify(c.thankYou ?? THANKYOU_EMPTY),
       });
@@ -742,6 +748,7 @@ export class Store {
       forceCoverFees: input.forceCoverFees ?? false,
       giftAid: input.giftAid ?? false,
       allowMonthly: input.allowMonthly ?? false,
+      widgetEnabled: input.widgetEnabled ?? false,
       goalAmount: input.goalAmount ?? 0,
       active: input.active ?? true,
       sortOrder: maxSort + 1,

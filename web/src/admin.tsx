@@ -701,6 +701,22 @@ function CampaignsCard({ accounts, fabric, currency, masjidName, masjidLogo, pub
   );
 }
 
+/** The copy-paste <iframe> embed snippet for a campaign's public widget (/w/<slug>). */
+function WidgetEmbed({ url, title, isPublic }: { url: string; title: string; isPublic: boolean }) {
+  const [copied, setCopied] = useState(false);
+  if (!url) return <p className="hint" style={{ marginBlockStart: '0.4rem' }}>Choose a link above first — the widget lives at that link under <span className="mono">/w/…</span>.</p>;
+  const safeTitle = (title || 'Donate').replace(/"/g, '');
+  const snippet = `<iframe src="${url}" title="${safeTitle}" style="width:100%;max-width:480px;height:680px;border:0;border-radius:16px" allow="payment"></iframe>`;
+  const copy = async () => { try { await navigator.clipboard.writeText(snippet); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ } };
+  return (
+    <div className="subform glass-inset" style={{ marginBlockStart: '0.4rem' }}>
+      <p className="hint" style={{ marginBlockStart: 0 }}>Paste this into any website to embed this campaign. Save the campaign first{isPublic ? '.' : '; turn on public access (Payments tab) so it works off your network.'}</p>
+      <textarea className="input mono" rows={3} readOnly value={snippet} onFocus={(e) => e.currentTarget.select()} aria-label="Embed code" />
+      <button type="button" className="btn btn--ghost btn--sm" onClick={copy}>{copied ? <><CheckCircle2 size={14} /> Copied</> : <><Copy size={14} /> Copy embed code</>}</button>
+    </div>
+  );
+}
+
 function CampaignLink({ url, base }: { url: string; base: string }) {
   const full = (base || originBase()) + url;
   const shown = full.replace(/^https?:\/\//, '');
@@ -742,6 +758,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
   const [allowMonthly, setAllowMonthly] = useState(campaign?.allowMonthly ?? false);
   const [goalAmount, setGoalAmount] = useState(String(campaign?.goalAmount ?? 0));
   const [active, setActive] = useState(campaign?.active ?? true);
+  const [widgetEnabled, setWidgetEnabled] = useState(campaign?.widgetEnabled ?? false);
   const [thankYou, setThankYou] = useState<ThankYou>(campaign?.thankYou ?? { ...TY_EMPTY });
   const [tyOpen, setTyOpen] = useState(false);
   const [tyDefault, setTyDefault] = useState<ThankYou | null>(null);
@@ -781,6 +798,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       coverFees: type === 'donation' ? coverFees : forceCoverFees,
       forceCoverFees,
       allowMonthly,
+      widgetEnabled,
       goalAmount: Number(goalAmount) || 0,
       active,
       thankYou,
@@ -870,6 +888,9 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
           <ThankYouFields value={thankYou} onChange={setThankYou} placeholders={tyDefault ?? undefined} />
         </div>
       </details>
+      {/* Embeddable widget — paste the campaign into any website (served at /w/<slug>). */}
+      <label className="check-row"><input type="checkbox" checked={widgetEnabled} onChange={(e) => setWidgetEnabled(e.target.checked)} /><span>Let this campaign be embedded on other websites (widget)</span></label>
+      {widgetEnabled && <WidgetEmbed url={computedSlug ? `${shareBase || originBase()}/w/${computedSlug}` : ''} title={title} isPublic={!!shareBase && /^https:/.test(shareBase)} />}
       <label className="check-row"><input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /><span>Live (visible to donors)</span></label>
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="row-between" style={{ marginBlockStart: '0.4rem' }}>

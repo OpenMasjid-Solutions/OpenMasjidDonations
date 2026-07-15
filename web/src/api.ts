@@ -170,6 +170,8 @@ export interface Campaign {
   forceCoverFees: boolean;
   giftAid: boolean;
   allowMonthly: boolean;
+  /** Opted in to the public embeddable widget (/w/<slug>). */
+  widgetEnabled: boolean;
   goalAmount: number;
   active: boolean;
   sortOrder: number;

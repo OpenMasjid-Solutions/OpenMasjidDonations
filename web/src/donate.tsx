@@ -49,7 +49,7 @@ function stripeFor(pk: string): Promise<Stripe | null> {
   return p;
 }
 
-export function DonatePage({ slug, token }: { slug: string; token?: string }) {
+export function DonatePage({ slug, token, widget }: { slug: string; token?: string; widget?: boolean }) {
   const [campaign, setCampaign] = useState<PublicCampaign | null>(null);
   const [loadError, setLoadError] = useState('');
   const [intent, setIntent] = useState<IntentResponse | null>(null);
@@ -105,7 +105,7 @@ export function DonatePage({ slug, token }: { slug: string; token?: string }) {
   }, [slug, token]);
 
   return (
-    <div className="shell">
+    <div className={`shell${widget ? ' shell--widget' : ''}`}>
       <DonateScene image={activeBg} />
       <main className="donate-wrap">
         {result ? (

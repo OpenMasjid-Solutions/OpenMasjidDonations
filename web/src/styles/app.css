@@ -56,6 +56,10 @@ h1, h2, h3, p { margin: 0; }
 
 /* ── Shell + top bar ──────────────────────────────────────────────────────── */
 .shell { min-height: 100vh; min-height: 100dvh; }
+/* Embeddable widget (in an <iframe> on another site): fill the HOST iframe rather than the
+   browser viewport, and sit tight to the top so the card isn't lost in vertical centering. */
+.shell--widget, .shell--widget .donate-wrap { min-height: 100%; }
+.shell--widget .donate-wrap { justify-content: flex-start; padding-block: 1.1rem; }
 .topbar {
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 0.9rem;

@@ -12,6 +12,8 @@
 declare global {
   interface Window {
     __OMOS_BASE__?: string;
+    /** Set by the server on /w/<slug> — renders that campaign in the embeddable widget. */
+    __OMOS_WIDGET__?: { slug: string };
   }
 }
 
