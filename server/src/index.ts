@@ -18,7 +18,7 @@ import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS } from './store';
-import type { Campaign, StripeAccount, StripeConfig, ThankYou } from './store';
+import type { Campaign, StripeAccount, StripeConfig, ThankYou, LargeDonation } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature } from './fabric';
 import { csvCell } from './csv';
@@ -408,6 +408,28 @@ async function main(): Promise<void> {
     return { data: store.setThankYou(patch) };
   });
 
+  // ── Large-donation alternative: a global gentle nudge for big gifts ──────────
+  // Above `threshold`, the donor sees a suggestion of a cheaper way to give (a message +
+  // an optional QR/image) before the card — they can still pay by card. The route speaks
+  // MAJOR units; the store keeps minor. `qrImage` is allowlist-validated in setLargeDonation.
+  const LargeDonationBody = z.object({
+    threshold: z.number().nonnegative().optional(), // major units; 0 = never show
+    message: z.string().max(600).optional(),
+    qrImage: z.string().max(2000).optional(),
+  });
+  app.get('/api/admin/large-donation', { preHandler: requireAdmin }, async () => {
+    const ld = store.getLargeDonation();
+    return { data: { ...ld, threshold: toMajorCur(ld.threshold) } };
+  });
+  app.put('/api/admin/large-donation', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = LargeDonationBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const patch: Partial<LargeDonation> = { ...parsed.data };
+    if (patch.threshold !== undefined) patch.threshold = toMinorCur(patch.threshold);
+    const ld = store.setLargeDonation(patch);
+    return { data: { ...ld, threshold: toMajorCur(ld.threshold) } };
+  });
+
   // ── Image upload (campaign cover/background) — saved to the data volume ──────
   // Raster images only (no SVG — it can carry scripts and we serve from same origin).
   const IMG_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
@@ -526,6 +548,7 @@ async function main(): Promise<void> {
   // ── Campaigns (admin CRUD) ──────────────────────────────────────────────────
   const CampaignBody = z.object({
     title: z.string().min(1).max(120).optional(),
+    type: z.enum(['donation', 'zakat', 'tuition']).optional(),
     slug: z.string().max(60).optional(),
     description: z.string().max(8000).optional(),
     coverImage: z.string().max(2000).optional(),
@@ -537,6 +560,7 @@ async function main(): Promise<void> {
     maxAmount: z.number().nonnegative().optional(), // major, 0 = none
     stripeAccountId: z.string().max(64).optional(),
     coverFees: z.boolean().optional(),
+    forceCoverFees: z.boolean().optional(),
     giftAid: z.boolean().optional(),
     allowMonthly: z.boolean().optional(),
     goalAmount: z.number().nonnegative().optional(), // major
@@ -571,6 +595,7 @@ async function main(): Promise<void> {
     const parsed = CampaignBody.safeParse(req.body);
     if (!parsed.success || !parsed.data.title) return reply.code(400).send({ error: 'A campaign needs a title.' });
     const p = parsed.data;
+    if (!p.type) return reply.code(400).send({ error: 'Please choose a campaign type (Donation, Zakat or Tuition).' });
     // Pick the account to attach: an explicit choice, else the first local account,
     // else the platform-vaulted Fabric account (when embedded). Charges always resolve
     // the effective account at pay time (Fabric first), so this is just the default.
@@ -580,6 +605,7 @@ async function main(): Promise<void> {
     if (error) return reply.code(409).send({ error });
     const c = store.createCampaign({
       title: p.title!, // guarded above — title is required for create
+      type: p.type, // guarded above — required on create
       slug,
       description: p.description,
       coverImage: p.coverImage,
@@ -588,6 +614,7 @@ async function main(): Promise<void> {
       allowCustom: p.allowCustom,
       stripeAccountId: accountId,
       coverFees: p.coverFees,
+      forceCoverFees: p.forceCoverFees,
       giftAid: p.giftAid,
       allowMonthly: p.allowMonthly,
       active: p.active,
@@ -611,6 +638,7 @@ async function main(): Promise<void> {
     }
     const c = store.updateCampaign(id, {
       title: p.title,
+      type: p.type,
       slug,
       description: p.description,
       coverImage: p.coverImage,
@@ -619,6 +647,7 @@ async function main(): Promise<void> {
       allowCustom: p.allowCustom,
       stripeAccountId: p.stripeAccountId,
       coverFees: p.coverFees,
+      forceCoverFees: p.forceCoverFees,
       giftAid: p.giftAid,
       allowMonthly: p.allowMonthly,
       active: p.active,
@@ -776,9 +805,11 @@ async function main(): Promise<void> {
 
   const publicCampaign = async (c: Campaign) => {
     const acct = await effectiveAccountFor(c);
+    const ld = store.getLargeDonation();
     return {
       slug: c.slug,
       title: c.title,
+      type: c.type,
       description: c.description,
       coverImage: c.coverImage,
       backgroundImage: c.backgroundImage,
@@ -788,6 +819,7 @@ async function main(): Promise<void> {
       minAmount: toMajorCur(c.minAmount),
       maxAmount: toMajorCur(c.maxAmount),
       coverFees: c.coverFees,
+      feesForced: c.forceCoverFees, // fee is mandatory (Zakat / required Tuition) — no donor opt-out
       giftAid: c.giftAid,
       allowMonthly: c.allowMonthly,
       goalAmount: toMajorCur(c.goalAmount),
@@ -796,6 +828,9 @@ async function main(): Promise<void> {
       masjidName: store.getMasjid().name,
       masjidLogo: store.getMasjid().logo,
       thankYou: resolveThankYou(c), // resolved (campaign override over global default)
+      // Global large-donation alternative (major units for the donor page). Advisory only —
+      // the donor may still pay by card; the server never blocks above the threshold.
+      largeDonation: { threshold: toMajorCur(ld.threshold), message: ld.message, qrImage: ld.qrImage },
       publishableKey: acct?.publishableKey ?? '', // safe; never the secret
       ready: !!acct && stripeConfigured(acct),
     };
@@ -855,7 +890,10 @@ async function main(): Promise<void> {
     // …and a sane ceiling (Stripe's per-charge max is 99,999,999 minor units).
     if (baseMinor > 99_999_999) return reply.code(400).send({ error: 'That amount is too large.' });
 
-    const coverFees = !!p.coverFees && c.coverFees;
+    // Server-authoritative fee decision: a forced-fee campaign (Zakat, or a Tuition the
+    // admin set to require it) always grosses up; otherwise only when the donor opts in AND
+    // the campaign offers it. Never trust the client's flag for a forced campaign.
+    const coverFees = c.forceCoverFees || (!!p.coverFees && c.coverFees);
     const chargeMinor = coverFees ? withCoveredFees(baseMinor, currency) : baseMinor;
     const giftAid = !!p.giftAid && c.giftAid;
     const monthly = !!p.monthly && c.allowMonthly;

@@ -147,11 +147,15 @@ export interface ThankYou {
   accent: string;
 }
 
+/** Required campaign type — drives the card-fee rule (see forceCoverFees). */
+export type CampaignType = 'donation' | 'zakat' | 'tuition';
+
 export interface Campaign {
   id: string;
   slug: string;
   token: string;
   title: string;
+  type: CampaignType;
   description: string;
   coverImage: string;
   backgroundImage: string;
@@ -162,6 +166,8 @@ export interface Campaign {
   maxAmount: number;
   stripeAccountId: string;
   coverFees: boolean;
+  /** Fee is mandatory (Zakat, or a Tuition the admin set to require it). */
+  forceCoverFees: boolean;
   giftAid: boolean;
   allowMonthly: boolean;
   goalAmount: number;
@@ -244,6 +250,11 @@ export const getThankYou = () => request<ThankYou>('/api/admin/thankyou');
 export const saveThankYou = (patch: Partial<ThankYou>) =>
   request<ThankYou>('/api/admin/thankyou', { method: 'PUT', body: JSON.stringify(patch) });
 
+// Global large-donation alternative (threshold in major units).
+export const getLargeDonation = () => request<LargeDonation>('/api/admin/large-donation');
+export const saveLargeDonation = (patch: Partial<LargeDonation>) =>
+  request<LargeDonation>('/api/admin/large-donation', { method: 'PUT', body: JSON.stringify(patch) });
+
 export type AccountInput = { label?: string; publishableKey?: string; secretKey?: string; webhookSecret?: string };
 export const listAccounts = () => request<StripeAccount[]>('/api/admin/stripe-accounts');
 export const createAccount = (body: AccountInput) =>
@@ -289,10 +300,18 @@ export const checkSlug = (slug: string, exceptId?: string) =>
     `/api/admin/campaigns/slug-check?slug=${encodeURIComponent(slug)}${exceptId ? `&exceptId=${encodeURIComponent(exceptId)}` : ''}`,
   );
 
+/** Global large-donation alternative (major units on the client). threshold 0 = off. */
+export interface LargeDonation {
+  threshold: number;
+  message: string;
+  qrImage: string;
+}
+
 // ── Public donation flow ────────────────────────────────────────────────────
 export interface PublicCampaign {
   slug: string;
   title: string;
+  type: CampaignType;
   description: string;
   coverImage: string;
   backgroundImage: string;
@@ -302,6 +321,8 @@ export interface PublicCampaign {
   minAmount: number;
   maxAmount: number;
   coverFees: boolean;
+  /** Fee is mandatory — show a notice, not an opt-out checkbox. */
+  feesForced: boolean;
   giftAid: boolean;
   allowMonthly: boolean;
   goalAmount: number;
@@ -310,6 +331,7 @@ export interface PublicCampaign {
   masjidName: string;
   masjidLogo: string;
   thankYou: ThankYou; // resolved (campaign override over global default)
+  largeDonation?: LargeDonation; // global; advisory dialog above threshold
   publishableKey: string;
   ready: boolean;
 }

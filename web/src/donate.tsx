@@ -143,18 +143,28 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [confirmMonthly, setConfirmMonthly] = useState(false);
+  const [showLargeGift, setShowLargeGift] = useState(false);
 
-  // Lock background scroll while the confirm dialog is open (no scrollbar behind it).
+  // Lock background scroll while either dialog is open (no scrollbar behind it).
   useEffect(() => {
-    if (!confirmMonthly) return;
+    if (!confirmMonthly && !showLargeGift) return;
     const html = document.documentElement;
     const prev = html.style.overflow;
     html.style.overflow = 'hidden';
     return () => { html.style.overflow = prev; };
-  }, [confirmMonthly]);
+  }, [confirmMonthly, showLargeGift]);
+
+  // For a forced-fee campaign (Zakat / required Tuition) the fee is always added by the
+  // server. Send coverFees:true so the client agrees; the exact total (with the fee) is
+  // shown on the payment step. The server enforces it regardless of this flag.
+  useEffect(() => { if (campaign.feesForced) setCoverFees(true); }, [campaign.feesForced]);
 
   const monthly = frequency === 'monthly' && campaign.allowMonthly;
   const effective = customMode ? Number(custom) : amount;
+  // The global large-donation nudge, shown whenever a threshold is set (the dialog carries a
+  // built-in default message when the admin left the message + QR blank).
+  const ld = campaign.largeDonation;
+  const largeAlt = !!ld && ld.threshold > 0;
   const fmt = (n: number) => money(n, campaign.currency);
   const amountLabel = (n: number) => `${fmt(n)}${monthly ? ' / month' : ''}`;
 
@@ -187,11 +197,21 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
     }
   };
 
+  // Continue past the large-donation nudge — the donor chose to pay by card anyway.
+  const proceedDespiteLarge = () => {
+    setShowLargeGift(false);
+    if (monthly) setConfirmMonthly(true);
+    else void runIntent();
+  };
+
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const err = validate();
     if (err) return setError(err);
     setError('');
+    // Big gifts: gently suggest the fee-free alternative first. The donor can still pay by
+    // card (proceedDespiteLarge). Compare the BASE amount, before any fee gross-up.
+    if (largeAlt && ld && effective >= ld.threshold) return setShowLargeGift(true);
     // Remind the donor before committing to a recurring charge.
     if (monthly) setConfirmMonthly(true);
     else void runIntent();
@@ -262,12 +282,17 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
           </div>
         </div>
 
-        {campaign.coverFees && (
+        {campaign.feesForced ? (
+          // Zakat / required-Tuition: the fee is covered by the donor, no opt-out shown.
+          <p className="hint">
+            The card fee is added{campaign.type === 'zakat' ? ' (required for Zakat)' : ''} so the masjid receives the full amount.
+          </p>
+        ) : campaign.coverFees ? (
           <label className="check-row">
             <input type="checkbox" checked={coverFees} onChange={(e) => setCoverFees(e.target.checked)} />
             <span>Add a little to cover card fees, so the masjid receives the full amount.</span>
           </label>
-        )}
+        ) : null}
 
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={busy || !campaign.ready}>
@@ -288,6 +313,23 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
             <div className="confirm-actions">
               <button className="btn btn--ghost" type="button" onClick={() => setConfirmMonthly(false)}>Cancel</button>
               <button className="btn btn--primary glow-accent" type="button" onClick={runIntent}><Repeat size={16} /> Yes, give monthly</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showLargeGift && ld && (
+        <div className="modal-backdrop" onClick={() => setShowLargeGift(false)}>
+          <div className="modal glass-raised confirm-modal" role="dialog" aria-modal="true" aria-label="A cheaper way to give" onClick={(e) => e.stopPropagation()}>
+            <div className="donate-emblem" aria-hidden="true"><HandCoins size={28} /></div>
+            <h3 className="donate-title">Before you give {fmt(effective)}</h3>
+            <p className="donate-desc">
+              {ld.message?.trim() || 'For a gift this size, a bank transfer avoids card fees — so the masjid receives your full donation. You can still pay by card below.'}
+            </p>
+            {bgUrl(ld.qrImage) ? <img className="donate-cover" src={bgUrl(ld.qrImage)} alt="How to give another way" style={{ maxHeight: '13rem', objectFit: 'contain' }} /> : null}
+            <div className="confirm-actions">
+              <button className="btn btn--ghost" type="button" onClick={() => setShowLargeGift(false)}>Back</button>
+              <button className="btn btn--primary glow-accent" type="button" onClick={proceedDespiteLarge}><HeartHandshake size={16} /> Donate {fmt(effective)} by card</button>
             </div>
           </div>
         </div>

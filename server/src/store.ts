@@ -60,11 +60,18 @@ export interface StripeAccount extends StripeConfig {
 /** A donation page/appeal. The public URL is a clean, admin-chosen path: /<slug>
  *  (e.g. /zakat). The slug is unique across campaigns. The `token` is retained only
  *  so older /c/<slug>-<token> links keep working; new links never expose it. */
+/** Every campaign has a type. It drives the card-fee rule (see deriveFees): a Donation
+ *  lets the admin offer fee-covering; Zakat always enforces it (so the full Zakat reaches
+ *  the masjid); Tuition lets the admin choose whether to require it. */
+export type CampaignType = 'donation' | 'zakat' | 'tuition';
+
 export interface Campaign {
   id: string;
   slug: string;
   token: string;
   title: string;
+  /** Required campaign type — drives the fee rule (see coverFees/forceCoverFees). */
+  type: CampaignType;
   description: string;
   coverImage: string;
   /** Full-page background image URL for this campaign's public page. When empty the
@@ -79,7 +86,11 @@ export interface Campaign {
   minAmount: number;
   maxAmount: number;
   stripeAccountId: string;
+  /** Offer the donor the option to cover the card fee. */
   coverFees: boolean;
+  /** Require the donor to cover the card fee (no opt-out). Always true for Zakat; set by
+   *  deriveFees from the type. When true, coverFees is implied true too. */
+  forceCoverFees: boolean;
   giftAid: boolean;
   /** Offer donors a monthly (recurring) option in addition to one-time. */
   allowMonthly: boolean;
@@ -114,6 +125,16 @@ export const THANKYOU_DEFAULT: ThankYou = {
 
 /** An empty override (every field inherits the global default). */
 const THANKYOU_EMPTY: ThankYou = { heading: '', message: '', backgroundImage: '', accent: '' };
+
+/** Global "large-donation alternative": above `threshold` (MINOR units; 0 = off) the donor
+ *  is shown a gentle suggestion of a cheaper way to give (a message + an optional QR/image)
+ *  before the card — they can still choose to pay by card. Mirrors the Kiosk's giving config. */
+export interface LargeDonation {
+  threshold: number; // minor units in the store; 0 = never show
+  message: string;
+  qrImage: string;
+}
+export const LARGE_DONATION_DEFAULT: LargeDonation = { threshold: 0, message: '', qrImage: '' };
 
 export interface Donation {
   id: string;
@@ -252,6 +273,10 @@ export class Store {
     this.ensureColumn('campaigns', 'logo', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('campaigns', 'allow_monthly', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('campaigns', 'thank_you', "TEXT NOT NULL DEFAULT ''");
+    // Required campaign type + forced-fee flag. Legacy rows default to 'donation' (a valid
+    // required type) with fees not forced — the back-compat answer for existing campaigns.
+    this.ensureColumn('campaigns', 'type', "TEXT NOT NULL DEFAULT 'donation'");
+    this.ensureColumn('campaigns', 'force_cover_fees', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('donations', 'card_brand', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'card_last4', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
@@ -544,6 +569,7 @@ export class Store {
       slug: String(r.slug),
       token: String(r.token),
       title: String(r.title),
+      type: ((['donation', 'zakat', 'tuition'] as const).includes(String(r.type) as CampaignType) ? String(r.type) : 'donation') as CampaignType,
       description: String(r.description),
       coverImage: String(r.cover_image),
       backgroundImage: String(r.background_image ?? ''),
@@ -554,6 +580,7 @@ export class Store {
       maxAmount: Number(r.max_amount),
       stripeAccountId: String(r.stripe_account_id),
       coverFees: !!r.cover_fees,
+      forceCoverFees: !!r.force_cover_fees,
       giftAid: !!r.gift_aid,
       allowMonthly: !!r.allow_monthly,
       goalAmount: Number(r.goal_amount),
@@ -597,21 +624,43 @@ export class Store {
     return merged;
   }
 
+  /** Global large-donation alternative (admin-editable). threshold is MINOR units. */
+  getLargeDonation(): LargeDonation {
+    const s = this.getJson<LargeDonation>('large_donation');
+    return {
+      threshold: Math.max(0, Math.round(Number(s.threshold) || 0)),
+      message: s.message ?? LARGE_DONATION_DEFAULT.message,
+      qrImage: s.qrImage ?? LARGE_DONATION_DEFAULT.qrImage,
+    };
+  }
+
+  setLargeDonation(patch: Partial<LargeDonation>): LargeDonation {
+    const merged = { ...this.getLargeDonation(), ...clean(patch) };
+    merged.threshold = Math.max(0, Math.round(Number(merged.threshold) || 0));
+    merged.message = String(merged.message ?? '').slice(0, 600);
+    // Only accept a same-origin uploaded image or an http(s) URL — reject javascript:/data:
+    // and anything with quotes/backslashes/whitespace that could break an <img>/url().
+    const u = String(merged.qrImage ?? '').trim().slice(0, 500);
+    merged.qrImage = /^\/uploads\/[A-Za-z0-9._-]+$/.test(u) || /^https?:\/\/[^"'\\\s]+$/i.test(u) ? u : '';
+    this.setRaw('large_donation', JSON.stringify(merged));
+    return merged;
+  }
+
   private writeCampaign(c: Campaign): void {
     this.db
       .prepare(
         `INSERT INTO campaigns
-          (id, slug, token, title, description, cover_image, background_image, logo, preset_amounts, allow_custom, min_amount,
-           max_amount, stripe_account_id, cover_fees, gift_aid, allow_monthly, goal_amount, active, sort_order, thank_you, created_at)
+          (id, slug, token, title, type, description, cover_image, background_image, logo, preset_amounts, allow_custom, min_amount,
+           max_amount, stripe_account_id, cover_fees, force_cover_fees, gift_aid, allow_monthly, goal_amount, active, sort_order, thank_you, created_at)
          VALUES
-          (@id, @slug, @token, @title, @description, @coverImage, @backgroundImage, @logo, @presetAmounts, @allowCustom, @minAmount,
-           @maxAmount, @stripeAccountId, @coverFees, @giftAid, @allowMonthly, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
+          (@id, @slug, @token, @title, @type, @description, @coverImage, @backgroundImage, @logo, @presetAmounts, @allowCustom, @minAmount,
+           @maxAmount, @stripeAccountId, @coverFees, @forceCoverFees, @giftAid, @allowMonthly, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
          ON CONFLICT(id) DO UPDATE SET
-           slug=excluded.slug, title=excluded.title, description=excluded.description, cover_image=excluded.cover_image,
+           slug=excluded.slug, title=excluded.title, type=excluded.type, description=excluded.description, cover_image=excluded.cover_image,
            background_image=excluded.background_image, logo=excluded.logo, preset_amounts=excluded.preset_amounts,
            allow_custom=excluded.allow_custom, min_amount=excluded.min_amount, max_amount=excluded.max_amount,
-           stripe_account_id=excluded.stripe_account_id, cover_fees=excluded.cover_fees, gift_aid=excluded.gift_aid,
-           allow_monthly=excluded.allow_monthly, goal_amount=excluded.goal_amount, active=excluded.active,
+           stripe_account_id=excluded.stripe_account_id, cover_fees=excluded.cover_fees, force_cover_fees=excluded.force_cover_fees,
+           gift_aid=excluded.gift_aid, allow_monthly=excluded.allow_monthly, goal_amount=excluded.goal_amount, active=excluded.active,
            sort_order=excluded.sort_order, thank_you=excluded.thank_you`,
       )
       .run({
@@ -619,6 +668,7 @@ export class Store {
         presetAmounts: JSON.stringify(c.presetAmounts),
         allowCustom: c.allowCustom ? 1 : 0,
         coverFees: c.coverFees ? 1 : 0,
+        forceCoverFees: c.forceCoverFees ? 1 : 0,
         giftAid: c.giftAid ? 1 : 0,
         allowMonthly: c.allowMonthly ? 1 : 0,
         active: c.active ? 1 : 0,
@@ -651,6 +701,26 @@ export class Store {
     return r ? this.rowToCampaign(r) : null;
   }
 
+  /** Enforce the type→fee rule (the single source of truth, so a hand-crafted API body
+   *  can't create a non-enforcing Zakat campaign): Zakat always forces the fee onto the
+   *  donor; Donation never forces it; Tuition leaves it to the admin's choice. Forcing the
+   *  fee implies offering it (coverFees), matching the intent-time derivation + the Kiosk. */
+  private deriveFees(c: Campaign): Campaign {
+    if (c.type === 'zakat') {
+      c.forceCoverFees = true; // Zakat: always enforced…
+      c.coverFees = true; // …and offering is implied.
+    } else if (c.type === 'tuition') {
+      // Tuition: the admin chooses whether to require the fee. There is no separate
+      // *optional* offer — the fee is offered iff it's required (so a not-required tuition
+      // never surfaces a cover-fees checkbox the admin didn't intend).
+      c.coverFees = c.forceCoverFees;
+    } else {
+      // Donation: never forced; coverFees stays the admin's optional offer.
+      c.forceCoverFees = false;
+    }
+    return c;
+  }
+
   createCampaign(input: Partial<Campaign> & { title: string; stripeAccountId: string }): Campaign {
     const maxSort = (this.db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM campaigns').get() as { m: number }).m;
     const c: Campaign = {
@@ -658,6 +728,7 @@ export class Store {
       slug: input.slug || slugify(input.title),
       token: campaignToken(),
       title: input.title,
+      type: input.type ?? 'donation',
       description: input.description ?? '',
       coverImage: input.coverImage ?? '',
       backgroundImage: input.backgroundImage ?? '',
@@ -668,6 +739,7 @@ export class Store {
       maxAmount: input.maxAmount ?? 0,
       stripeAccountId: input.stripeAccountId,
       coverFees: input.coverFees ?? false,
+      forceCoverFees: input.forceCoverFees ?? false,
       giftAid: input.giftAid ?? false,
       allowMonthly: input.allowMonthly ?? false,
       goalAmount: input.goalAmount ?? 0,
@@ -676,7 +748,7 @@ export class Store {
       thankYou: input.thankYou ?? { ...THANKYOU_EMPTY },
       createdAt: new Date().toISOString(),
     };
-    this.writeCampaign(c);
+    this.writeCampaign(this.deriveFees(c));
     return c;
   }
 
@@ -685,7 +757,7 @@ export class Store {
     if (!cur) return null;
     // id/token/createdAt are immutable.
     const next: Campaign = { ...cur, ...clean(patch), id: cur.id, token: cur.token, createdAt: cur.createdAt };
-    this.writeCampaign(next);
+    this.writeCampaign(this.deriveFees(next));
     return next;
   }
 

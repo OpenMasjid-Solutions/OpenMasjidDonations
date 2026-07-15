@@ -14,11 +14,11 @@ import {
 } from 'lucide-react';
 import {
   checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations,
-  getFabricStripeAccounts, getMetrics, getSession, getSettings, getThankYou, getTunnel, listCampaigns, login, logout, money,
-  saveFabricStripeAccount, saveMasjid, saveThankYou, saveTunnel,
+  getFabricStripeAccounts, getLargeDonation, getMetrics, getSession, getSettings, getThankYou, getTunnel, listCampaigns, login, logout, money,
+  saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
   sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
-  type AccountInput, type AppInfo, type Campaign, type CampaignInput, type Donation, type DonationsResult,
-  type FabricStripeAccountRef, type FabricStripeStatus, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
+  type AccountInput, type AppInfo, type Campaign, type CampaignInput, type CampaignType, type Donation, type DonationsResult,
+  type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
 } from './api';
 import { useReadableTheme } from './prefs';
 import { BASE, asset, withBase } from './base';
@@ -200,12 +200,13 @@ function Onboarding({ settings, publicBase, embedded, onReload }: { settings: Se
 
 // Primary navigation — a bottom dock, like the other OpenMasjidOS apps. Each tab is a
 // distinct section; the Donations records get their own tab.
-type AdminTab = 'overview' | 'campaigns' | 'donations' | 'thankyou' | 'payments' | 'settings';
+type AdminTab = 'overview' | 'campaigns' | 'donations' | 'thankyou' | 'largegift' | 'payments' | 'settings';
 const ADMIN_TABS: { id: AdminTab; label: string; Icon: typeof Megaphone }[] = [
   { id: 'overview', label: 'Overview', Icon: LayoutDashboard },
   { id: 'campaigns', label: 'Campaigns', Icon: Megaphone },
   { id: 'donations', label: 'Donations', Icon: ReceiptText },
   { id: 'thankyou', label: 'Thank-you', Icon: HeartHandshake },
+  { id: 'largegift', label: 'Large gifts', Icon: HandCoins },
   { id: 'payments', label: 'Payments', Icon: CreditCard },
   { id: 'settings', label: 'Settings', Icon: SettingsIcon },
 ];
@@ -266,6 +267,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
     campaigns: { title: 'Campaigns', sub: 'Create and manage your donation appeals.' },
     donations: { title: 'Donations', sub: 'Every gift your masjid has received.' },
     thankyou: { title: 'Thank-you', sub: 'The message donors see right after they give.' },
+    largegift: { title: 'Large gifts', sub: 'Gently suggest a fee-free way to give for big donations.' },
     payments: { title: 'Payments', sub: 'Your Stripe accounts and optional public access.' },
     settings: { title: 'Settings', sub: 'Masjid details, notifications and your account.' },
   };
@@ -282,6 +284,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
         {tab === 'donations' && <DonationsCard />}
         {tab === 'thankyou' && <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />}
+        {tab === 'largegift' && <LargeDonationCard currency={settings.masjid.currency} />}
         {tab === 'payments' && (
           <>
             <StripeAccountsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} publicBase={publicBase} embedded={embedded} onChanged={onReload} />
@@ -716,6 +719,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
 }) {
   const editing = !!campaign;
   const [title, setTitle] = useState(campaign?.title ?? '');
+  const [type, setType] = useState<CampaignType>(campaign?.type ?? 'donation');
   const [slug, setSlug] = useState(campaign?.slug ?? '');
   const [slugInfo, setSlugInfo] = useState<{ slug: string; available: boolean; reserved: boolean } | null>(null);
   const [description, setDescription] = useState(campaign?.description ?? '');
@@ -727,6 +731,14 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
   const [minAmount, setMinAmount] = useState(String(campaign?.minAmount ?? 1));
   const [stripeAccountId, setStripeAccountId] = useState(campaign?.stripeAccountId ?? accounts[0]?.id ?? '');
   const [coverFees, setCoverFees] = useState(campaign?.coverFees ?? false);
+  const [forceCoverFees, setForceCoverFees] = useState(campaign?.forceCoverFees ?? false);
+  // Keep the local fee state honest with the server's type→fee rule as the admin switches
+  // type, so the preview/labels match what will actually be saved (server re-derives too).
+  useEffect(() => {
+    if (type === 'zakat') { setForceCoverFees(true); setCoverFees(true); }
+    else if (type === 'donation') setForceCoverFees(false);
+    // tuition: leave forceCoverFees to the admin's toggle.
+  }, [type]);
   const [allowMonthly, setAllowMonthly] = useState(campaign?.allowMonthly ?? false);
   const [goalAmount, setGoalAmount] = useState(String(campaign?.goalAmount ?? 0));
   const [active, setActive] = useState(campaign?.active ?? true);
@@ -754,6 +766,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
     setBusy(true); setError('');
     const body: CampaignInput = {
       title: title.trim(),
+      type,
       slug: slug.trim() || undefined,
       description: description.trim(),
       coverImage: coverImage.trim(),
@@ -763,7 +776,10 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       allowCustom,
       minAmount: Number(minAmount) || 0,
       stripeAccountId,
-      coverFees,
+      // Donation offers coverFees; Zakat/Tuition offer it only when the fee is enforced.
+      // The server re-derives this authoritatively (deriveFees) — this just keeps them in sync.
+      coverFees: type === 'donation' ? coverFees : forceCoverFees,
+      forceCoverFees,
       allowMonthly,
       goalAmount: Number(goalAmount) || 0,
       active,
@@ -795,6 +811,18 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       <div className="cprev-head"><span className="hint">Live preview</span></div>
       <CampaignPreview variant="full" data={previewData} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} />
       <Field id="ct" label="Title"><input id="ct" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. General Fund, Zakat, Building Fund" /></Field>
+      <Field id="ctype" label="Type">
+        <select id="ctype" className="input" value={type} onChange={(e) => setType(e.target.value as CampaignType)}>
+          <option value="donation">Donation</option>
+          <option value="zakat">Zakat</option>
+          <option value="tuition">Tuition</option>
+        </select>
+        <span className="hint">
+          {type === 'zakat' ? 'Zakat always covers the card fee, so the full Zakat reaches the masjid.'
+            : type === 'tuition' ? 'For tuition you can require the payer to cover the card fee.'
+            : 'For a donation you can offer donors the option to cover the card fee.'}
+        </span>
+      </Field>
       <Field id="cslug" label="Link to share">
         <div className="slug-field">
           <span className="slug-prefix" aria-hidden="true"><Link2 size={13} /> {linkHost()}/</span>
@@ -824,7 +852,14 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
         <p className="hint">Payments go to your OpenMasjidOS Stripe account (Payments tab).</p>
       )}
       <label className="check-row"><input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} /><span>Allow donors to enter their own amount</span></label>
-      <label className="check-row"><input type="checkbox" checked={coverFees} onChange={(e) => setCoverFees(e.target.checked)} /><span>Offer donors the option to cover card fees</span></label>
+      {/* Card-fee control, driven by the campaign type (server re-derives + enforces). */}
+      {type === 'zakat' ? (
+        <p className="hint">Card fees are covered by the donor (required for Zakat) — the masjid receives the full Zakat.</p>
+      ) : type === 'tuition' ? (
+        <label className="check-row"><input type="checkbox" checked={forceCoverFees} onChange={(e) => setForceCoverFees(e.target.checked)} /><span>Require the payer to cover the card fee</span></label>
+      ) : (
+        <label className="check-row"><input type="checkbox" checked={coverFees} onChange={(e) => setCoverFees(e.target.checked)} /><span>Offer donors the option to cover card fees</span></label>
+      )}
       <label className="check-row"><input type="checkbox" checked={allowMonthly} onChange={(e) => setAllowMonthly(e.target.checked)} /><span>Offer a monthly (recurring) option</span></label>
       {/* Per-campaign thank-you override — empty fields inherit the global "Thank-you" tab. */}
       <details className="ty-override" open={tyOpen} onToggle={(e) => setTyOpen((e.target as HTMLDetailsElement).open)}>
@@ -1180,6 +1215,42 @@ function ThankYouCard({ masjidName, currency }: { masjidName: string; currency: 
       <ThankYouFields value={value} onChange={setValue} />
       {error && <p className="form-error">{error}</p>}
       <button className="btn btn--primary" onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save thank-you'}</button>
+    </section>
+  );
+}
+
+/** The global large-donation-alternative editor (its own dock tab). Above the threshold,
+ *  the donor sees this message + QR before the card; they can still pay by card. */
+function LargeDonationCard({ currency }: { currency: string }) {
+  const [value, setValue] = useState<LargeDonation | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => { getLargeDonation().then(setValue).catch(() => setError('Couldn’t load these settings.')); }, []);
+  if (!value) return <section className="glass panel"><span className="spinner" aria-label="Loading" /></section>;
+  const set = (patch: Partial<LargeDonation>) => setValue({ ...value, ...patch });
+  const save = async () => {
+    setBusy(true); setError('');
+    try { setValue(await saveLargeDonation(value)); setSaved(true); setTimeout(() => setSaved(false), 2000); }
+    catch (e) { setError(msg(e)); } finally { setBusy(false); }
+  };
+  return (
+    <section className="glass panel">
+      <div className="card-head">
+        <HandCoins size={18} className="panel-ico" aria-hidden="true" />
+        <div className="card-head__main">
+          <h2 className="section-title-inline">Large-donation alternative</h2>
+          <p className="muted">Card fees are highest on big gifts. Above the amount you set, the donor is gently shown a cheaper way to give (like a bank transfer or a Zelle QR code) before the card — they can still choose to pay by card.</p>
+        </div>
+      </div>
+      <Field id="lg-t" label={`Show it at or above (${currency})`}>
+        <input id="lg-t" className="input" type="number" min="0" step="0.01" value={value.threshold || ''} placeholder="e.g. 250" onChange={(e) => set({ threshold: Number(e.target.value) || 0 })} />
+        <span className="hint">Leave blank (or 0) to never show it.</span>
+      </Field>
+      <Field id="lg-m" label="What to show the donor"><textarea id="lg-m" className="input" rows={3} value={value.message} placeholder="e.g. For a gift this size, a bank transfer avoids card fees — details below." onChange={(e) => set({ message: e.target.value })} /></Field>
+      <ImageField id="lg-qr" label="QR code / image (optional)" hint="A Zelle/bank QR code or any image to show on the large-donation screen." value={value.qrImage} onChange={(v) => set({ qrImage: v })} />
+      {error && <p className="form-error">{error}</p>}
+      <button className="btn btn--primary" onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save'}</button>
     </section>
   );
 }
