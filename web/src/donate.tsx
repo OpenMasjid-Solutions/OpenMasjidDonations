@@ -7,15 +7,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadStripe, type Stripe } from '@stripe/stripe-js';
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
-import { HandCoins, HeartHandshake, Lock, Repeat, ShieldCheck } from 'lucide-react';
+import { GraduationCap, HandCoins, HeartHandshake, Lock, Repeat, Search, ShieldCheck } from 'lucide-react';
 import {
   confirmDonation,
+  confirmTuitionPayment,
   createIntent,
+  createTuitionIntent,
   getPublicCampaign,
+  lookupStudent,
   money,
   type ConfirmResponse,
   type IntentResponse,
   type PublicCampaign,
+  type StudentLookupResult,
+  type TuitionConfirmResponse,
+  type TuitionIntentResponse,
+  type TuitionSelection,
 } from './api';
 import { useReadableTheme } from './prefs';
 import { asset } from './base';
@@ -82,27 +89,27 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
     else html.removeAttribute('data-scene');
   }, [readable]);
 
-  // If Stripe redirected back here (some payment methods do), it appends
-  // ?payment_intent=…&redirect_status=…. Confirm it with the server on mount.
+  // Load the campaign on mount / slug change (needed for both the donation flow and the
+  // thank-you screen's custom message/accent/background on a redirect return).
   useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const pi = params.get('payment_intent');
-    if (pi) {
-      // Also load the campaign so the thank-you screen shows the masjid's custom message
-      // / accent / background even on this redirect-return path (not just the inline flow).
-      getPublicCampaign(slug, token).then(setCampaign).catch(() => {});
-      confirmDonation({ paymentIntentId: pi, slug, token })
-        .then((r) => {
-          setResult(r);
-          history.replaceState(null, '', location.pathname); // drop the query
-        })
-        .catch(() => setLoadError('We couldn’t confirm your donation. If you were charged, please contact the masjid.'));
-      return;
-    }
+    let cancelled = false;
     getPublicCampaign(slug, token)
-      .then(setCampaign)
-      .catch((e) => setLoadError(e instanceof Error ? e.message : 'This donation page isn’t available.'));
+      .then((c) => { if (!cancelled) setCampaign(c); })
+      .catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'This donation page isn’t available.'); });
+    return () => { cancelled = true; };
   }, [slug, token]);
+
+  // If Stripe redirected back here (some payment methods do), it appends ?payment_intent=…
+  // Confirm it once the campaign is known. Tuition (Students-billing) has its OWN flow +
+  // redirect handling inside TuitionShell, so this path only covers donation campaigns.
+  useEffect(() => {
+    if (!campaign || campaign.type === 'tuition' || result) return;
+    const pi = new URLSearchParams(location.search).get('payment_intent');
+    if (!pi) return;
+    confirmDonation({ paymentIntentId: pi, slug, token })
+      .then((r) => { setResult(r); history.replaceState(null, '', location.pathname); })
+      .catch(() => setLoadError('We couldn’t confirm your donation. If you were charged, please contact the masjid.'));
+  }, [campaign, slug, token, result]);
 
   return (
     <div className={`shell${widget ? ' shell--widget' : ''}`}>
@@ -118,6 +125,8 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
           </section>
         ) : !campaign ? (
           <section className="glass-raised donate-card"><span className="spinner" aria-label="Loading" /></section>
+        ) : campaign.type === 'tuition' ? (
+          <TuitionShell campaign={campaign} />
         ) : intent ? (
           <PayStep campaign={campaign} intent={intent} onBack={() => setIntent(null)} onDone={setResult} />
         ) : (
@@ -463,6 +472,227 @@ function ThankYou({ result, campaign }: { result: ConfirmResponse; campaign: Pub
           <p className="donate-desc">{message}</p>
           {result.recurring && <p className="donate-desc"><b>This is a monthly donation</b> — it'll repeat automatically until you cancel.</p>}
         </>
+      ) : result.status === 'processing' ? (
+        <p className="donate-desc">Your payment is processing. You’ll receive confirmation shortly, in shā’ Allah.</p>
+      ) : (
+        <p className="donate-desc">Your payment didn’t complete. No charge was made — you’re welcome to try again.</p>
+      )}
+    </section>
+  );
+}
+
+// ── Tuition (Students billing) ───────────────────────────────────────────────
+// A `tuition` campaign is a thin shell around OpenMasjid Students: name + PIN → family
+// balance (fetched over the OS Fabric) → pay all or pick months → Stripe → recorded in the
+// Students ledger. Everything says "payment", never "donation" (tuition isn't a gift).
+function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
+  const [name, setName] = useState('');
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notFound, setNotFound] = useState(false);
+  const [lookup, setLookup] = useState<StudentLookupResult | null>(null);
+  const [payAll, setPayAll] = useState(true);
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
+  const [intent, setIntent] = useState<TuitionIntentResponse | null>(null);
+  const [result, setResult] = useState<TuitionConfirmResponse | null>(null);
+  const [confirming, setConfirming] = useState(
+    () => typeof location !== 'undefined' && !!new URLSearchParams(location.search).get('payment_intent'),
+  );
+
+  const fam = lookup?.family;
+  const ccy = lookup?.currency || campaign.currency;
+  const fmt = (n: number) => money(n, ccy);
+  const school = campaign.students?.schoolName || campaign.title;
+
+  // A redirect-return (some payment methods bounce back with ?payment_intent=): confirm it.
+  useEffect(() => {
+    const pi = new URLSearchParams(location.search).get('payment_intent');
+    if (!pi) return;
+    confirmTuitionPayment(campaign.slug, { paymentIntentId: pi })
+      .then((r) => { setResult(r); history.replaceState(null, '', location.pathname); })
+      .catch(() => setError('We couldn’t confirm your payment. If you were charged, please contact the school.'))
+      .finally(() => setConfirming(false));
+  }, [campaign.slug]);
+
+  const selectionAmount = !fam ? 0 : payAll ? fam.balance : fam.openInvoices.filter((i) => checked[i.id]).reduce((s, i) => s + i.amount, 0);
+  const selectedIds = fam ? fam.openInvoices.filter((i) => checked[i.id]).map((i) => i.id) : [];
+
+  const runLookup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || !pin.trim()) return setError('Please enter the student’s name and PIN.');
+    setBusy(true); setError(''); setNotFound(false);
+    try {
+      const r = await lookupStudent(campaign.slug, { name: name.trim(), pin: pin.trim() });
+      if (!r.found || !r.session || !r.family) setNotFound(true);
+      else { setLookup(r); setPayAll(true); setChecked({}); }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Tuition payments are temporarily unavailable.');
+    } finally { setBusy(false); }
+  };
+
+  const startPayment = async () => {
+    if (!fam || !lookup?.session) return;
+    if (!payAll && selectedIds.length === 0) return setError('Please choose at least one item to pay.');
+    const selection: TuitionSelection = payAll ? { kind: 'full' } : { kind: 'invoices', invoiceIds: selectedIds };
+    setBusy(true); setError('');
+    try {
+      setIntent(await createTuitionIntent(campaign.slug, { session: lookup.session, selection }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.');
+    } finally { setBusy(false); }
+  };
+
+  const Emblem = () =>
+    bgUrl(campaign.logo || campaign.masjidLogo) ? (
+      <img className="donate-logo" src={bgUrl(campaign.logo || campaign.masjidLogo)} alt="" />
+    ) : (
+      <div className="donate-emblem" aria-hidden="true"><GraduationCap size={30} /></div>
+    );
+
+  if (result) return <TuitionThanks result={result} />;
+  if (confirming) return <section className="glass-raised donate-card"><span className="spinner" aria-label="Confirming your payment" /></section>;
+
+  // Students not installed / set up / reachable → a friendly notice, never the name+PIN form.
+  if (!campaign.students?.available) {
+    return (
+      <section className="glass-raised donate-card">
+        <div className="donate-emblem" aria-hidden="true"><GraduationCap size={30} /></div>
+        <h1 className="donate-title">{campaign.title}</h1>
+        <p className="muted">Tuition payments aren’t available right now. Please check back shortly, or contact the school office.</p>
+      </section>
+    );
+  }
+
+  if (intent) return <TuitionPayStep campaign={campaign} intent={intent} label={fam?.label ?? ''} onBack={() => setIntent(null)} onDone={setResult} />;
+
+  // Balance step — the family's balance + selectable open invoices.
+  if (fam) {
+    return (
+      <section className="glass-raised donate-card">
+        <Emblem />
+        <h1 className="donate-title">{fam.label || school}</h1>
+        {school && school !== fam.label ? <p className="donate-sub muted">{school}</p> : null}
+        {fam.students.length > 0 && (
+          // Show the looked-up children so the parent can confirm it's the right family (first
+          // name + last initial only — rendered as plain text, never HTML).
+          <p className="donate-sub muted">{fam.students.map((st) => `${st.firstName}${st.lastInitial ? ` ${st.lastInitial}.` : ''}`).join(' · ')}</p>
+        )}
+        <p className="donate-desc">Balance due: <b>{fmt(fam.balance)}</b></p>
+        {fam.openInvoices.length > 0 && (
+          <div className="freq-toggle" role="group" aria-label="What to pay">
+            <button type="button" className={`freq-opt${payAll ? ' is-active' : ''}`} onClick={() => setPayAll(true)}>Pay full balance</button>
+            <button type="button" className={`freq-opt${!payAll ? ' is-active' : ''}`} onClick={() => setPayAll(false)}>Choose what to pay</button>
+          </div>
+        )}
+        {!payAll && (
+          <div style={{ display: 'grid', gap: '0.4rem', marginBlock: '0.4rem' }}>
+            {fam.openInvoices.map((inv) => (
+              <label key={inv.id} className="check-row">
+                <input type="checkbox" checked={!!checked[inv.id]} onChange={(e) => setChecked((c) => ({ ...c, [inv.id]: e.target.checked }))} />
+                <span>{inv.label}{inv.dueDate ? ` · due ${inv.dueDate}` : ''} — <b>{fmt(inv.amount)}</b></span>
+              </label>
+            ))}
+          </div>
+        )}
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
+          {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}
+        </button>
+        <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={() => { setLookup(null); setError(''); }}>Look up a different student</button>
+      </section>
+    );
+  }
+
+  // Lookup step — the required name + PIN entry (nothing else).
+  return (
+    <section className="glass-raised donate-card">
+      <Emblem />
+      <h1 className="donate-title">{campaign.title}</h1>
+      {school && school !== campaign.title ? <p className="donate-sub muted">{school}</p> : null}
+      <p className="donate-desc">{campaign.students.tagline || 'Enter your child’s name and PIN to see your balance and pay.'}</p>
+      <form onSubmit={runLookup}>
+        <div className="field">
+          <label className="label" htmlFor="sname">Student name</label>
+          <input id="sname" className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" autoFocus />
+        </div>
+        <div className="field">
+          <label className="label" htmlFor="spin">PIN</label>
+          <input id="spin" className="input" value={pin} onChange={(e) => setPin(e.target.value)} inputMode="numeric" autoComplete="off" />
+        </div>
+        {notFound && <p className="hint" role="alert">We couldn’t find that. Please check the name and PIN, or ask the school office.</p>}
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={busy}>
+          {busy ? <span className="spinner" /> : <Search size={18} />} Find my balance
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function TuitionPayStep({ campaign, intent, label, onBack, onDone }: {
+  campaign: PublicCampaign; intent: TuitionIntentResponse; label: string; onBack: () => void; onDone: (r: TuitionConfirmResponse) => void;
+}) {
+  const stripePromise = useMemo(() => stripeFor(intent.publishableKey), [intent.publishableKey]);
+  const isLight = typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light';
+  const theme = isLight ? 'stripe' : 'night';
+  return (
+    <section className="glass-raised donate-card">
+      <div className="donate-emblem" aria-hidden="true"><GraduationCap size={30} /></div>
+      <h1 className="donate-title">Pay {money(intent.amount, intent.currency)}</h1>
+      {label ? <p className="donate-sub muted">{label}</p> : null}
+      <Elements stripe={stripePromise} options={{ clientSecret: intent.clientSecret, appearance: { theme } }}>
+        <TuitionPayForm campaign={campaign} intent={intent} onDone={onDone} />
+      </Elements>
+      <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={onBack}>Back</button>
+    </section>
+  );
+}
+
+function TuitionPayForm({ campaign, intent, onDone }: {
+  campaign: PublicCampaign; intent: TuitionIntentResponse; onDone: (r: TuitionConfirmResponse) => void;
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!stripe || !elements) return;
+    setBusy(true); setError('');
+    const { error: err, paymentIntent } = await stripe.confirmPayment({
+      elements, confirmParams: { return_url: `${location.origin}${location.pathname}` }, redirect: 'if_required',
+    });
+    if (err) { setError(err.message || 'Your payment could not be completed.'); setBusy(false); return; }
+    try {
+      onDone(await confirmTuitionPayment(campaign.slug, { paymentIntentId: paymentIntent?.id ?? '' }));
+    } catch {
+      setError('Payment taken, but we couldn’t confirm it here. Please contact the school if charged.');
+      setBusy(false);
+    }
+  };
+  return (
+    <form onSubmit={submit} className="pay-form">
+      <PaymentElement />
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={!stripe || busy}>
+        {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {money(intent.amount, intent.currency)}
+      </button>
+      <p className="hint pay-hint"><ShieldCheck size={12} /> Your card details go straight to Stripe — never to this app.</p>
+    </form>
+  );
+}
+
+function TuitionThanks({ result }: { result: TuitionConfirmResponse }) {
+  const ok = result.succeeded;
+  return (
+    <section className="glass-raised donate-card donate-thanks">
+      <div className={`donate-emblem${ok ? ' is-success' : ''}`} aria-hidden="true"><GraduationCap size={34} /></div>
+      <h1 className="donate-title">{ok ? 'Payment received' : 'Payment not completed'}</h1>
+      {ok ? (
+        <p className="donate-desc">
+          Your payment of {money(result.amount, result.currency)}{result.schoolName ? ` to ${result.schoolName}` : ''} has been recorded. JazākAllāhu khayran.
+        </p>
       ) : result.status === 'processing' ? (
         <p className="donate-desc">Your payment is processing. You’ll receive confirmation shortly, in shā’ Allah.</p>
       ) : (

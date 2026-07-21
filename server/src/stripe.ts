@@ -125,6 +125,7 @@ export async function createPaymentIntent(
   metadata: Record<string, string>,
   idempotencyKey: string,
   receiptEmail?: string,
+  description?: string,
 ): Promise<IntentResult> {
   const stripe = client(account.secretKey);
   const pi = await stripe.paymentIntents.create(
@@ -134,6 +135,9 @@ export async function createPaymentIntent(
       metadata,
       automatic_payment_methods: { enabled: true },
       ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
+      // Tuition (Students billing) sets "School balance — <family label>". NEVER the PIN or
+      // the typed student name (a description is visible in Stripe dashboards + exports).
+      ...(description ? { description: description.slice(0, 200) } : {}),
     },
     { idempotencyKey },
   );
@@ -215,6 +219,8 @@ export interface RetrievedIntent {
   /** Card brand (e.g. "visa", "mastercard") + last 4 digits, when paid by card. */
   cardBrand: string;
   cardLast4: string;
+  /** The latest charge id (ch_…), for the Students record-payment externalRef. */
+  chargeId: string;
 }
 
 /** Retrieve a PaymentIntent to verify its real status server-side (never trust the
@@ -233,6 +239,7 @@ export async function retrievePaymentIntent(account: StripeConfig, id: string): 
       billingName: charge?.billing_details?.name ?? '',
       cardBrand: card?.brand ?? '',
       cardLast4: card?.last4 ?? '',
+      chargeId: charge?.id ?? '',
     };
   } catch {
     return null;

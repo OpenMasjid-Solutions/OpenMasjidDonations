@@ -171,3 +171,37 @@ Two Fabric refinements, tracking OpenMasjidOS v0.33.0 / v0.37.0:
   existing base-path handling (rewriteUrl strip + injected `<base href>`) already serves it.
   Cloudflare terminates TLS, so the donor's browser sees `https://` (Stripe Elements works)
   while the OS proxies to our plain-HTTP container. See `docs/REMOTE_ACCESS_INGRESS.md`.
+
+## Tuition = a Students-billing shell over the Fabric broker (v0.26.0)
+
+The `tuition` campaign type is **repurposed** (it was a card-fee variant in v0.24.0): it is now a
+thin shell around the separate **OpenMasjid Students** app, reached through the OpenMasjidOS
+**app-to-app broker** (OS v0.40.0). Students owns everything inside a tuition campaign — the label,
+the lookup, balances, allocation, recording. We render the shell and charge the card. Authoritative
+contract: `students/billing` v1 in `OpenMasjidStudentManager/docs/FABRIC_BILLING_CONTRACT.md` §11
+(mirrored locally in `docs/STUDENTS_INTEGRATION.md`).
+
+- **Transport (`server/src/students.ts`).** We POST `${OPENMASJID_BASE_URL}/api/fabric/app/students/billing/<method>`
+  with **our own** per-app secret; the OS core verifies our manifest declares
+  `fabric.consumes: [students/billing]` (string form — the APPS catalog validator + OS `parseFabric`
+  require it) and proxies to Students. `brokerCall` NEVER throws, 10 s timeout, and NEVER logs the
+  body (the PIN + family data). Every broker error → `unavailable` → the tuition campaign hides
+  itself / shows a friendly notice (fail-soft doctrine). `info` is cached ~5 min.
+- **No client trust (the security core).** On a successful `lookup` we stash the family + its open
+  invoices in a **server-side session** (in-memory, 15 min, 128-bit id); the browser gets only display
+  data + the opaque id — never the internal family/student ids. At pay time the client sends the
+  session id + which invoices (or "full"); `computeTuitionAmount` (pure, unit-tested) recomputes the
+  amount **and** the familyId server-side, so a crafted request can't attribute a charge to an
+  arbitrary family or pay a tampered amount. The PIN/name are body-only, never in a URL/log/metadata.
+- **Separate ledger (`student_payments` table).** Tuition payments are **not donations** — a distinct
+  table, never joined into `metrics()`/`listDonations()`/`raisedForCampaign()`/the CSV, so they are
+  excluded from every donation total, goal and year-end letter by construction (locked by a test).
+  Tuition has **no card-fee** (`deriveFees` forces both flags off) — the parent pays the exact school
+  balance; a gross-up would overpay an invoice and break Students' allocation.
+- **Record + durable outbox.** The PaymentIntent carries §11.3 metadata (`purpose=students-billing`,
+  `omos_app=donations`, `students_family_id`, optional `students_student_id`; description
+  `School balance — <label>`). On confirm/webhook we **retrieve** the PI (never trust the client) and
+  push `record-payment` (idempotencyKey = the PI id). A dropped response leaves `record_status:pending`;
+  a 60 s outbox `check`s-before-retry so it never double-records; a permanent app error → `skipped`.
+  Students' own daily reconciliation (it scans succeeded `students-billing` PIs) is the final backstop,
+  so **money is never lost** even if our push never lands. Receipts/wording say "payment", not "donation".

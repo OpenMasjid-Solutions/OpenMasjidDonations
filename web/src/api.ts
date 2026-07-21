@@ -334,6 +334,10 @@ export interface PublicCampaign {
   masjidLogo: string;
   thankYou: ThankYou; // resolved (campaign override over global default)
   largeDonation?: LargeDonation; // global; advisory dialog above threshold
+  /** Present only for a `tuition` campaign (a Students-billing shell). `available` false =
+   *  OpenMasjid Students isn't installed / set up / reachable → show a friendly notice, not
+   *  the name+PIN form. */
+  students?: { available: boolean; schoolName: string; tagline: string };
   publishableKey: string;
   ready: boolean;
 }
@@ -372,6 +376,51 @@ export const createIntent = (
   });
 export const confirmDonation = (body: { paymentIntentId: string; slug: string; token?: string }) =>
   request<ConfirmResponse>('/api/public/confirm', { method: 'POST', body: JSON.stringify(body) });
+
+// ── Tuition (Students billing) — the `tuition` campaign flow ─────────────────
+/** One open invoice a parent can choose to pay (amount in major units). */
+export interface StudentInvoiceView {
+  id: string;
+  label: string;
+  dueDate: string;
+  amount: number;
+}
+/** The family a name+PIN lookup resolved to. Internal ids stay server-side (in the session);
+ *  the browser only gets display data + the opaque `session` used for the pay step. */
+export interface StudentLookupResult {
+  found: boolean;
+  session?: string;
+  currency?: string;
+  family?: {
+    label: string;
+    students: { firstName: string; lastInitial: string }[];
+    balance: number; // major units
+    openInvoices: StudentInvoiceView[];
+  };
+}
+export interface TuitionIntentResponse {
+  clientSecret: string;
+  publishableKey: string;
+  amount: number;
+  currency: string;
+}
+export interface TuitionConfirmResponse {
+  status: string;
+  succeeded: boolean;
+  amount: number;
+  currency: string;
+  schoolName: string;
+  familyLabel: string;
+}
+/** What to pay: the whole balance, or a chosen set of open invoices. */
+export type TuitionSelection = { kind: 'full' } | { kind: 'invoices'; invoiceIds: string[] };
+
+export const lookupStudent = (slug: string, body: { name: string; pin: string }) =>
+  request<StudentLookupResult>(`${campaignPath(slug)}/students/lookup`, { method: 'POST', body: JSON.stringify(body) });
+export const createTuitionIntent = (slug: string, body: { session: string; selection: TuitionSelection }) =>
+  request<TuitionIntentResponse>(`${campaignPath(slug)}/students/intent`, { method: 'POST', body: JSON.stringify(body) });
+export const confirmTuitionPayment = (slug: string, body: { paymentIntentId: string }) =>
+  request<TuitionConfirmResponse>(`${campaignPath(slug)}/students/confirm`, { method: 'POST', body: JSON.stringify(body) });
 
 // ── Cloudflare Tunnel (public access) ───────────────────────────────────────
 export interface TunnelStatus {

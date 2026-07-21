@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, HandCoins, HeartHandshake,
+  Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
   KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw,
   Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet, X,
 } from 'lucide-react';
@@ -752,8 +752,8 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
   // type, so the preview/labels match what will actually be saved (server re-derives too).
   useEffect(() => {
     if (type === 'zakat') { setForceCoverFees(true); setCoverFees(true); }
-    else if (type === 'donation') setForceCoverFees(false);
-    // tuition: leave forceCoverFees to the admin's toggle.
+    else if (type === 'tuition') { setForceCoverFees(false); setCoverFees(false); } // Students shell: no card-fee
+    else setForceCoverFees(false); // donation
   }, [type]);
   const [allowMonthly, setAllowMonthly] = useState(campaign?.allowMonthly ?? false);
   const [goalAmount, setGoalAmount] = useState(String(campaign?.goalAmount ?? 0));
@@ -837,7 +837,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
         </select>
         <span className="hint">
           {type === 'zakat' ? 'Zakat always covers the card fee, so the full Zakat reaches the masjid.'
-            : type === 'tuition' ? 'For tuition you can require the payer to cover the card fee.'
+            : type === 'tuition' ? 'Tuition is powered by OpenMasjid Students — parents look up their child by name + PIN and pay the school balance. Amounts and records come from Students.'
             : 'For a donation you can offer donors the option to cover the card fee.'}
         </span>
       </Field>
@@ -853,11 +853,17 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       <ImageField id="cimg" label="Cover image (optional)" hint="Shown inside the page." value={coverImage} onChange={setCoverImage} />
       <ImageField id="cbg" label="Background image (optional)" hint="This page's full background. Leave empty for the default look (it won't use the dashboard wallpaper)." value={backgroundImage} onChange={setBackgroundImage} />
       <ImageField id="clogo" label="Campaign logo (optional)" hint="Shown as this campaign's icon. Leave empty to use your masjid logo." value={logo} onChange={setLogo} />
-      <Field id="cp" label={`Suggested amounts (${currency}, comma-separated)`}><input id="cp" className="input" value={presets} onChange={(e) => setPresets(e.target.value)} placeholder="10, 25, 50, 100" /></Field>
-      <div className="grid2">
-        <Field id="cmin" label={`Minimum custom amount (${currency})`}><input id="cmin" className="input" type="number" min="0" step="0.01" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} /></Field>
-        <Field id="cgoal" label={`Goal (${currency}, 0 = none)`}><input id="cgoal" className="input" type="number" min="0" step="0.01" value={goalAmount} onChange={(e) => setGoalAmount(e.target.value)} /></Field>
-      </div>
+      {/* Amount + goal fields only apply to donation/zakat. A tuition campaign takes the
+          exact school balance from OpenMasjid Students, so it has no presets/min/goal. */}
+      {type !== 'tuition' && (
+        <>
+          <Field id="cp" label={`Suggested amounts (${currency}, comma-separated)`}><input id="cp" className="input" value={presets} onChange={(e) => setPresets(e.target.value)} placeholder="10, 25, 50, 100" /></Field>
+          <div className="grid2">
+            <Field id="cmin" label={`Minimum custom amount (${currency})`}><input id="cmin" className="input" type="number" min="0" step="0.01" value={minAmount} onChange={(e) => setMinAmount(e.target.value)} /></Field>
+            <Field id="cgoal" label={`Goal (${currency}, 0 = none)`}><input id="cgoal" className="input" type="number" min="0" step="0.01" value={goalAmount} onChange={(e) => setGoalAmount(e.target.value)} /></Field>
+          </div>
+        </>
+      )}
       {accounts.length > 0 ? (
         <Field id="cacct" label="Stripe account (where money goes)">
           <select id="cacct" className="input" value={stripeAccountId} onChange={(e) => setStripeAccountId(e.target.value)}>
@@ -869,25 +875,37 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
         // Fabric account (the server resolves it at pay time regardless of this field).
         <p className="hint">Payments go to your OpenMasjidOS Stripe account (Payments tab).</p>
       )}
-      <label className="check-row"><input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} /><span>Allow donors to enter their own amount</span></label>
-      {/* Card-fee control, driven by the campaign type (server re-derives + enforces). */}
-      {type === 'zakat' ? (
-        <p className="hint">Card fees are covered by the donor (required for Zakat) — the masjid receives the full Zakat.</p>
-      ) : type === 'tuition' ? (
-        <label className="check-row"><input type="checkbox" checked={forceCoverFees} onChange={(e) => setForceCoverFees(e.target.checked)} /><span>Require the payer to cover the card fee</span></label>
-      ) : (
-        <label className="check-row"><input type="checkbox" checked={coverFees} onChange={(e) => setCoverFees(e.target.checked)} /><span>Offer donors the option to cover card fees</span></label>
-      )}
-      <label className="check-row"><input type="checkbox" checked={allowMonthly} onChange={(e) => setAllowMonthly(e.target.checked)} /><span>Offer a monthly (recurring) option</span></label>
-      {/* Per-campaign thank-you override — empty fields inherit the global "Thank-you" tab. */}
-      <details className="ty-override" open={tyOpen} onToggle={(e) => setTyOpen((e.target as HTMLDetailsElement).open)}>
-        <summary className="check-row" style={{ cursor: 'pointer' }}><HeartHandshake size={15} /><span>Custom thank-you for this campaign (optional)</span></summary>
-        <div style={{ marginBlockStart: '0.6rem' }}>
-          <p className="hint" style={{ marginBlockStart: 0 }}>Leave a field blank to use your default thank-you. Variables: {'{name}'}, {'{amount}'}, {'{campaign}'}, {'{masjid}'}.</p>
-          {tyOpen && <ThankYouPreview value={{ heading: thankYou.heading || tyDefault?.heading || '', message: thankYou.message || tyDefault?.message || '', backgroundImage: thankYou.backgroundImage || tyDefault?.backgroundImage || '', accent: thankYou.accent || tyDefault?.accent || '' }} masjidName={masjidName} currency={currency} />}
-          <ThankYouFields value={thankYou} onChange={setThankYou} placeholders={tyDefault ?? undefined} />
+      {type === 'tuition' && (
+        <div className="glass-inset" style={{ padding: '0.7rem 0.85rem', display: 'grid', gap: '0.35rem' }}>
+          <p className="hint" style={{ marginBlock: 0 }}>
+            <GraduationCap size={13} /> This is a <b>tuition</b> page powered by <b>OpenMasjid Students</b>. Parents enter their child’s name + PIN, see the family balance and open months, and pay by card — the payment is recorded straight into Students.
+          </p>
+          <p className="hint" style={{ marginBlock: 0 }}>
+            Choose the <b>same Stripe account OpenMasjid Students uses</b>, so tuition lands in the school’s account and reconciles there. Nothing else on this page (amounts, goals, fees) applies — Students owns all of that.
+          </p>
         </div>
-      </details>
+      )}
+      {type !== 'tuition' && (
+        <>
+          <label className="check-row"><input type="checkbox" checked={allowCustom} onChange={(e) => setAllowCustom(e.target.checked)} /><span>Allow donors to enter their own amount</span></label>
+          {/* Card-fee control, driven by the campaign type (server re-derives + enforces). */}
+          {type === 'zakat' ? (
+            <p className="hint">Card fees are covered by the donor (required for Zakat) — the masjid receives the full Zakat.</p>
+          ) : (
+            <label className="check-row"><input type="checkbox" checked={coverFees} onChange={(e) => setCoverFees(e.target.checked)} /><span>Offer donors the option to cover card fees</span></label>
+          )}
+          <label className="check-row"><input type="checkbox" checked={allowMonthly} onChange={(e) => setAllowMonthly(e.target.checked)} /><span>Offer a monthly (recurring) option</span></label>
+          {/* Per-campaign thank-you override — empty fields inherit the global "Thank-you" tab. */}
+          <details className="ty-override" open={tyOpen} onToggle={(e) => setTyOpen((e.target as HTMLDetailsElement).open)}>
+            <summary className="check-row" style={{ cursor: 'pointer' }}><HeartHandshake size={15} /><span>Custom thank-you for this campaign (optional)</span></summary>
+            <div style={{ marginBlockStart: '0.6rem' }}>
+              <p className="hint" style={{ marginBlockStart: 0 }}>Leave a field blank to use your default thank-you. Variables: {'{name}'}, {'{amount}'}, {'{campaign}'}, {'{masjid}'}.</p>
+              {tyOpen && <ThankYouPreview value={{ heading: thankYou.heading || tyDefault?.heading || '', message: thankYou.message || tyDefault?.message || '', backgroundImage: thankYou.backgroundImage || tyDefault?.backgroundImage || '', accent: thankYou.accent || tyDefault?.accent || '' }} masjidName={masjidName} currency={currency} />}
+              <ThankYouFields value={thankYou} onChange={setThankYou} placeholders={tyDefault ?? undefined} />
+            </div>
+          </details>
+        </>
+      )}
       {/* Embeddable widget — paste the campaign into any website (served at /w/<slug>). */}
       <label className="check-row"><input type="checkbox" checked={widgetEnabled} onChange={(e) => setWidgetEnabled(e.target.checked)} /><span>Let this campaign be embedded on other websites (widget)</span></label>
       {widgetEnabled && <WidgetEmbed url={computedSlug ? `${shareBase || originBase()}/w/${computedSlug}` : ''} title={title} isPublic={!!shareBase && /^https:/.test(shareBase)} />}

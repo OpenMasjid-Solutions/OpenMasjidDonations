@@ -5,7 +5,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.25.0
+version: 0.26.0
 author: OpenMasjid-Solutions
 license: AGPL-3.0-only
 icon: icon.svg
@@ -65,6 +65,20 @@ stripe: true
 # base-path aware (strips the prefix before routing; injects <base href> into the SPA).
 # Falls back to this device's own address when remote access is off / standalone.
 domain: true
+# Opt into the Fabric app-to-app broker as a CONSUMER of the OpenMasjid Students app's
+# `billing` capability. A campaign whose type is `tuition` becomes a thin shell around
+# Students: a parent looks up their child by name + PIN, we fetch the family balance from
+# Students over the broker (POST ${OPENMASJID_BASE_URL}/api/fabric/app/students/billing/<method>,
+# server→server with our per-app secret), they pay by card, and we record the payment back
+# into the Students ledger. Students OWNS everything inside a tuition campaign. This grant
+# (declared here) + the target's matching `provides` are what let the OS broker route our
+# calls; without it every call is 403 not_granted. LAN-only, fail-soft: any broker error
+# (target_not_installed / unreachable / timeout) hides the tuition campaign — the donation
+# site always works regardless. See docs/STUDENTS_INTEGRATION.md + the authoritative
+# students/billing v1 contract (OpenMasjidStudentManager/docs/FABRIC_BILLING_CONTRACT.md).
+fabric:
+  consumes:
+    - students/billing
 
 # NO install settings — install is truly one-click (the platform shows no dialog).
 # Everything is chosen INSIDE the app: on its admin Payments screen it lists the

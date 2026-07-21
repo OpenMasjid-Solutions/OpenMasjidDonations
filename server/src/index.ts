@@ -21,6 +21,16 @@ import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, StripeAccount, StripeConfig, ThankYou, LargeDonation } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature } from './fabric';
+import {
+  billingConfigured,
+  studentsInfo,
+  studentsLookup,
+  recordStudentPayment,
+  checkStudentPayment,
+  createTuitionSession,
+  getTuitionSession,
+  computeTuitionAmount,
+} from './students';
 import { csvCell } from './csv';
 import { LoginLimiter } from './rateLimit';
 import { TunnelManager } from './tunnel';
@@ -809,6 +819,22 @@ async function main(): Promise<void> {
   const publicCampaign = async (c: Campaign) => {
     const acct = await effectiveAccountFor(c);
     const ld = store.getLargeDonation();
+    // A tuition campaign is a Students-billing shell: ask Students (over the Fabric broker)
+    // whether it's set up. Unavailable / disabled → the donor page shows a friendly notice
+    // instead of the name+PIN form (fail-soft, contract §2). Amounts are in the SCHOOL's
+    // currency (from Students), not the masjid's donation currency.
+    let students: { available: boolean; schoolName: string; tagline: string } | undefined;
+    let currency = cur();
+    if (c.type === 'tuition') {
+      const info = await studentsInfo();
+      const available = info.available && info.info.enabled;
+      students = {
+        available,
+        schoolName: available ? info.info.schoolName : '',
+        tagline: available ? info.info.tagline : '',
+      };
+      if (available && info.available && info.info.currency) currency = info.info.currency;
+    }
     return {
       slug: c.slug,
       title: c.title,
@@ -822,18 +848,21 @@ async function main(): Promise<void> {
       minAmount: toMajorCur(c.minAmount),
       maxAmount: toMajorCur(c.maxAmount),
       coverFees: c.coverFees,
-      feesForced: c.forceCoverFees, // fee is mandatory (Zakat / required Tuition) — no donor opt-out
+      feesForced: c.forceCoverFees, // fee is mandatory (Zakat) — no donor opt-out; never for tuition
       giftAid: c.giftAid,
       allowMonthly: c.allowMonthly,
       goalAmount: toMajorCur(c.goalAmount),
       raised: toMajorCur(store.raisedForCampaign(c.id)),
-      currency: cur(),
+      currency,
       masjidName: store.getMasjid().name,
       masjidLogo: store.getMasjid().logo,
       thankYou: resolveThankYou(c), // resolved (campaign override over global default)
       // Global large-donation alternative (major units for the donor page). Advisory only —
       // the donor may still pay by card; the server never blocks above the threshold.
       largeDonation: { threshold: toMajorCur(ld.threshold), message: ld.message, qrImage: ld.qrImage },
+      // Tuition (Students) status; undefined for donation/zakat. When present + !available the
+      // donor page shows "tuition payments aren't available right now" and no name+PIN form.
+      students,
       publishableKey: acct?.publishableKey ?? '', // safe; never the secret
       ready: !!acct && stripeConfigured(acct),
     };
@@ -870,7 +899,10 @@ async function main(): Promise<void> {
     }
     const { slug, token } = req.params as { slug: string; token?: string };
     const c = resolvePublicCampaign(slug, token);
-    if (!c || !c.active) return reply.code(404).send({ error: 'This donation page isn’t available.' });
+    // A tuition campaign is NOT a donation — it must never go through the donation flow
+    // (that would file a client-chosen amount into the donations ledger, count it in totals/
+    // CSV/Gift Aid, and orphan it from the Students ledger). Tuition has its own routes.
+    if (!c || !c.active || c.type === 'tuition') return reply.code(404).send({ error: 'This donation page isn’t available.' });
     const acct = await effectiveAccountFor(c);
     if (!acct || !stripeConfigured(acct)) return reply.code(400).send({ error: 'Donations aren’t set up for this page yet.' });
     const parsed = IntentBody.safeParse(req.body);
@@ -967,7 +999,9 @@ async function main(): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'Missing payment reference.' });
     const { paymentIntentId, slug, token } = parsed.data;
     const c = resolvePublicCampaign(slug, token);
-    if (!c) return reply.code(404).send({ error: 'Unknown campaign.' });
+    // Tuition confirms go through /students/confirm; never confirm a tuition campaign here
+    // (defence in depth — the tuition intent route above is already blocked).
+    if (!c || c.type === 'tuition') return reply.code(404).send({ error: 'Unknown campaign.' });
     const don = store.getDonationByPaymentIntent(paymentIntentId);
     // Confirm against the SAME account the PaymentIntent was created on (recorded on the
     // donation) — never re-resolve Fabric-first here, or a payment made on one account
@@ -1002,6 +1036,213 @@ async function main(): Promise<void> {
     };
   });
 
+  // ── Tuition (Students billing) — a `tuition` campaign is a shell around OpenMasjid ──
+  // Students. Parent enters child name + PIN → we look up the family balance over the OS
+  // Fabric broker → they pay all/some → we record it into the Students ledger. Students
+  // owns everything inside; we render the shell + charge the card. Contract: students/billing
+  // v1 (docs/STUDENTS_INTEGRATION.md). Everything fails soft when Students is unavailable.
+
+  // A stricter per-peer limiter for the PIN lookup so we can't be the open relay that lets an
+  // attacker grind PINs (Students also locks a PIN after repeated failures — defence in depth).
+  // Keyed on the real TCP peer (never a spoofable X-Forwarded-For), like the login limiter.
+  const lookupHits = new Map<string, { c: number; reset: number }>();
+  const lookupRateOk = (ip: string): boolean => {
+    const now = Date.now();
+    if (lookupHits.size > 5000) for (const [k, w] of lookupHits) if (w.reset <= now) lookupHits.delete(k);
+    const w = lookupHits.get(ip);
+    if (!w || w.reset <= now) {
+      lookupHits.set(ip, { c: 1, reset: now + 60_000 });
+      return true;
+    }
+    if (w.c >= 20) return false;
+    w.c += 1;
+    return true;
+  };
+
+  /** Push a succeeded tuition payment into the Students ledger (idempotent on the PI id).
+   *  Re-verifies the PI succeeded with Stripe before recording (never book a charge that
+   *  didn't happen). Leaves record_status 'pending' on a transient outage (the outbox
+   *  retries) and 'skipped' on a permanent app error (Students' daily reconciliation is the
+   *  final backstop, so money is never lost). The Students app fires its own notification. */
+  const tryRecordStudentPayment = async (pi: string): Promise<void> => {
+    const sp = store.getStudentPaymentByPI(pi);
+    if (!sp || sp.recordStatus !== 'pending') return;
+    const acct = await accountById(sp.stripeAccountId);
+    if (!acct) return; // account gone/unresolvable right now — try again next tick
+    const retrieved = await retrievePaymentIntent(acct, pi);
+    if (!retrieved || retrieved.status !== 'succeeded') return; // never record a non-succeeded charge
+    if (sp.payStatus !== 'succeeded') store.markStudentPaymentPaid(pi, 'succeeded', sp.occurredAt || new Date().toISOString());
+    let allocations: { invoiceId: string; amountCents: number }[] | undefined;
+    try {
+      const a = JSON.parse(sp.allocations || 'null');
+      if (Array.isArray(a) && a.length) allocations = a;
+    } catch { /* full-balance (no allocations) */ }
+    const res = await recordStudentPayment({
+      idempotencyKey: pi, // = the PaymentIntent id → Students dedups replays
+      familyId: sp.familyId,
+      studentId: sp.studentId || undefined,
+      amountCents: sp.amount,
+      currency: sp.currency,
+      occurredAt: sp.occurredAt || new Date().toISOString(),
+      externalRef: { stripePaymentIntentId: pi, stripeChargeId: retrieved.chargeId || undefined },
+      allocations,
+    });
+    if (res.status === 'recorded') store.setStudentRecordStatus(pi, 'recorded', res.paymentId);
+    else if (res.status === 'rejected') store.setStudentRecordStatus(pi, 'skipped'); // reconciliation backstop
+    // 'unavailable' → leave pending; the outbox retries.
+  };
+
+  // Look up a family by the child's name + PIN. The PIN + name are read from the body only
+  // and NEVER logged/echoed. Not-found is uniform (no hint which part was wrong). On success
+  // we stash the family SERVER-SIDE (a session) so the pay step can't be told a different
+  // family or a tampered amount — the browser only gets display data + an opaque session id.
+  const LookupBody = z.object({ name: z.string().min(1).max(120), pin: z.string().min(1).max(32) });
+  app.post('/api/public/campaign/:slug/students/lookup', async (req, reply) => {
+    if (!lookupRateOk(req.socket.remoteAddress ?? 'unknown')) {
+      return reply.code(429).send({ error: 'Too many attempts. Please wait a moment and try again.' });
+    }
+    const c = store.getCampaignBySlug((req.params as { slug: string }).slug);
+    if (!c || !c.active || c.type !== 'tuition') return reply.code(404).send({ error: 'This page isn’t available.' });
+    const parsed = LookupBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please enter the student’s name and PIN.' });
+    const r = await studentsLookup(parsed.data.name.trim(), parsed.data.pin.trim());
+    if (r.status === 'unavailable') {
+      return reply.code(503).send({ error: 'Tuition payments are temporarily unavailable. Please try again shortly.' });
+    }
+    if (r.status === 'not-found') return { data: { found: false } };
+    const fam = r.family;
+    const ccy = fam.currency || cur();
+    const dec = (minor: number) => toMajor(minor, ccy);
+    const session = createTuitionSession({
+      campaignId: c.id,
+      familyId: fam.id,
+      studentId: r.matchedStudentId,
+      familyLabel: fam.label,
+      currency: ccy,
+      balanceCents: fam.balanceCents,
+      invoices: fam.openInvoices.map((i) => ({ id: i.id, balanceCents: i.balanceCents })),
+    });
+    // Return DISPLAY data only — never the internal family/student ids (they live in the session).
+    return {
+      data: {
+        found: true,
+        session: session.id,
+        currency: ccy,
+        family: {
+          label: fam.label,
+          students: fam.students,
+          balance: dec(fam.balanceCents),
+          openInvoices: fam.openInvoices.map((i) => ({ id: i.id, label: i.label, dueDate: i.dueDate, amount: dec(i.balanceCents) })),
+        },
+      },
+    };
+  });
+
+  // Start a tuition payment. The client sends the session id + which invoices to pay (or
+  // "full") — NEVER an amount or a family id; we recompute both server-side from the session.
+  const StudentsIntentBody = z.object({
+    session: z.string().min(1).max(64),
+    selection: z.union([
+      z.object({ kind: z.literal('full') }),
+      z.object({ kind: z.literal('invoices'), invoiceIds: z.array(z.string().min(1).max(128)).min(1).max(60) }),
+    ]),
+  });
+  app.post('/api/public/campaign/:slug/students/intent', async (req, reply) => {
+    if (!donateRateOk(req.socket.remoteAddress ?? 'unknown')) {
+      return reply.code(429).send({ error: 'Too many attempts. Please wait a moment.' });
+    }
+    const c = store.getCampaignBySlug((req.params as { slug: string }).slug);
+    if (!c || !c.active || c.type !== 'tuition') return reply.code(404).send({ error: 'This page isn’t available.' });
+    const acct = await effectiveAccountFor(c);
+    if (!acct || !stripeConfigured(acct)) return reply.code(400).send({ error: 'Tuition payments aren’t set up for this page yet.' });
+    const parsed = StudentsIntentBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please choose what to pay.' });
+    const session = getTuitionSession(parsed.data.session);
+    if (!session || session.campaignId !== c.id) {
+      return reply.code(400).send({ error: 'Your session expired — please look up your balance again.' });
+    }
+    const amt = computeTuitionAmount(session, parsed.data.selection);
+    if ('error' in amt) {
+      return reply.code(400).send({ error: amt.error === 'nothing-due' ? 'There’s nothing left to pay on that selection.' : 'Please choose what to pay.' });
+    }
+    const currency = session.currency;
+    const chargeMinor = amt.amountCents;
+    if (!Number.isInteger(chargeMinor) || chargeMinor < 50) return reply.code(400).send({ error: 'That amount is too small to charge.' });
+    if (chargeMinor > 99_999_999) return reply.code(400).send({ error: 'That amount is too large.' });
+    // §11.3 metadata — the reconciliation discriminator + the family id (REQUIRED). NEVER the
+    // PIN or the typed name. Description uses the family label only.
+    const metadata: Record<string, string> = {
+      purpose: 'students-billing',
+      omos_app: 'donations',
+      students_family_id: session.familyId,
+      campaignId: c.id,
+    };
+    if (session.studentId) metadata.students_student_id = session.studentId;
+    const idempotencyKey = crypto.randomUUID();
+    let clientSecret = '';
+    let paymentIntentId = '';
+    try {
+      const intent = await createPaymentIntent(
+        acct,
+        chargeMinor,
+        currency,
+        metadata,
+        idempotencyKey,
+        undefined, // no receipt email — the tuition flow collects only name + PIN
+        `School balance — ${session.familyLabel || 'family'}`,
+      );
+      clientSecret = intent.clientSecret;
+      paymentIntentId = intent.id;
+    } catch (e) {
+      log.warn('tuition payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
+      return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
+    }
+    store.createStudentPayment({
+      campaignId: c.id,
+      stripeAccountId: acct.id,
+      paymentIntentId,
+      familyId: session.familyId,
+      studentId: session.studentId,
+      familyLabel: session.familyLabel,
+      amount: chargeMinor,
+      currency,
+      allocations: amt.allocations ? JSON.stringify(amt.allocations) : '',
+    });
+    return { data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency } };
+  });
+
+  // Confirm a tuition payment on return: RETRIEVE the intent from Stripe (never trust the
+  // client), record the local outcome, then push it to the Students ledger (best-effort; the
+  // outbox + Students' reconciliation are the backstops). The receipt says "payment".
+  const StudentsConfirmBody = z.object({ paymentIntentId: z.string().min(1).max(255) });
+  app.post('/api/public/campaign/:slug/students/confirm', async (req, reply) => {
+    const parsed = StudentsConfirmBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Missing payment reference.' });
+    const c = store.getCampaignBySlug((req.params as { slug: string }).slug);
+    if (!c || c.type !== 'tuition') return reply.code(404).send({ error: 'Unknown page.' });
+    const sp = store.getStudentPaymentByPI(parsed.data.paymentIntentId);
+    if (!sp || sp.campaignId !== c.id) return reply.code(404).send({ error: 'Unknown payment.' });
+    const acct = await accountById(sp.stripeAccountId);
+    if (!acct) return reply.code(404).send({ error: 'Unknown payment.' });
+    const pi = await retrievePaymentIntent(acct, sp.paymentIntentId);
+    if (!pi) return reply.code(502).send({ error: 'Couldn’t confirm with Stripe. Please try again.' });
+    const succeeded = pi.status === 'succeeded';
+    const payStatus: 'succeeded' | 'failed' | 'pending' = succeeded ? 'succeeded' : pi.status === 'processing' ? 'pending' : 'failed';
+    store.markStudentPaymentPaid(sp.paymentIntentId, payStatus, succeeded ? new Date().toISOString() : undefined);
+    if (succeeded) await tryRecordStudentPayment(sp.paymentIntentId); // best-effort; outbox retries on failure
+    const info = await studentsInfo();
+    return {
+      data: {
+        status: pi.status,
+        succeeded,
+        amount: toMajor(pi.amount, pi.currency),
+        currency: pi.currency,
+        schoolName: info.available ? info.info.schoolName : '',
+        familyLabel: sp.familyLabel,
+      },
+    };
+  });
+
   // ── Stripe webhook (optional, per-account secret) ───────────────────────────
   // Only needed when the app is publicly reachable. It records ongoing monthly
   // charges (invoice.paid on renewal) and resiliently confirms one-time payments.
@@ -1019,6 +1260,15 @@ async function main(): Promise<void> {
         const pi = event.data.object as { id: string };
         const don = store.getDonationByPaymentIntent(pi.id);
         if (don && don.status !== 'succeeded') store.markDonation(pi.id, 'succeeded');
+        // A tuition (Students-billing) payment: mark it paid + push to the Students ledger.
+        const sp = store.getStudentPaymentByPI(pi.id);
+        if (sp) {
+          if (sp.payStatus !== 'succeeded') store.markStudentPaymentPaid(pi.id, 'succeeded', new Date().toISOString());
+          // Fire-and-forget push to the Students ledger. It's async, so a throw inside becomes
+          // a rejected promise the surrounding try/catch can't see — .catch() it so a DB fault
+          // never becomes an unhandled rejection that crashes the whole process (fail soft).
+          if (sp.recordStatus === 'pending') void tryRecordStudentPayment(pi.id).catch(() => {});
+        }
       } else if (event.type === 'invoice.paid' || event.type === 'invoice.payment_succeeded') {
         const inv = event.data.object as { billing_reason?: string; subscription?: string; payment_intent?: string; amount_paid?: number; currency?: string };
         // Only renewals here — the FIRST invoice is recorded via the donor's confirm flow.
@@ -1173,6 +1423,29 @@ async function main(): Promise<void> {
       } catch { /* fail soft — never let the watcher crash the app */ }
     };
     const iv = setInterval(() => void watch(), 20_000);
+    iv.unref?.();
+  }
+
+  // Tuition (Students-billing) outbox: retry any succeeded tuition payment whose push to the
+  // Students ledger hasn't landed yet (e.g. a network blip right after the card cleared). We
+  // `check` first so we never double-record, then re-`record-payment`. Students' daily
+  // reconciliation is the FINAL backstop (it scans succeeded students-billing PIs), so this is
+  // an optimization — money is never lost even if this never runs. Embedded only.
+  if (billingConfigured()) {
+    const outbox = async () => {
+      try {
+        for (const sp of store.listPendingStudentRecords()) {
+          const chk = await checkStudentPayment(sp.paymentIntentId);
+          if (chk.status === 'recorded') {
+            store.setStudentRecordStatus(sp.paymentIntentId, 'recorded', chk.paymentId);
+            continue;
+          }
+          if (chk.status === 'unavailable') break; // platform down — stop this pass, try next tick
+          await tryRecordStudentPayment(sp.paymentIntentId); // not-recorded → push it
+        }
+      } catch { /* fail soft — never let the outbox crash the app */ }
+    };
+    const iv = setInterval(() => void outbox(), 60_000);
     iv.unref?.();
   }
 }

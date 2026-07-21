@@ -60,9 +60,13 @@ export interface StripeAccount extends StripeConfig {
 /** A donation page/appeal. The public URL is a clean, admin-chosen path: /<slug>
  *  (e.g. /zakat). The slug is unique across campaigns. The `token` is retained only
  *  so older /c/<slug>-<token> links keep working; new links never expose it. */
-/** Every campaign has a type. It drives the card-fee rule (see deriveFees): a Donation
- *  lets the admin offer fee-covering; Zakat always enforces it (so the full Zakat reaches
- *  the masjid); Tuition lets the admin choose whether to require it. */
+/** Every campaign has a type.
+ *  - `donation` — the admin may OFFER donors the option to cover the card fee.
+ *  - `zakat` — the fee is always enforced (so the full Zakat reaches the masjid).
+ *  - `tuition` — NOT a donation flow at all: a thin shell around the OpenMasjid Students
+ *    app (name + PIN → family balance → pay → recorded in Students over the Fabric broker).
+ *    It has NO card-fee concept — the parent pays the exact school balance (grossing up
+ *    would overpay an invoice and break Students' allocation). See docs/STUDENTS_INTEGRATION.md. */
 export type CampaignType = 'donation' | 'zakat' | 'tuition';
 
 export interface Campaign {
@@ -159,6 +163,31 @@ export interface Donation {
   recurring: boolean;
   subscriptionId: string;
   createdAt: string;
+}
+
+/** A tuition (Students-billing) payment. NOT a donation — it credits a family's balance in
+ *  the OpenMasjid Students ledger. We hold only what the record/retry flow needs; NEVER the
+ *  PIN or the typed student name. `allocations` is the JSON the parent chose ('' = full
+ *  balance, auto-allocated by Students oldest-due-first). `recordStatus` tracks the durable
+ *  push to Students: 'pending' (outbox will retry), 'recorded' (done), 'skipped' (a permanent
+ *  app error — Students' own daily reconciliation is the backstop, so money is never lost). */
+export interface StudentPayment {
+  id: string;
+  campaignId: string;
+  stripeAccountId: string;
+  paymentIntentId: string;
+  familyId: string;
+  studentId: string;
+  familyLabel: string;
+  /** Amount charged, in MINOR units of the SCHOOL's currency (from the Students lookup). */
+  amount: number;
+  currency: string;
+  allocations: string;
+  payStatus: 'pending' | 'succeeded' | 'failed';
+  recordStatus: 'pending' | 'recorded' | 'skipped';
+  studentsPaymentId: string;
+  createdAt: string;
+  occurredAt: string;
 }
 
 /** Cloudflare Tunnel config. The token is a CREDENTIAL — server-side only, never
@@ -264,6 +293,31 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_donations_campaign ON donations(campaign_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_donations_pi ON donations(payment_intent_id);
+
+      -- Tuition (Students-billing) payments live in their OWN table, deliberately separate
+      -- from donations: they are school payments, NOT gifts, so they must never appear in
+      -- donation totals, metrics, the CSV, Gift Aid or year-end tax letters (contract §5).
+      -- We keep only what the record-payment outbox + retry need (never the PIN or the typed
+      -- student name). record_status drives the durable push to the Students ledger.
+      CREATE TABLE IF NOT EXISTS student_payments (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        stripe_account_id TEXT NOT NULL,
+        payment_intent_id TEXT NOT NULL,
+        family_id TEXT NOT NULL,
+        student_id TEXT NOT NULL DEFAULT '',
+        family_label TEXT NOT NULL DEFAULT '',
+        amount INTEGER NOT NULL,
+        currency TEXT NOT NULL,
+        allocations TEXT NOT NULL DEFAULT '',
+        pay_status TEXT NOT NULL DEFAULT 'pending',
+        record_status TEXT NOT NULL DEFAULT 'pending',
+        students_payment_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        occurred_at TEXT NOT NULL DEFAULT ''
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_student_payments_pi ON student_payments(payment_intent_id);
+      CREATE INDEX IF NOT EXISTS idx_student_payments_outbox ON student_payments(pay_status, record_status);
     `);
     // Tighten file perms where the OS supports it (secrets + admin hash live here).
     try {
@@ -709,17 +763,18 @@ export class Store {
 
   /** Enforce the type→fee rule (the single source of truth, so a hand-crafted API body
    *  can't create a non-enforcing Zakat campaign): Zakat always forces the fee onto the
-   *  donor; Donation never forces it; Tuition leaves it to the admin's choice. Forcing the
-   *  fee implies offering it (coverFees), matching the intent-time derivation + the Kiosk. */
+   *  donor; Donation never forces it (coverFees stays the admin's optional offer); Tuition
+   *  has NO card-fee at all — it's a Students-billing shell where the parent pays the exact
+   *  school balance (a fee gross-up would overpay an invoice and break Students' allocation),
+   *  so both flags are forced off regardless of the body. */
   private deriveFees(c: Campaign): Campaign {
     if (c.type === 'zakat') {
       c.forceCoverFees = true; // Zakat: always enforced…
       c.coverFees = true; // …and offering is implied.
     } else if (c.type === 'tuition') {
-      // Tuition: the admin chooses whether to require the fee. There is no separate
-      // *optional* offer — the fee is offered iff it's required (so a not-required tuition
-      // never surfaces a cover-fees checkbox the admin didn't intend).
-      c.coverFees = c.forceCoverFees;
+      // Tuition (Students billing): the amount is the school balance, exact — never grossed up.
+      c.coverFees = false;
+      c.forceCoverFees = false;
     } else {
       // Donation: never forced; coverFees stays the admin's optional offer.
       c.forceCoverFees = false;
@@ -907,6 +962,87 @@ export class Store {
         .all() as { month: string; raised: number; count: number }[]
     ).map((r) => ({ month: String(r.month), raised: Number(r.raised), count: Number(r.count) }));
     return { totalRaised: Number(totals.s), count: Number(totals.n), byCampaign, monthly };
+  }
+
+  // ── Tuition (Students-billing) payments ─────────────────────────────────────
+  // A separate ledger from donations (never counted as a gift). See student_payments DDL.
+  private rowToStudentPayment(r: Record<string, unknown>): StudentPayment {
+    return {
+      id: String(r.id),
+      campaignId: String(r.campaign_id),
+      stripeAccountId: String(r.stripe_account_id),
+      paymentIntentId: String(r.payment_intent_id),
+      familyId: String(r.family_id),
+      studentId: String(r.student_id ?? ''),
+      familyLabel: String(r.family_label ?? ''),
+      amount: Number(r.amount),
+      currency: String(r.currency),
+      allocations: String(r.allocations ?? ''),
+      payStatus: String(r.pay_status) as StudentPayment['payStatus'],
+      recordStatus: String(r.record_status) as StudentPayment['recordStatus'],
+      studentsPaymentId: String(r.students_payment_id ?? ''),
+      createdAt: String(r.created_at),
+      occurredAt: String(r.occurred_at ?? ''),
+    };
+  }
+
+  createStudentPayment(
+    input: Omit<StudentPayment, 'id' | 'createdAt' | 'payStatus' | 'recordStatus' | 'studentsPaymentId' | 'occurredAt'>,
+  ): StudentPayment {
+    const p: StudentPayment = {
+      id: rid('spy'),
+      payStatus: 'pending',
+      recordStatus: 'pending',
+      studentsPaymentId: '',
+      occurredAt: '',
+      createdAt: new Date().toISOString(),
+      ...input,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO student_payments
+          (id, campaign_id, stripe_account_id, payment_intent_id, family_id, student_id, family_label,
+           amount, currency, allocations, pay_status, record_status, students_payment_id, created_at, occurred_at)
+         VALUES
+          (@id, @campaignId, @stripeAccountId, @paymentIntentId, @familyId, @studentId, @familyLabel,
+           @amount, @currency, @allocations, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
+      )
+      .run(p);
+    return p;
+  }
+
+  getStudentPaymentByPI(pi: string): StudentPayment | null {
+    const r = this.db.prepare('SELECT * FROM student_payments WHERE payment_intent_id = ?').get(pi) as Record<string, unknown> | undefined;
+    return r ? this.rowToStudentPayment(r) : null;
+  }
+
+  /** Record the Stripe outcome of a tuition payment (idempotent). */
+  markStudentPaymentPaid(pi: string, payStatus: StudentPayment['payStatus'], occurredAt?: string): StudentPayment | null {
+    const cur = this.getStudentPaymentByPI(pi);
+    if (!cur) return null;
+    this.db
+      .prepare('UPDATE student_payments SET pay_status=@payStatus, occurred_at=@occurredAt WHERE payment_intent_id=@pi')
+      .run({ pi, payStatus, occurredAt: occurredAt || cur.occurredAt });
+    return this.getStudentPaymentByPI(pi);
+  }
+
+  /** Record the Students-ledger push outcome (idempotent). */
+  setStudentRecordStatus(pi: string, recordStatus: StudentPayment['recordStatus'], studentsPaymentId?: string): StudentPayment | null {
+    const cur = this.getStudentPaymentByPI(pi);
+    if (!cur) return null;
+    this.db
+      .prepare('UPDATE student_payments SET record_status=@recordStatus, students_payment_id=@studentsPaymentId WHERE payment_intent_id=@pi')
+      .run({ pi, recordStatus, studentsPaymentId: studentsPaymentId || cur.studentsPaymentId });
+    return this.getStudentPaymentByPI(pi);
+  }
+
+  /** Succeeded charges whose Students-ledger push hasn't landed yet — the outbox to retry. */
+  listPendingStudentRecords(limit = 50): StudentPayment[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM student_payments WHERE pay_status = 'succeeded' AND record_status = 'pending' ORDER BY created_at LIMIT ?`)
+        .all(limit) as Record<string, unknown>[]
+    ).map((r) => this.rowToStudentPayment(r));
   }
 
   close(): void {
