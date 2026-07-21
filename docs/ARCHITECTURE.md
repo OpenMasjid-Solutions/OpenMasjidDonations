@@ -205,3 +205,31 @@ contract: `students/billing` v1 in `OpenMasjidStudentManager/docs/FABRIC_BILLING
   a 60 s outbox `check`s-before-retry so it never double-records; a permanent app error → `skipped`.
   Students' own daily reconciliation (it scans succeeded `students-billing` PIs) is the final backstop,
   so **money is never lost** even if our push never lands. Receipts/wording say "payment", not "donation".
+
+## Fabric email + admin alerts (v0.27.0)
+
+Two more OpenMasjidOS Fabric capabilities (platform v0.41.0+); both fail soft and never touch mail
+credentials or the From address.
+
+- **Donor email receipts (`email: true`).** The admin sets up ONE provider (SMTP/Resend) once in
+  OpenMasjidOS → Settings → Email. We send a **branded receipt** via `POST /api/fabric/email`
+  (`fabric.ts` `fabricEmail`). It's **opt-in** (admin toggle on the Thank-you tab, off by default) with
+  an editable template (subject/heading/body + the `{name}{amount}{campaign}{masjid}` variables +
+  header image + accent). The email is built + escaped **server-side** (`email.ts` `renderReceipt`,
+  pure + unit-tested): the body/heading are treated as **plain text** and every value — including the
+  donor's own `{name}` from the *unauthenticated* public intent — is HTML-escaped, so nothing can
+  inject markup; images are embedded only from an http(s) URL (an uploaded `/uploads/…` header image is
+  resolved to the Fabric public URL, and dropped when the app isn't publicly reachable). Sent
+  non-blocking on the donation's first success (the donor's thank-you isn't delayed). **Receipt
+  strategy:** Stripe's own `receipt_email` is suppressed **only** when our email is enabled *and*
+  confirmed working (`emailStatus()==='ok'`), so a donor never ends up with zero receipts — until email
+  is proven working, Stripe's receipt stays as the fallback; the state is self-correcting per donation.
+  There's no OS "is email configured?" endpoint, so the admin UI shows the last send/test outcome and a
+  **"send test"** button (admin-only) rather than probing.
+- **Admin alerts (`alerts:`).** Declared ids: **`payment-failed`** (Stripe rejected a payment *setup* —
+  the 502 path on donation + tuition intents; systemic, not per-donor declines) and
+  **`tuition-record-failed`** (a succeeded tuition charge the Students ledger permanently rejected —
+  money is safe via reconciliation, but the admin should verify). Fired with `POST /api/fabric/alert`
+  (`fabricAlert`); the admin chooses the channel (email/webhook/off) per alert in OpenMasjidOS. We do
+  **not** declare `reader-offline` — this is a web/Stripe-Elements app with no card reader (that alert
+  belongs to the Kiosk). Alert text carries no PII (only a Stripe PI id + a reason code).

@@ -102,6 +102,42 @@ test('student payment record flow: outbox lists only pending-succeeded; status i
   assert.equal(s.getStudentPaymentByPI('pi_tui_2')?.studentsPaymentId, 'pay_71');
 });
 
+test('email receipt: defaults off; allowlists image + accent, caps text', () => {
+  const s = fresh();
+  assert.equal(s.getEmailReceipt().enabled, false, 'off by default — nothing emails until the admin opts in');
+  const r = s.setEmailReceipt({ enabled: true, image: 'javascript:alert(1)', accent: 'red; }x{', subject: 'x'.repeat(300), body: 'y'.repeat(5000) });
+  assert.equal(r.enabled, true);
+  assert.equal(r.image, '', 'javascript: image rejected');
+  assert.equal(r.accent, '', 'invalid accent rejected');
+  assert.equal(r.subject.length, 200, 'subject capped');
+  assert.equal(r.body.length, 4000, 'body capped');
+  assert.equal(s.setEmailReceipt({ image: '/uploads/logo_1.png' }).image, '/uploads/logo_1.png', 'uploaded image accepted');
+  assert.equal(s.setEmailReceipt({ image: 'https://ex.org/l.png' }).image, 'https://ex.org/l.png', 'https image accepted');
+  assert.equal(s.setEmailReceipt({ accent: '#D4AF37' }).accent, '#D4AF37', 'valid hex accepted');
+  assert.equal(s.getEmailReceipt().enabled, true, 'persists across reads');
+});
+
+test('receipt outbox: only succeeded + pending + in-window donations are retried', () => {
+  const s = fresh();
+  const camp = mk(s, { title: 'Gen' });
+  const base = { campaignId: camp.id, stripeAccountId: 'acct_test', currency: 'USD', donorName: 'A', donorEmail: 'a@b.co', coverFees: false, giftAid: false };
+  s.createDonation({ ...base, amount: 1000, status: 'succeeded', paymentIntentId: 'pi_r1', receipt: 'pending' }); // owed
+  s.createDonation({ ...base, amount: 2000, status: 'succeeded', paymentIntentId: 'pi_r2', receipt: 'stripe' }); // Stripe sent it → never owed
+  s.createDonation({ ...base, amount: 3000, status: 'pending', paymentIntentId: 'pi_r3', receipt: 'pending' }); // not succeeded yet
+  const win = 3 * 24 * 3600 * 1000;
+  assert.deepEqual(s.listPendingReceipts(win).map((d) => d.paymentIntentId), ['pi_r1'], 'only the succeeded+pending one');
+  s.setDonationReceipt('pi_r1', 'sent');
+  assert.equal(s.listPendingReceipts(win).length, 0, 'a sent receipt drops out of the outbox');
+  // An ancient owed receipt is not chased forever.
+  s.createDonation({ ...base, amount: 4000, status: 'succeeded', paymentIntentId: 'pi_old', receipt: 'pending' });
+  (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
+    .prepare("UPDATE donations SET created_at='2000-01-01T00:00:00.000Z' WHERE payment_intent_id='pi_old'")
+    .run();
+  assert.ok(!s.listPendingReceipts(win).some((d) => d.paymentIntentId === 'pi_old'), 'donations older than the window are excluded');
+  // A recorded receipt state survives a round-trip.
+  assert.equal(s.getDonationByPaymentIntent('pi_r2')!.receipt, 'stripe');
+});
+
 test('large-donation clamps the threshold, caps the message, and allowlists qrImage', () => {
   const s = fresh();
   const ld = s.setLargeDonation({ threshold: -50, message: 'x'.repeat(700), qrImage: 'javascript:alert(1)' });

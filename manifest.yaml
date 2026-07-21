@@ -5,7 +5,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.26.0
+version: 0.27.0
 author: OpenMasjid-Solutions
 license: AGPL-3.0-only
 icon: icon.svg
@@ -79,6 +79,23 @@ domain: true
 fabric:
   consumes:
     - students/billing
+# Opt into Fabric email (platform v0.41.0+): the admin sets up ONE email provider (SMTP or
+# Resend) once in OpenMasjidOS → Settings → Email, and we send a donor a branded receipt via
+# POST /api/fabric/email — we never see the mail credentials or the From address. Opt-in in the
+# app (admin toggle + editable receipt) and fail-soft: if email isn't set up ("not_configured")
+# we simply don't email and still record the donation + show the on-screen thank-you.
+email: true
+# Admin alerts (platform v0.41.0+): each declared type gets a granular Email/Webhook on-off in
+# OpenMasjidOS → Settings → Alerts (the admin picks the channel — we never do). We fire one with
+# POST /api/fabric/alert. Fail-soft on `disabled_by_admin`. (No `reader-offline` here — this is a
+# web/Stripe-Elements app with no card reader; that alert belongs to the Kiosk.)
+alerts:
+  - id: payment-failed
+    label: A payment couldn't be started
+    description: Stripe rejected a payment setup (e.g. bad or expired keys, or Stripe is down) — donors can't give until it's fixed.
+  - id: tuition-record-failed
+    label: A tuition payment wasn't recorded in Students
+    description: A card payment succeeded but OpenMasjid Students rejected recording it. The money is safe (Students' reconciliation is the backstop) — please verify.
 
 # NO install settings — install is truly one-click (the platform shows no dialog).
 # Everything is chosen INSIDE the app: on its admin Payments screen it lists the

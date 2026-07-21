@@ -9,16 +9,16 @@ import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
-  KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw,
+  KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw, Send,
   Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet, X,
 } from 'lucide-react';
 import {
-  checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations,
+  checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations, getEmailReceipt,
   getFabricStripeAccounts, getLargeDonation, getMetrics, getSession, getSettings, getThankYou, getTunnel, listCampaigns, login, logout, money,
-  saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
-  sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
+  saveEmailReceipt, saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
+  sendTestNotification, sendTestReceipt, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
   type AccountInput, type AppInfo, type Campaign, type CampaignInput, type CampaignType, type Donation, type DonationsResult,
-  type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
+  type EmailReceipt, type EmailReceiptPatch, type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
 } from './api';
 import { useReadableTheme } from './prefs';
 import { BASE, asset, withBase } from './base';
@@ -283,7 +283,12 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         {tab === 'overview' && <MetricsDashboard />}
         {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
         {tab === 'donations' && <DonationsCard />}
-        {tab === 'thankyou' && <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />}
+        {tab === 'thankyou' && (
+          <div style={{ display: 'grid', gap: '1rem' }}>
+            <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />
+            <EmailReceiptCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />
+          </div>
+        )}
         {tab === 'largegift' && <LargeDonationCard currency={settings.masjid.currency} />}
         {tab === 'payments' && (
           <>
@@ -1254,6 +1259,118 @@ function ThankYouCard({ masjidName, currency }: { masjidName: string; currency: 
       <ThankYouFields value={value} onChange={setValue} />
       {error && <p className="form-error">{error}</p>}
       <button className="btn btn--primary" onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save thank-you'}</button>
+    </section>
+  );
+}
+
+/** A friendly line for a failed test-email `reason`. */
+function emailReasonText(reason?: string): string {
+  switch (reason) {
+    case 'not_configured': return 'Email isn’t set up in OpenMasjidOS yet — open Settings → Email there, then try again.';
+    case 'rate_limited': return 'Too many emails just now — please try again in a minute.';
+    case 'bad_recipient': return 'That address was rejected — check it and try again.';
+    case 'no-fabric': return 'Email needs OpenMasjidOS — this app is running standalone.';
+    default: return 'Couldn’t send the test — please try again.';
+  }
+}
+
+/** A small preview of the emailed receipt (sample values filled in; body newlines kept). */
+function EmailReceiptPreview({ value, masjidName, currency }: { value: EmailReceipt; masjidName: string; currency: string }) {
+  const vars = { name: 'Aisha', amount: money(50, currency || 'USD'), campaign: 'General Fund', masjid: masjidName || 'Your Masjid' };
+  const accent = tyAccent(value.accent) || '#1FA37A';
+  const img = safeImg(value.image);
+  return (
+    <>
+      <div className="cprev-head"><span className="hint">Email preview</span></div>
+      <div style={{ background: '#0e1814', borderRadius: '12px', padding: '14px' }}>
+        <div style={{ maxWidth: '360px', margin: '0 auto', background: '#152420', border: '1px solid #24382f', borderTop: `4px solid ${accent}`, borderRadius: '10px', padding: '18px 16px' }}>
+          {img ? <div style={{ textAlign: 'center', marginBottom: '12px' }}><img src={img} alt="" style={{ maxWidth: '120px', maxHeight: '60px' }} /></div> : null}
+          <div style={{ color: accent, fontSize: '16px', fontWeight: 700, textAlign: 'center', marginBottom: '8px' }}>{fillVars(value.heading || 'JazākAllāhu khayran, {name}!', vars)}</div>
+          <div style={{ color: '#c8d6cf', fontSize: '13px', lineHeight: 1.5, textAlign: 'center', whiteSpace: 'pre-wrap' }}>{fillVars(value.body || 'Your donation of {amount} to {campaign} was received.', vars)}</div>
+          {masjidName ? <div style={{ color: '#8a9a92', fontSize: '11px', textAlign: 'center', marginTop: '14px' }}>{masjidName}</div> : null}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** The emailed-receipt editor (lives under the Thank-you tab, below the on-page thank-you).
+ *  Sends through the OpenMasjidOS Fabric email provider; off until the admin opts in. */
+function EmailReceiptCard({ masjidName, currency }: { masjidName: string; currency: string }) {
+  const [value, setValue] = useState<EmailReceipt | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+  const [testTo, setTestTo] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState('');
+  useEffect(() => { getEmailReceipt().then(setValue).catch(() => setError('Couldn’t load the email receipt settings.')); }, []);
+  if (!value) return <section className="glass panel"><span className="spinner" aria-label="Loading" /></section>;
+
+  const set = (patch: EmailReceiptPatch) => setValue({ ...value, ...patch });
+  const save = async () => {
+    setBusy(true); setError('');
+    try {
+      setValue(await saveEmailReceipt({ enabled: value.enabled, subject: value.subject, heading: value.heading, body: value.body, image: value.image, accent: value.accent }));
+      setSaved(true); setTimeout(() => setSaved(false), 2000);
+    } catch (e) { setError(msg(e)); } finally { setBusy(false); }
+  };
+  const test = async () => {
+    setTesting(true); setTestMsg('');
+    try {
+      const r = await sendTestReceipt(testTo.trim());
+      setValue({ ...value, emailStatus: r.emailStatus });
+      setTestMsg(r.sent ? 'Sent — check that inbox (and spam).' : emailReasonText(r.reason));
+    } catch (e) { setTestMsg(msg(e)); } finally { setTesting(false); }
+  };
+
+  const statusNote = (): string => {
+    if (!value.embedded) return 'Email receipts send through OpenMasjidOS. Run this app under OpenMasjidOS and set up an email provider (Settings → Email) to use them.';
+    switch (value.emailStatus) {
+      case 'ok': return 'Connected to your OpenMasjidOS email ✓';
+      case 'not_configured': return 'No email provider is set up in OpenMasjidOS yet — open Settings → Email there, then send a test below.';
+      case 'rate_limited': return 'Email is set up, but sending is rate-limited right now.';
+      case 'error': return 'Couldn’t reach the email service last time — send a test to check.';
+      default: return 'Send a test below to confirm your email is working.';
+    }
+  };
+
+  return (
+    <section className="glass panel">
+      <div className="card-head">
+        <Mail size={18} className="panel-ico" aria-hidden="true" />
+        <div className="card-head__main">
+          <h2 className="section-title-inline">Email receipt</h2>
+          <p className="muted">Email donors a branded receipt through your OpenMasjidOS email provider. Same variables: {'{name}'}, {'{amount}'}, {'{campaign}'}, {'{masjid}'}.</p>
+        </div>
+      </div>
+      <p className="hint">{statusNote()}</p>
+      <label className="check-row"><input type="checkbox" checked={value.enabled} onChange={(e) => set({ enabled: e.target.checked })} /><span>Email a receipt to donors who leave an email address</span></label>
+      {value.enabled && (
+        <>
+          <EmailReceiptPreview value={value} masjidName={masjidName} currency={currency} />
+          <Field id="er-s" label="Subject"><input id="er-s" className="input" value={value.subject} placeholder="Your donation to {masjid}" onChange={(e) => set({ subject: e.target.value })} /></Field>
+          <Field id="er-h" label="Heading"><input id="er-h" className="input" value={value.heading} placeholder="JazākAllāhu khayran, {name}!" onChange={(e) => set({ heading: e.target.value })} /></Field>
+          <Field id="er-b" label="Message"><textarea id="er-b" className="input" rows={4} value={value.body} onChange={(e) => set({ body: e.target.value })} /></Field>
+          <div className="row" style={{ gap: '0.35rem', flexWrap: 'wrap', margin: '-0.2rem 0 0.6rem' }}>
+            <span className="hint" style={{ alignSelf: 'center' }}>Insert:</span>
+            {TY_VARS.map((v) => <button key={v} type="button" className="btn btn--ghost btn--sm mono" onClick={() => set({ body: `${value.body}${value.body && !value.body.endsWith(' ') ? ' ' : ''}${v}` })}>{v}</button>)}
+          </div>
+          <ImageField id="er-img" label="Header image (optional)" hint="A logo/banner at the top of the email. Note: images only load in the email when your app is reachable over the internet (remote access)." value={value.image} onChange={(image) => set({ image })} />
+          <Field id="er-a" label="Accent colour (optional)"><input id="er-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
+        </>
+      )}
+      {error && <p className="form-error">{error}</p>}
+      <div className="row" style={{ gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBlockStart: '0.4rem' }}>
+        <button className="btn btn--primary" onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save'}</button>
+        {value.embedded && (
+          <>
+            <input className="input" style={{ maxWidth: '15rem' }} type="email" placeholder="you@example.org" value={testTo} onChange={(e) => setTestTo(e.target.value)} />
+            <button className="btn btn--ghost" type="button" onClick={test} disabled={testing || !testTo.trim()}>{testing ? <span className="spinner" /> : <Send size={15} />} Send test</button>
+          </>
+        )}
+      </div>
+      {testMsg && <p className="hint">{testMsg}</p>}
     </section>
   );
 }

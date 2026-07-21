@@ -143,6 +143,28 @@ export interface LargeDonation {
 }
 export const LARGE_DONATION_DEFAULT: LargeDonation = { threshold: 0, message: '', qrImage: '' };
 
+/** The emailed donation receipt (sent via the OpenMasjidOS Fabric email provider when the
+ *  admin enables it). heading/body/subject support the same {name} {amount} {campaign}
+ *  {masjid} variables as the on-page thank-you. `image` is a header/logo image; `accent` a
+ *  hex tint. Off by default — nothing is emailed until the admin turns it on AND the OS has
+ *  an email provider set up. The receipt is built + escaped server-side (see email.ts). */
+export interface EmailReceipt {
+  enabled: boolean;
+  subject: string;
+  heading: string;
+  body: string;
+  image: string;
+  accent: string;
+}
+export const EMAIL_RECEIPT_DEFAULT: EmailReceipt = {
+  enabled: false,
+  subject: 'Your donation to {masjid}',
+  heading: 'JazākAllāhu khayran, {name}!',
+  body: 'Your donation of {amount} to {campaign} was received. May Allah accept it from you and reward you abundantly.\n\nThank you for your generosity — please keep this email for your records.',
+  image: '',
+  accent: '',
+};
+
 export interface Donation {
   id: string;
   campaignId: string;
@@ -162,6 +184,13 @@ export interface Donation {
   /** True for monthly (subscription) donations; subscriptionId is the Stripe sub. */
   recurring: boolean;
   subscriptionId: string;
+  /** Branded-receipt-email lifecycle, DECIDED ONCE at intent (so confirm/outbox stay
+   *  consistent with whether Stripe's own receipt was suppressed):
+   *  - 'stripe'  — Stripe sends its built-in receipt; we send nothing (no double).
+   *  - 'pending' — Stripe's receipt was suppressed; WE owe a branded receipt (retried).
+   *  - 'sent'    — the branded receipt was delivered.
+   *  - 'skipped' — permanently un-sendable (no/invalid donor email, or provider rejected it). */
+  receipt: 'stripe' | 'pending' | 'sent' | 'skipped';
   createdAt: string;
 }
 
@@ -339,6 +368,8 @@ export class Store {
     this.ensureColumn('donations', 'card_last4', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('donations', 'subscription_id', "TEXT NOT NULL DEFAULT ''");
+    // Legacy rows default to 'stripe' (their receipts were Stripe's built-in ones).
+    this.ensureColumn('donations', 'receipt', "TEXT NOT NULL DEFAULT 'stripe'");
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
@@ -705,6 +736,35 @@ export class Store {
     return merged;
   }
 
+  /** The emailed donation-receipt template (admin-editable). Off by default. */
+  getEmailReceipt(): EmailReceipt {
+    const s = this.getJson<EmailReceipt>('email_receipt');
+    return {
+      enabled: s.enabled ?? EMAIL_RECEIPT_DEFAULT.enabled,
+      subject: s.subject ?? EMAIL_RECEIPT_DEFAULT.subject,
+      heading: s.heading ?? EMAIL_RECEIPT_DEFAULT.heading,
+      body: s.body ?? EMAIL_RECEIPT_DEFAULT.body,
+      image: s.image ?? EMAIL_RECEIPT_DEFAULT.image,
+      accent: s.accent ?? EMAIL_RECEIPT_DEFAULT.accent,
+    };
+  }
+
+  setEmailReceipt(patch: Partial<EmailReceipt>): EmailReceipt {
+    const merged = { ...this.getEmailReceipt(), ...clean(patch) };
+    merged.enabled = !!merged.enabled;
+    merged.subject = String(merged.subject ?? '').slice(0, 200);
+    merged.heading = String(merged.heading ?? '').slice(0, 200);
+    merged.body = String(merged.body ?? '').slice(0, 4000);
+    // Same allowlist as other image fields: a same-origin uploaded file or an http(s) URL —
+    // reject javascript:/data: and anything with quotes/backslashes/whitespace.
+    const u = String(merged.image ?? '').trim().slice(0, 500);
+    merged.image = /^\/uploads\/[A-Za-z0-9._-]+$/.test(u) || /^https?:\/\/[^"'\\\s]+$/i.test(u) ? u : '';
+    const a = String(merged.accent ?? '').trim();
+    merged.accent = /^#[0-9a-fA-F]{3,8}$/.test(a) ? a : '';
+    this.setRaw('email_receipt', JSON.stringify(merged));
+    return merged;
+  }
+
   private writeCampaign(c: Campaign): void {
     this.db
       .prepare(
@@ -845,15 +905,19 @@ export class Store {
       cardLast4: String(r.card_last4 ?? ''),
       recurring: !!r.recurring,
       subscriptionId: String(r.subscription_id ?? ''),
+      receipt: (['stripe', 'pending', 'sent', 'skipped'] as const).includes(String(r.receipt) as Donation['receipt'])
+        ? (String(r.receipt) as Donation['receipt'])
+        : 'stripe',
       createdAt: String(r.created_at),
     };
   }
 
   createDonation(
-    input: Omit<Donation, 'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4' | 'recurring' | 'subscriptionId'> & {
+    input: Omit<Donation, 'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4' | 'recurring' | 'subscriptionId' | 'receipt'> & {
       status?: Donation['status'];
       recurring?: boolean;
       subscriptionId?: string;
+      receipt?: Donation['receipt'];
     },
   ): Donation {
     // Card details are unknown until the payment confirms — start blank, filled in by markDonation.
@@ -864,6 +928,7 @@ export class Store {
       cardLast4: '',
       recurring: input.recurring ?? false,
       subscriptionId: input.subscriptionId ?? '',
+      receipt: input.receipt ?? 'stripe',
       createdAt: new Date().toISOString(),
       ...input,
     };
@@ -871,10 +936,10 @@ export class Store {
       .prepare(
         `INSERT INTO donations
           (id, campaign_id, stripe_account_id, amount, currency, status, donor_name, donor_email, cover_fees, gift_aid,
-           payment_intent_id, recurring, subscription_id, created_at)
+           payment_intent_id, recurring, subscription_id, receipt, created_at)
          VALUES
           (@id, @campaignId, @stripeAccountId, @amount, @currency, @status, @donorName, @donorEmail, @coverFees, @giftAid,
-           @paymentIntentId, @recurring, @subscriptionId, @createdAt)`,
+           @paymentIntentId, @recurring, @subscriptionId, @receipt, @createdAt)`,
       )
       .run({ ...d, coverFees: d.coverFees ? 1 : 0, giftAid: d.giftAid ? 1 : 0, recurring: d.recurring ? 1 : 0 });
     return d;
@@ -922,6 +987,22 @@ export class Store {
     return (this.db.prepare('SELECT * FROM donations ORDER BY created_at DESC').all() as Record<string, unknown>[]).map((r) =>
       this.rowToDonation(r),
     );
+  }
+
+  /** Set the branded-receipt lifecycle state for a donation (idempotent). */
+  setDonationReceipt(pi: string, receipt: Donation['receipt']): void {
+    this.db.prepare('UPDATE donations SET receipt = ? WHERE payment_intent_id = ?').run(receipt, pi);
+  }
+
+  /** Succeeded donations that still owe a branded receipt (receipt='pending') and are recent
+   *  enough to bother retrying — the outbox drains these when the email provider recovers. */
+  listPendingReceipts(maxAgeMs: number, limit = 50): Donation[] {
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    return (
+      this.db
+        .prepare(`SELECT * FROM donations WHERE status = 'succeeded' AND receipt = 'pending' AND created_at >= ? ORDER BY created_at LIMIT ?`)
+        .all(cutoff, limit) as Record<string, unknown>[]
+    ).map((r) => this.rowToDonation(r));
   }
 
   /** Total raised (succeeded) for a campaign, in minor units. */

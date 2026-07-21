@@ -18,9 +18,10 @@ import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS } from './store';
-import type { Campaign, StripeAccount, StripeConfig, ThankYou, LargeDonation } from './store';
+import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
-import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature } from './fabric';
+import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
+import { renderReceipt } from './email';
 import {
   billingConfigured,
   studentsInfo,
@@ -438,6 +439,86 @@ async function main(): Promise<void> {
     if (patch.threshold !== undefined) patch.threshold = toMinorCur(patch.threshold);
     const ld = store.setLargeDonation(patch);
     return { data: { ...ld, threshold: toMajorCur(ld.threshold) } };
+  });
+
+  // ── Emailed donation receipt (via the OpenMasjidOS Fabric email provider) ────
+  // Resolve the header image to an ABSOLUTE url an email client can load: an http(s) URL is
+  // used as-is; an uploaded /uploads/… file only works when the app is publicly reachable, so
+  // we prefix the Fabric public URL and drop it otherwise (the email just has no image).
+  const resolveEmailImage = (image: string): string => {
+    const v = (image ?? '').trim();
+    if (/^https?:\/\//i.test(v)) return v;
+    if (/^\/uploads\//.test(v)) {
+      const pub = cachedFabricSite().publicUrl;
+      return pub ? `${pub}${v}` : '';
+    }
+    return '';
+  };
+
+  /** Render + send a donor's branded receipt through the Fabric. Returns whether it {sent} and
+   *  whether a failure is worth a {retry} (transient/system down) vs permanent (no/invalid email,
+   *  or the provider rejected the recipient). NEVER throws. Does NOT re-check the enabled toggle —
+   *  the CALLER gates on the donation's recorded decision (receipt==='pending'), so the send stays
+   *  consistent with whether Stripe's own receipt was suppressed at intent. */
+  const sendReceiptEmail = async (
+    to: string,
+    campaignTitle: string,
+    donorName: string,
+    amountMinor: number,
+    currency: string,
+  ): Promise<{ sent: boolean; retry: boolean }> => {
+    const addr = (to || '').trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) return { sent: false, retry: false }; // no/invalid email → never sendable
+    try {
+      const cfg = store.getEmailReceipt();
+      const rendered = renderReceipt(
+        { ...cfg, image: resolveEmailImage(cfg.image) },
+        { name: donorName || '', amount: formatMoney(amountMinor, currency), campaign: campaignTitle, masjid: store.getMasjid().name || '' },
+      );
+      const res = await fabricEmail({ to: addr, subject: rendered.subject, text: rendered.text, html: rendered.html });
+      if (res.sent) return { sent: true, retry: false };
+      return { sent: false, retry: res.reason !== 'bad_recipient' }; // bad recipient is permanent; everything else retries
+    } catch {
+      return { sent: false, retry: true };
+    }
+  };
+
+  /** Send the branded receipt for a specific donation (confirm + the retry outbox). */
+  const sendDonationReceipt = (don: Donation) =>
+    sendReceiptEmail(don.donorEmail, store.getCampaign(don.campaignId)?.title ?? 'your masjid', don.donorName, don.amount, don.currency);
+
+  const EmailReceiptBody = z.object({
+    enabled: z.boolean().optional(),
+    subject: z.string().max(200).optional(),
+    heading: z.string().max(200).optional(),
+    body: z.string().max(4000).optional(),
+    image: z.string().max(2000).optional(),
+    accent: z.string().max(40).optional(),
+  });
+  // embedded + emailStatus let the UI show whether OS email is set up (no probe on load —
+  // emailStatus is the last real send/test outcome; 'ok' once a send succeeded).
+  const emailReceiptView = (cfg: EmailReceipt) => ({ ...cfg, embedded: ssoConfigured(), emailStatus: emailStatus() });
+  app.get('/api/admin/email-receipt', { preHandler: requireAdmin }, async () => ({ data: emailReceiptView(store.getEmailReceipt()) }));
+  app.put('/api/admin/email-receipt', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = EmailReceiptBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const patch: Partial<EmailReceipt> = { ...parsed.data };
+    if (patch.accent !== undefined) patch.accent = sanitizeAccent(patch.accent);
+    return { data: emailReceiptView(store.setEmailReceipt(patch)) };
+  });
+  // Send a test receipt so the admin can confirm OS email is set up and preview the design.
+  app.post('/api/admin/email-receipt/test', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = z.object({ to: z.string().max(200) }).safeParse(req.body);
+    if (!parsed.success || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(parsed.data.to.trim())) {
+      return reply.code(400).send({ error: 'Please enter a valid email address.' });
+    }
+    const cfg = store.getEmailReceipt();
+    const rendered = renderReceipt(
+      { ...cfg, image: resolveEmailImage(cfg.image) },
+      { name: 'Friend', amount: formatMoney(toMinorCur(50), cur()), campaign: 'General Fund', masjid: store.getMasjid().name || 'Your masjid' },
+    );
+    const res = await fabricEmail({ to: parsed.data.to.trim(), subject: `[Test] ${rendered.subject}`, text: rendered.text, html: rendered.html });
+    return { data: { ...res, emailStatus: emailStatus() } };
   });
 
   // ── Image upload (campaign cover/background) — saved to the data volume ──────
@@ -943,6 +1024,15 @@ async function main(): Promise<void> {
       coverFees: String(coverFees), giftAid: String(giftAid), recurring: String(monthly),
     };
     const idempotencyKey = crypto.randomUUID();
+    // Receipt strategy — DECIDED ONCE here and RECORDED on the donation (`receipt` below), so
+    // the confirm/outbox send stays consistent with whether we suppressed Stripe's own receipt:
+    //   • branded → suppress Stripe's built-in receipt + we send our branded one (receipt:'pending').
+    //   • else    → let Stripe send its receipt; we send nothing (receipt:'stripe') → no double.
+    // We only go branded when the OS email is CONFIRMED working (emailStatus 'ok'), so a donor is
+    // never left with zero receipts because email wasn't set up; a transient failure after that is
+    // covered by the retry outbox. (Not re-evaluated at confirm — that was the double/zero bug.)
+    const branded = store.getEmailReceipt().enabled && ssoConfigured() && emailStatus() === 'ok';
+    const stripeReceiptEmail = branded ? undefined : donorEmail.trim() || undefined;
     let clientSecret = '';
     let paymentIntentId = '';
     let subscriptionId = '';
@@ -961,13 +1051,15 @@ async function main(): Promise<void> {
         subscriptionId = sub.subscriptionId;
         if (!clientSecret || !paymentIntentId) throw new Error('subscription has no payment intent');
       } else {
-        // Pass the donor email (if given) so Stripe emails its built-in receipt on success.
-        const intent = await createPaymentIntent(acct, chargeMinor, currency, metadata, idempotencyKey, donorEmail.trim() || undefined);
+        // receipt_email lets Stripe email its built-in receipt on success (see stripeReceiptEmail above).
+        const intent = await createPaymentIntent(acct, chargeMinor, currency, metadata, idempotencyKey, stripeReceiptEmail);
         clientSecret = intent.clientSecret;
         paymentIntentId = intent.id;
       }
     } catch (e) {
       log.warn('payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
+      // Tell the admin donations are broken (bad/expired keys, Stripe down). Fail soft.
+      void fabricAlert('payment-failed', 'A donation payment failed to start', 'Stripe rejected a payment setup — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error').catch(() => {});
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createDonation({
@@ -983,6 +1075,7 @@ async function main(): Promise<void> {
       paymentIntentId,
       recurring: monthly,
       subscriptionId,
+      receipt: branded ? 'pending' : 'stripe',
     });
     return {
       data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency, recurring: monthly },
@@ -1022,6 +1115,18 @@ async function main(): Promise<void> {
     });
     if (succeeded && wasPending) {
       void notify({ title: 'New donation', text: `A donation of ${formatMoney(pi.amount, pi.currency)} to “${c.title}” was received.`, level: 'success' });
+      // Branded receipt — ONLY when we recorded 'pending' at intent (i.e. Stripe's receipt was
+      // suppressed in favour of ours), so there's never a double. Non-blocking; a transient
+      // failure stays 'pending' for the outbox to retry, a permanent one is marked 'skipped'.
+      if (don.receipt === 'pending') {
+        const to = updated?.donorEmail || don.donorEmail;
+        void sendReceiptEmail(to, c.title, updated?.donorName || don.donorName, pi.amount, pi.currency)
+          .then((r) => {
+            if (r.sent) store.setDonationReceipt(paymentIntentId, 'sent');
+            else if (!r.retry) store.setDonationReceipt(paymentIntentId, 'skipped');
+          })
+          .catch(() => {});
+      }
     }
     return {
       data: {
@@ -1088,7 +1193,12 @@ async function main(): Promise<void> {
       allocations,
     });
     if (res.status === 'recorded') store.setStudentRecordStatus(pi, 'recorded', res.paymentId);
-    else if (res.status === 'rejected') store.setStudentRecordStatus(pi, 'skipped'); // reconciliation backstop
+    else if (res.status === 'rejected') {
+      store.setStudentRecordStatus(pi, 'skipped'); // permanent — Students' reconciliation is the backstop
+      // The charge succeeded but the ledger rejected it (e.g. the invoice changed). Money is
+      // safe (reconciliation picks it up) but the admin should verify. Alert carries no PII.
+      void fabricAlert('tuition-record-failed', 'A tuition payment wasn’t recorded in Students', `A card payment succeeded (${pi}) but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.`, 'warning').catch(() => {});
+    }
     // 'unavailable' → leave pending; the outbox retries.
   };
 
@@ -1195,6 +1305,7 @@ async function main(): Promise<void> {
       paymentIntentId = intent.id;
     } catch (e) {
       log.warn('tuition payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
+      void fabricAlert('payment-failed', 'A tuition payment failed to start', 'Stripe rejected a payment setup — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error').catch(() => {});
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createStudentPayment({
@@ -1446,6 +1557,25 @@ async function main(): Promise<void> {
       } catch { /* fail soft — never let the outbox crash the app */ }
     };
     const iv = setInterval(() => void outbox(), 60_000);
+    iv.unref?.();
+  }
+
+  // Branded-receipt retry outbox: any succeeded donation still owing a receipt (a transient
+  // email failure at confirm) is retried until it lands. Bounded to recent donations so we don't
+  // chase ancient ones; stops the pass on a system failure (email down) and resumes next tick.
+  if (ssoConfigured()) {
+    const RECEIPT_MAX_AGE_MS = 3 * 24 * 3600_000; // 3 days
+    const receiptOutbox = async () => {
+      try {
+        for (const don of store.listPendingReceipts(RECEIPT_MAX_AGE_MS)) {
+          const r = await sendDonationReceipt(don);
+          if (r.sent) store.setDonationReceipt(don.paymentIntentId, 'sent');
+          else if (!r.retry) store.setDonationReceipt(don.paymentIntentId, 'skipped');
+          else break; // email provider down / rate-limited — try again next tick
+        }
+      } catch { /* fail soft — never let the receipt outbox crash the app */ }
+    };
+    const iv = setInterval(() => void receiptOutbox(), 60_000);
     iv.unref?.();
   }
 }

@@ -257,6 +257,28 @@ export const getLargeDonation = () => request<LargeDonation>('/api/admin/large-d
 export const saveLargeDonation = (patch: Partial<LargeDonation>) =>
   request<LargeDonation>('/api/admin/large-donation', { method: 'PUT', body: JSON.stringify(patch) });
 
+// Emailed donation receipt (sent via the OpenMasjidOS Fabric email provider when enabled).
+/** Last email-send outcome, so the UI can show whether OS email is set up. 'ok' = a send
+ *  succeeded; 'not_configured' = the admin hasn't set up email in OpenMasjidOS yet. */
+export type EmailStatus = 'unknown' | 'ok' | 'not_configured' | 'rate_limited' | 'error' | 'no-fabric';
+export interface EmailReceipt {
+  enabled: boolean;
+  subject: string;
+  heading: string;
+  body: string;
+  image: string;
+  accent: string;
+  /** True when running embedded under OpenMasjidOS (email is a Fabric feature). */
+  embedded: boolean;
+  emailStatus: EmailStatus;
+}
+export type EmailReceiptPatch = Partial<Pick<EmailReceipt, 'enabled' | 'subject' | 'heading' | 'body' | 'image' | 'accent'>>;
+export const getEmailReceipt = () => request<EmailReceipt>('/api/admin/email-receipt');
+export const saveEmailReceipt = (patch: EmailReceiptPatch) =>
+  request<EmailReceipt>('/api/admin/email-receipt', { method: 'PUT', body: JSON.stringify(patch) });
+export const sendTestReceipt = (to: string) =>
+  request<{ sent: boolean; reason?: string; emailStatus: EmailStatus }>('/api/admin/email-receipt/test', { method: 'POST', body: JSON.stringify({ to }) });
+
 export type AccountInput = { label?: string; publishableKey?: string; secretKey?: string; webhookSecret?: string };
 export const listAccounts = () => request<StripeAccount[]>('/api/admin/stripe-accounts');
 export const createAccount = (body: AccountInput) =>
