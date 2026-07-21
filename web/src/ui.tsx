@@ -3,10 +3,11 @@
 
 /** Small shared UI pieces used by both the public site and the admin area. */
 import { useEffect, useRef, useState } from 'react';
-import { HandCoins, LogOut, Moon, Settings, Sun, User } from 'lucide-react';
+import { LogOut, Moon, Settings, Sun, User } from 'lucide-react';
 import { prefsStore, resolveTheme, usePrefs } from './prefs';
 import { getSession, logout, type AppInfo, type Session } from './api';
 import { withBase } from './base';
+import brandMark from './assets/brand-mark.png';
 
 /** Ambient background. A custom wallpaper image (inherited from the dashboard or set
  *  in the app) fully replaces the preset gradient; otherwise we show the preset scene
@@ -26,7 +27,7 @@ export function Scene() {
 export function Brand() {
   return (
     <a className="brand" href="/" aria-label="OpenMasjid Donations — home">
-      <HandCoins size={22} aria-hidden="true" />
+      <img className="brand-mark" src={brandMark} width={24} height={24} alt="" aria-hidden="true" />
       <b>OpenMasjid&nbsp;Donations</b>
     </a>
   );

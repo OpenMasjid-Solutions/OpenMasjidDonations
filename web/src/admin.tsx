@@ -1270,7 +1270,8 @@ function emailReasonText(reason?: string): string {
     case 'rate_limited': return 'Too many emails just now — please try again in a minute.';
     case 'bad_recipient': return 'That address was rejected — check it and try again.';
     case 'no-fabric': return 'Email needs OpenMasjidOS — this app is running standalone.';
-    default: return 'Couldn’t send the test — please try again.';
+    case 'http_403': return 'OpenMasjidOS hasn’t granted email to this app yet — update the Donations app in OpenMasjidOS so the email permission takes effect.';
+    default: return 'OpenMasjidOS couldn’t send it — check your provider in Settings → Email and try again.';
   }
 }
 
@@ -1320,14 +1321,18 @@ function EmailReceiptCard({ masjidName, currency }: { masjidName: string; curren
     try {
       const r = await sendTestReceipt(testTo.trim());
       setValue({ ...value, emailStatus: r.emailStatus });
-      setTestMsg(r.sent ? 'Sent — check that inbox (and spam).' : emailReasonText(r.reason));
+      setTestMsg(
+        r.sent
+          ? 'OpenMasjidOS accepted it and sent it from your Settings → Email address. Check that inbox AND spam. If nothing arrives, your email provider’s sending (From) domain likely needs verifying in OpenMasjidOS → Settings → Email.'
+          : emailReasonText(r.reason),
+      );
     } catch (e) { setTestMsg(msg(e)); } finally { setTesting(false); }
   };
 
   const statusNote = (): string => {
     if (!value.embedded) return 'Email receipts send through OpenMasjidOS. Run this app under OpenMasjidOS and set up an email provider (Settings → Email) to use them.';
     switch (value.emailStatus) {
-      case 'ok': return 'Connected to your OpenMasjidOS email ✓';
+      case 'ok': return 'Connected to your OpenMasjidOS email ✓ — receipts send from your Settings → Email address.';
       case 'not_configured': return 'No email provider is set up in OpenMasjidOS yet — open Settings → Email there, then send a test below.';
       case 'rate_limited': return 'Email is set up, but sending is rate-limited right now.';
       case 'error': return 'Couldn’t reach the email service last time — send a test to check.';
@@ -1341,7 +1346,7 @@ function EmailReceiptCard({ masjidName, currency }: { masjidName: string; curren
         <Mail size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
           <h2 className="section-title-inline">Email receipt</h2>
-          <p className="muted">Email donors a branded receipt through your OpenMasjidOS email provider. Same variables: {'{name}'}, {'{amount}'}, {'{campaign}'}, {'{masjid}'}.</p>
+          <p className="muted">Email donors a branded receipt through your OpenMasjidOS email provider. It’s sent <b>from the address you set in OpenMasjidOS → Settings → Email</b> (this app never sees or sets the sender). Same variables: {'{name}'}, {'{amount}'}, {'{campaign}'}, {'{masjid}'}.</p>
         </div>
       </div>
       <p className="hint">{statusNote()}</p>
