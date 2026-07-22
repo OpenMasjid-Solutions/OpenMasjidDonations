@@ -524,11 +524,19 @@ async function main(): Promise<void> {
     if (patch.accent !== undefined) patch.accent = sanitizeAccent(patch.accent);
     return { data: emailReceiptView(store.setEmailReceipt(patch)) };
   });
-  // NOTE: there is deliberately NO in-app "send test" here. Receipts go to DONORS (the app
-  // supplies their address to /api/fabric/email). The platform doesn't expose the admin's email
-  // to apps, so an app can't send the admin a test — that's the OS's own Settings → Email test
-  // (it sends to the admin address). The app reaches the admin only via /api/fabric/alert (our
-  // payment-failed / tuition-record-failed alerts already do).
+  // In-app "send me a test": fire the declared `test` alert. The platform delivers it to the
+  // ADMIN's own email + webhook (per their Settings → Alerts matrix) — the app never learns the
+  // admin's address. (Donor receipts still go via /api/fabric/email with the donor's address; the
+  // admin's email is never exposed to apps, so this is the only way the app can reach the admin.)
+  app.post('/api/admin/test-alert', { preHandler: requireAdmin }, async () => {
+    const res = await fabricAlert(
+      'test',
+      'Test from OpenMasjid Donations',
+      'If you received this, OpenMasjidOS is reaching you by email/webhook. Your donation receipts go to donors through the same email provider.',
+      'info',
+    );
+    return { data: res };
+  });
 
   // ── Image upload (campaign cover/background) — saved to the data volume ──────
   // Raster images only (no SVG — it can carry scripts and we serve from same origin).

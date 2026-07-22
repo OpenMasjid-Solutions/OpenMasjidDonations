@@ -9,14 +9,14 @@ import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
-  KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw,
+  KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw, Send,
   Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet, X,
 } from 'lucide-react';
 import {
   checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations, getEmailReceipt,
   getFabricStripeAccounts, getLargeDonation, getMetrics, getSession, getSettings, getThankYou, getTunnel, listCampaigns, login, logout, money,
   saveEmailReceipt, saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
-  sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
+  sendTestAlert, sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
   type AccountInput, type AppInfo, type Campaign, type CampaignInput, type CampaignType, type Donation, type DonationsResult,
   type EmailReceipt, type EmailReceiptPatch, type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
 } from './api';
@@ -1303,6 +1303,8 @@ function EmailReceiptCard({ masjid, currency }: { masjid: MasjidProfile; currenc
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState('');
   useEffect(() => { getEmailReceipt().then(setValue).catch(() => setError('Couldn’t load the email receipt settings.')); }, []);
   if (!value) return <section className="glass panel"><span className="spinner" aria-label="Loading" /></section>;
 
@@ -1313,6 +1315,23 @@ function EmailReceiptCard({ masjid, currency }: { masjid: MasjidProfile; currenc
       setValue(await saveEmailReceipt({ enabled: value.enabled, subject: value.subject, heading: value.heading, body: value.body, accent: value.accent }));
       setSaved(true); setTimeout(() => setSaved(false), 2000);
     } catch (e) { setError(msg(e)); } finally { setBusy(false); }
+  };
+  // "Send me a test" reaches the ADMIN (you) via the Fabric alert channel — the platform
+  // sends it to your own OpenMasjidOS email/webhook; this app never sees your address.
+  const test = async () => {
+    setTesting(true); setTestMsg('');
+    try {
+      const r = await sendTestAlert();
+      setTestMsg(
+        r.delivered
+          ? `Sent ✓ — check your OpenMasjidOS admin email${r.webhook ? ' (and webhook)' : ''}. Donor receipts use this same email provider.`
+          : r.reason === 'disabled_by_admin'
+            ? 'This is turned off in OpenMasjidOS → Settings → Alerts (both channels off for “Test message”). Turn email on there to receive it.'
+            : r.reason === 'no-fabric'
+              ? 'Run this app under OpenMasjidOS to reach your admin inbox.'
+              : 'Couldn’t send — make sure OpenMasjidOS is reachable, then try again.',
+      );
+    } catch (e) { setTestMsg(msg(e)); } finally { setTesting(false); }
   };
 
   const statusNote = (): string => {
@@ -1352,10 +1371,14 @@ function EmailReceiptCard({ masjid, currency }: { masjid: MasjidProfile; currenc
         </>
       )}
       {error && <p className="form-error">{error}</p>}
-      <button className="btn btn--primary" style={{ marginBlockStart: '0.4rem' }} onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save'}</button>
-      {value.embedded && (
-        <p className="hint" style={{ marginBlockStart: '0.6rem' }}>To send yourself a test and confirm email is working, use <b>OpenMasjidOS → Settings → Email</b> — its test goes to your admin address. (This app can’t email you directly: the platform keeps your admin email private from apps. Receipts here are sent to your donors.)</p>
-      )}
+      <div className="row" style={{ gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBlockStart: '0.4rem' }}>
+        <button className="btn btn--primary" onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save'}</button>
+        {value.embedded && (
+          <button className="btn btn--ghost" type="button" onClick={test} disabled={testing}>{testing ? <span className="spinner" /> : <Send size={15} />} Send me a test</button>
+        )}
+      </div>
+      {value.embedded && <p className="hint" style={{ marginBlockStart: '0.5rem' }}>The test goes to <b>you</b> (your OpenMasjidOS admin email/webhook), not a donor — it confirms OpenMasjidOS can reach you through the same email provider your receipts use.</p>}
+      {testMsg && <p className="hint">{testMsg}</p>}
     </section>
   );
 }

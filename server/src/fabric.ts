@@ -196,7 +196,7 @@ export async function fabricAlert(
   title: string,
   text: string,
   level: 'info' | 'success' | 'warning' | 'error' = 'warning',
-): Promise<{ delivered: boolean; reason?: string }> {
+): Promise<{ delivered: boolean; reason?: string; email?: boolean; webhook?: boolean }> {
   if (!config.omosBaseUrl || !config.omosAppSecret) return { delivered: false, reason: 'no-fabric' };
   if (!alert || !text.trim()) return { delivered: false, reason: 'empty' };
   warnIfCleartextSecret();
@@ -212,8 +212,8 @@ export async function fabricAlert(
     });
     clearTimeout(t);
     if (!res.ok) return { delivered: false, reason: `http_${res.status}` };
-    const j = (await res.json().catch(() => ({}))) as { delivered?: boolean; reason?: string };
-    return { delivered: j.delivered === true, reason: j.reason };
+    const j = (await res.json().catch(() => ({}))) as { delivered?: boolean; reason?: string; email?: boolean; webhook?: boolean };
+    return { delivered: j.delivered === true, reason: j.reason, email: j.email, webhook: j.webhook };
   } catch (err) {
     log.debug(`Fabric alert failed: ${err instanceof Error ? err.message : String(err)}`);
     return { delivered: false, reason: 'unreachable' };

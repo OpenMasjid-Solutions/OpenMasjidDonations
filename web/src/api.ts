@@ -275,6 +275,10 @@ export type EmailReceiptPatch = Partial<Pick<EmailReceipt, 'enabled' | 'subject'
 export const getEmailReceipt = () => request<EmailReceipt>('/api/admin/email-receipt');
 export const saveEmailReceipt = (patch: EmailReceiptPatch) =>
   request<EmailReceipt>('/api/admin/email-receipt', { method: 'PUT', body: JSON.stringify(patch) });
+/** Fire the `test` alert — the platform delivers it to the admin's own email/webhook (the app
+ *  never learns the admin address). Confirms OpenMasjidOS can reach you. */
+export const sendTestAlert = () =>
+  request<{ delivered: boolean; reason?: string; email?: boolean; webhook?: boolean }>('/api/admin/test-alert', { method: 'POST' });
 
 export type AccountInput = { label?: string; publishableKey?: string; secretKey?: string; webhookSecret?: string };
 export const listAccounts = () => request<StripeAccount[]>('/api/admin/stripe-accounts');
