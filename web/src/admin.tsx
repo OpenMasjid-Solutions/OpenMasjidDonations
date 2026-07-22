@@ -283,7 +283,12 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         {tab === 'overview' && <MetricsDashboard />}
         {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
         {tab === 'donations' && <DonationsCard />}
-        {tab === 'thankyou' && <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />}
+        {tab === 'thankyou' && (
+          <div style={{ display: 'grid', gap: '1rem' }}>
+            <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />
+            <EmailDesignCard masjid={settings.masjid} currency={settings.masjid.currency} />
+          </div>
+        )}
         {tab === 'largegift' && <LargeDonationCard currency={settings.masjid.currency} />}
         {tab === 'payments' && (
           <>
@@ -297,7 +302,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
           <>
             <MasjidCard masjid={settings.masjid} onSaved={onReload} />
             <Notifications embedded={embedded} />
-            <EmailReceiptCard masjid={settings.masjid} currency={settings.masjid.currency} />
+            <EmailSetupCard />
             <section className="glass panel">
               <div className="row-between">
                 <div className="row"><ShieldCheck size={18} className="panel-ico" aria-hidden="true" /><span className="muted">{embedded ? 'Signed in with your OpenMasjidOS login.' : 'Signed in with your local admin password.'}</span></div>
@@ -1296,28 +1301,26 @@ function EmailReceiptPreview({ value, masjid, currency }: { value: EmailReceipt;
   );
 }
 
-/** The emailed-receipt editor (lives in Settings, next to Notifications). Sends a Stripe-style
- *  receipt through the OpenMasjidOS Fabric email provider; off until the admin opts in. */
-function EmailReceiptCard({ masjid, currency }: { masjid: MasjidProfile; currency: string }) {
+/** Email receipt — SETUP (Settings tab, next to Notifications): the on/off toggle + provider
+ *  status + a "send me a test" that reaches the ADMIN via the alert channel. The receipt DESIGN
+ *  (subject/heading/note/preview) lives on the Thank-you tab (EmailDesignCard). */
+function EmailSetupCard() {
   const [value, setValue] = useState<EmailReceipt | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState('');
-  useEffect(() => { getEmailReceipt().then(setValue).catch(() => setError('Couldn’t load the email receipt settings.')); }, []);
+  useEffect(() => { getEmailReceipt().then(setValue).catch(() => setError('Couldn’t load the email settings.')); }, []);
   if (!value) return <section className="glass panel"><span className="spinner" aria-label="Loading" /></section>;
 
-  const set = (patch: EmailReceiptPatch) => setValue({ ...value, ...patch });
-  const save = async () => {
-    setBusy(true); setError('');
-    try {
-      setValue(await saveEmailReceipt({ enabled: value.enabled, subject: value.subject, heading: value.heading, body: value.body, accent: value.accent }));
-      setSaved(true); setTimeout(() => setSaved(false), 2000);
-    } catch (e) { setError(msg(e)); } finally { setBusy(false); }
+  const toggle = async (enabled: boolean) => {
+    setSaving(true); setError(''); setValue({ ...value, enabled });
+    try { setValue(await saveEmailReceipt({ enabled })); }
+    catch (e) { setError(msg(e)); setValue({ ...value, enabled: !enabled }); }
+    finally { setSaving(false); }
   };
-  // "Send me a test" reaches the ADMIN (you) via the Fabric alert channel — the platform
-  // sends it to your own OpenMasjidOS email/webhook; this app never sees your address.
+  // "Send me a test" reaches the ADMIN (you) via the Fabric alert channel — the platform sends it
+  // to your OWN OpenMasjidOS email/webhook; this app never sees your address.
   const test = async () => {
     setTesting(true); setTestMsg('');
     try {
@@ -1338,7 +1341,7 @@ function EmailReceiptCard({ masjid, currency }: { masjid: MasjidProfile; currenc
     if (!value.embedded) return 'Email receipts send through OpenMasjidOS. Run this app under OpenMasjidOS and set up an email provider (Settings → Email) to use them.';
     switch (value.emailStatus) {
       case 'ok': return 'Connected to your OpenMasjidOS email ✓ — receipts send from your Settings → Email address.';
-      case 'not_configured': return 'No email provider is set up in OpenMasjidOS yet — set one up in Settings → Email there (its “send test” goes to your admin address).';
+      case 'not_configured': return 'No email provider is set up in OpenMasjidOS yet — set one up in Settings → Email there.';
       case 'rate_limited': return 'Email is set up, but sending is rate-limited right now.';
       case 'error': return 'The last receipt send hit a problem — check your provider in OpenMasjidOS → Settings → Email.';
       default: return 'Receipts are emailed to your donors through your OpenMasjidOS email provider.';
@@ -1350,35 +1353,65 @@ function EmailReceiptCard({ masjid, currency }: { masjid: MasjidProfile; currenc
       <div className="card-head">
         <Mail size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
-          <h2 className="section-title-inline">Email receipt</h2>
-          <p className="muted">Email donors a proper receipt (amount, date, payment method, fund) with your masjid logo — through your OpenMasjidOS email provider, <b>from the address you set in OpenMasjidOS → Settings → Email</b>. You just write the thank-you note; the receipt details fill in automatically. Variables: {'{name}'}, {'{masjid}'}.</p>
+          <h2 className="section-title-inline">Email receipts</h2>
+          <p className="muted">Email donors a receipt through your OpenMasjidOS email provider. Design what it says on the <b>Thank-you</b> tab.</p>
         </div>
       </div>
       <p className="hint">{statusNote()}</p>
-      <label className="check-row"><input type="checkbox" checked={value.enabled} onChange={(e) => set({ enabled: e.target.checked })} /><span>Email a receipt to donors who leave an email address</span></label>
-      {value.enabled && (
+      <label className="check-row"><input type="checkbox" checked={value.enabled} disabled={saving} onChange={(e) => toggle(e.target.checked)} /><span>Email a receipt to donors who leave an email address</span></label>
+      {error && <p className="form-error">{error}</p>}
+      {value.embedded && (
         <>
-          <EmailReceiptPreview value={value} masjid={masjid} currency={currency} />
-          <Field id="er-s" label="Subject"><input id="er-s" className="input" value={value.subject} placeholder="Your donation receipt — {masjid}" onChange={(e) => set({ subject: e.target.value })} /></Field>
-          <Field id="er-h" label="Heading"><input id="er-h" className="input" value={value.heading} placeholder="JazākAllāhu khayran, {name}!" onChange={(e) => set({ heading: e.target.value })} /></Field>
-          <Field id="er-b" label="Thank-you note"><textarea id="er-b" className="input" rows={3} value={value.body} onChange={(e) => set({ body: e.target.value })} /></Field>
-          <div className="row" style={{ gap: '0.35rem', flexWrap: 'wrap', margin: '-0.2rem 0 0.6rem' }}>
-            <span className="hint" style={{ alignSelf: 'center' }}>Insert:</span>
-            {['{name}', '{masjid}'].map((v) => <button key={v} type="button" className="btn btn--ghost btn--sm mono" onClick={() => set({ body: `${value.body}${value.body && !value.body.endsWith(' ') ? ' ' : ''}${v}` })}>{v}</button>)}
-          </div>
-          <p className="hint" style={{ marginBlockStart: 0 }}>The masjid logo + contact details come from Settings → Your masjid. The amount, date, payment method and fund are added automatically as a receipt.</p>
-          <Field id="er-a" label="Accent colour (optional)"><input id="er-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
+          <button className="btn btn--ghost" style={{ marginBlockStart: '0.5rem' }} type="button" onClick={test} disabled={testing}>{testing ? <span className="spinner" /> : <Send size={15} />} Send me a test</button>
+          <p className="hint" style={{ marginBlockStart: '0.4rem' }}>The test goes to <b>you</b> (your OpenMasjidOS admin email/webhook), not a donor — it confirms OpenMasjidOS can reach you through the same email provider your receipts use.</p>
+          {testMsg && <p className="hint">{testMsg}</p>}
         </>
       )}
-      {error && <p className="form-error">{error}</p>}
-      <div className="row" style={{ gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBlockStart: '0.4rem' }}>
-        <button className="btn btn--primary" onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save'}</button>
-        {value.embedded && (
-          <button className="btn btn--ghost" type="button" onClick={test} disabled={testing}>{testing ? <span className="spinner" /> : <Send size={15} />} Send me a test</button>
-        )}
+    </section>
+  );
+}
+
+/** Email receipt — DESIGN (Thank-you tab, below the on-page thank-you): the editable content +
+ *  preview. Turn receipts on / test them in Settings → Email receipts. */
+function EmailDesignCard({ masjid, currency }: { masjid: MasjidProfile; currency: string }) {
+  const [value, setValue] = useState<EmailReceipt | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => { getEmailReceipt().then(setValue).catch(() => setError('Couldn’t load the email receipt design.')); }, []);
+  if (!value) return <section className="glass panel"><span className="spinner" aria-label="Loading" /></section>;
+
+  const set = (patch: EmailReceiptPatch) => setValue({ ...value, ...patch });
+  const save = async () => {
+    setBusy(true); setError('');
+    try {
+      setValue(await saveEmailReceipt({ subject: value.subject, heading: value.heading, body: value.body, accent: value.accent }));
+      setSaved(true); setTimeout(() => setSaved(false), 2000);
+    } catch (e) { setError(msg(e)); } finally { setBusy(false); }
+  };
+
+  return (
+    <section className="glass panel">
+      <div className="card-head">
+        <Mail size={18} className="panel-ico" aria-hidden="true" />
+        <div className="card-head__main">
+          <h2 className="section-title-inline">Email receipt design</h2>
+          <p className="muted">The receipt emailed to donors — a proper receipt with your masjid logo, then the amount, date, payment method and fund (all filled in automatically). You just write the thank-you note. Variables: {'{name}'}, {'{masjid}'}.</p>
+        </div>
       </div>
-      {value.embedded && <p className="hint" style={{ marginBlockStart: '0.5rem' }}>The test goes to <b>you</b> (your OpenMasjidOS admin email/webhook), not a donor — it confirms OpenMasjidOS can reach you through the same email provider your receipts use.</p>}
-      {testMsg && <p className="hint">{testMsg}</p>}
+      {!value.enabled && <p className="hint">Email receipts are currently <b>off</b> — turn them on (and test them) in Settings → Email receipts. You can still design it here.</p>}
+      <EmailReceiptPreview value={value} masjid={masjid} currency={currency} />
+      <Field id="er-s" label="Subject"><input id="er-s" className="input" value={value.subject} placeholder="Your donation receipt — {masjid}" onChange={(e) => set({ subject: e.target.value })} /></Field>
+      <Field id="er-h" label="Heading"><input id="er-h" className="input" value={value.heading} placeholder="JazākAllāhu khayran, {name}!" onChange={(e) => set({ heading: e.target.value })} /></Field>
+      <Field id="er-b" label="Thank-you note"><textarea id="er-b" className="input" rows={3} value={value.body} onChange={(e) => set({ body: e.target.value })} /></Field>
+      <div className="row" style={{ gap: '0.35rem', flexWrap: 'wrap', margin: '-0.2rem 0 0.6rem' }}>
+        <span className="hint" style={{ alignSelf: 'center' }}>Insert:</span>
+        {['{name}', '{masjid}'].map((v) => <button key={v} type="button" className="btn btn--ghost btn--sm mono" onClick={() => set({ body: `${value.body}${value.body && !value.body.endsWith(' ') ? ' ' : ''}${v}` })}>{v}</button>)}
+      </div>
+      <p className="hint" style={{ marginBlockStart: 0 }}>The masjid logo + contact details come from Settings → Your masjid. The amount, date, payment method and fund are added automatically as a receipt.</p>
+      <Field id="er-a" label="Accent colour (optional)"><input id="er-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
+      {error && <p className="form-error">{error}</p>}
+      <button className="btn btn--primary" style={{ marginBlockStart: '0.4rem' }} onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save design'}</button>
     </section>
   );
 }
