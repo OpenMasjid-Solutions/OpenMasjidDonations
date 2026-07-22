@@ -144,24 +144,23 @@ export interface LargeDonation {
 export const LARGE_DONATION_DEFAULT: LargeDonation = { threshold: 0, message: '', qrImage: '' };
 
 /** The emailed donation receipt (sent via the OpenMasjidOS Fabric email provider when the
- *  admin enables it). heading/body/subject support the same {name} {amount} {campaign}
- *  {masjid} variables as the on-page thank-you. `image` is a header/logo image; `accent` a
- *  hex tint. Off by default — nothing is emailed until the admin turns it on AND the OS has
- *  an email provider set up. The receipt is built + escaped server-side (see email.ts). */
+ *  admin enables it). subject/heading/body are the admin-editable text (the {name} {amount}
+ *  {campaign} {masjid} variables work); the receipt DETAILS (amount, date, payment method, fund),
+ *  the masjid logo + contact info are filled in automatically (see email.ts renderReceipt), so
+ *  the paragraph stays a clean thank-you. `accent` is a hex tint. Off by default — nothing is
+ *  emailed until the admin turns it on AND the OS has an email provider set up. */
 export interface EmailReceipt {
   enabled: boolean;
   subject: string;
   heading: string;
   body: string;
-  image: string;
   accent: string;
 }
 export const EMAIL_RECEIPT_DEFAULT: EmailReceipt = {
   enabled: false,
-  subject: 'Your donation to {masjid}',
+  subject: 'Your donation receipt — {masjid}',
   heading: 'JazākAllāhu khayran, {name}!',
-  body: 'Your donation of {amount} to {campaign} was received. May Allah accept it from you and reward you abundantly.\n\nThank you for your generosity — please keep this email for your records.',
-  image: '',
+  body: 'Thank you for your generous donation to {masjid}. May Allah accept it from you and reward you abundantly. Your receipt is below — please keep it for your records.',
   accent: '',
 };
 
@@ -744,7 +743,6 @@ export class Store {
       subject: s.subject ?? EMAIL_RECEIPT_DEFAULT.subject,
       heading: s.heading ?? EMAIL_RECEIPT_DEFAULT.heading,
       body: s.body ?? EMAIL_RECEIPT_DEFAULT.body,
-      image: s.image ?? EMAIL_RECEIPT_DEFAULT.image,
       accent: s.accent ?? EMAIL_RECEIPT_DEFAULT.accent,
     };
   }
@@ -755,10 +753,6 @@ export class Store {
     merged.subject = String(merged.subject ?? '').slice(0, 200);
     merged.heading = String(merged.heading ?? '').slice(0, 200);
     merged.body = String(merged.body ?? '').slice(0, 4000);
-    // Same allowlist as other image fields: a same-origin uploaded file or an http(s) URL —
-    // reject javascript:/data: and anything with quotes/backslashes/whitespace.
-    const u = String(merged.image ?? '').trim().slice(0, 500);
-    merged.image = /^\/uploads\/[A-Za-z0-9._-]+$/.test(u) || /^https?:\/\/[^"'\\\s]+$/i.test(u) ? u : '';
     const a = String(merged.accent ?? '').trim();
     merged.accent = /^#[0-9a-fA-F]{3,8}$/.test(a) ? a : '';
     this.setRaw('email_receipt', JSON.stringify(merged));

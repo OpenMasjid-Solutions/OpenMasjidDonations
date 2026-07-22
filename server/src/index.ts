@@ -21,7 +21,7 @@ import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
-import { renderReceipt } from './email';
+import { renderReceipt, type ReceiptContext } from './email';
 import {
   billingConfigured,
   studentsInfo,
@@ -455,26 +455,49 @@ async function main(): Promise<void> {
     return '';
   };
 
-  /** Render + send a donor's branded receipt through the Fabric. Returns whether it {sent} and
-   *  whether a failure is worth a {retry} (transient/system down) vs permanent (no/invalid email,
-   *  or the provider rejected the recipient). NEVER throws. Does NOT re-check the enabled toggle —
-   *  the CALLER gates on the donation's recorded decision (receipt==='pending'), so the send stays
-   *  consistent with whether Stripe's own receipt was suppressed at intent. */
-  const sendReceiptEmail = async (
-    to: string,
-    campaignTitle: string,
-    donorName: string,
-    amountMinor: number,
-    currency: string,
-  ): Promise<{ sent: boolean; retry: boolean }> => {
-    const addr = (to || '').trim();
+  /** Format the receipt "date paid" using the server locale + timezone (best-effort). */
+  const fmtReceiptDate = (iso: string): string => {
+    const d = new Date(iso);
+    try {
+      return new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZoneName: 'short' }).format(d);
+    } catch {
+      return d.toISOString();
+    }
+  };
+  /** "Visa •••• 4242" (or "Card") from the captured card brand + last 4. */
+  const paymentMethodLabel = (brand: string, last4: string): string => {
+    const b = brand ? brand.charAt(0).toUpperCase() + brand.slice(1) : '';
+    if (b && last4) return `${b} •••• ${last4}`;
+    if (last4) return `Card •••• ${last4}`;
+    return 'Card';
+  };
+  /** Build the Stripe-style receipt context for a donation (from the donation row + masjid). */
+  const receiptContext = (don: Donation): ReceiptContext => {
+    const m = store.getMasjid();
+    return {
+      name: don.donorName || '',
+      amountText: formatMoney(don.amount, don.currency),
+      campaignTitle: store.getCampaign(don.campaignId)?.title ?? '',
+      masjidName: m.name || '',
+      masjidLogo: resolveEmailImage(m.logo), // the masjid logo (Settings → Your masjid), if publicly reachable
+      datePaid: fmtReceiptDate(don.createdAt),
+      paymentMethod: paymentMethodLabel(don.cardBrand, don.cardLast4),
+      reference: don.id.replace(/^don_/, '').slice(0, 8).toUpperCase(),
+      contactEmail: m.email || '',
+      contactPhone: m.phone || '',
+      contactWebsite: m.website || '',
+    };
+  };
+
+  /** Render + send a donor's branded receipt for a donation. Returns whether it {sent} and
+   *  whether a failure is worth a {retry} (transient/system) vs permanent (no/invalid email, or
+   *  the provider rejected the recipient). NEVER throws. Does NOT re-check the enabled toggle —
+   *  the CALLER gates on the donation's recorded decision (receipt==='pending'). */
+  const sendDonationReceipt = async (don: Donation): Promise<{ sent: boolean; retry: boolean }> => {
+    const addr = (don.donorEmail || '').trim();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) return { sent: false, retry: false }; // no/invalid email → never sendable
     try {
-      const cfg = store.getEmailReceipt();
-      const rendered = renderReceipt(
-        { ...cfg, image: resolveEmailImage(cfg.image) },
-        { name: donorName || '', amount: formatMoney(amountMinor, currency), campaign: campaignTitle, masjid: store.getMasjid().name || '' },
-      );
+      const rendered = renderReceipt(store.getEmailReceipt(), receiptContext(don));
       const res = await fabricEmail({ to: addr, subject: rendered.subject, text: rendered.text, html: rendered.html });
       if (res.sent) return { sent: true, retry: false };
       return { sent: false, retry: res.reason !== 'bad_recipient' }; // bad recipient is permanent; everything else retries
@@ -483,16 +506,11 @@ async function main(): Promise<void> {
     }
   };
 
-  /** Send the branded receipt for a specific donation (confirm + the retry outbox). */
-  const sendDonationReceipt = (don: Donation) =>
-    sendReceiptEmail(don.donorEmail, store.getCampaign(don.campaignId)?.title ?? 'your masjid', don.donorName, don.amount, don.currency);
-
   const EmailReceiptBody = z.object({
     enabled: z.boolean().optional(),
     subject: z.string().max(200).optional(),
     heading: z.string().max(200).optional(),
     body: z.string().max(4000).optional(),
-    image: z.string().max(2000).optional(),
     accent: z.string().max(40).optional(),
   });
   // embedded + emailStatus let the UI show whether OS email is set up (no probe on load —
@@ -506,19 +524,30 @@ async function main(): Promise<void> {
     if (patch.accent !== undefined) patch.accent = sanitizeAccent(patch.accent);
     return { data: emailReceiptView(store.setEmailReceipt(patch)) };
   });
-  // Send a test receipt so the admin can confirm OS email is set up and preview the design.
-  app.post('/api/admin/email-receipt/test', { preHandler: requireAdmin }, async (req, reply) => {
-    const parsed = z.object({ to: z.string().max(200) }).safeParse(req.body);
-    if (!parsed.success || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(parsed.data.to.trim())) {
-      return reply.code(400).send({ error: 'Please enter a valid email address.' });
+  // Send a test receipt to the masjid's own contact email (Settings → Your masjid) — no typed
+  // recipient. The platform deliberately doesn't expose the OS admin login email or the provider
+  // From address to apps, so the masjid contact email is the address the admin controls.
+  app.post('/api/admin/email-receipt/test', { preHandler: requireAdmin }, async (_req, reply) => {
+    const m = store.getMasjid();
+    const to = m.email.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+      return reply.code(400).send({ error: 'Add your masjid’s contact email in Settings → Your masjid first — the test is sent there.' });
     }
-    const cfg = store.getEmailReceipt();
-    const rendered = renderReceipt(
-      { ...cfg, image: resolveEmailImage(cfg.image) },
-      { name: 'Friend', amount: formatMoney(toMinorCur(50), cur()), campaign: 'General Fund', masjid: store.getMasjid().name || 'Your masjid' },
-    );
-    const res = await fabricEmail({ to: parsed.data.to.trim(), subject: `[Test] ${rendered.subject}`, text: rendered.text, html: rendered.html });
-    return { data: { ...res, emailStatus: emailStatus() } };
+    const rendered = renderReceipt(store.getEmailReceipt(), {
+      name: 'Friend',
+      amountText: formatMoney(toMinorCur(50), cur()),
+      campaignTitle: 'General Fund',
+      masjidName: m.name || 'Your masjid',
+      masjidLogo: resolveEmailImage(m.logo),
+      datePaid: fmtReceiptDate(new Date().toISOString()),
+      paymentMethod: 'Visa •••• 4242',
+      reference: 'TEST1234',
+      contactEmail: m.email || '',
+      contactPhone: m.phone || '',
+      contactWebsite: m.website || '',
+    });
+    const res = await fabricEmail({ to, subject: `[Test] ${rendered.subject}`, text: rendered.text, html: rendered.html });
+    return { data: { ...res, emailStatus: emailStatus(), to } };
   });
 
   // ── Image upload (campaign cover/background) — saved to the data volume ──────
@@ -1119,8 +1148,8 @@ async function main(): Promise<void> {
       // suppressed in favour of ours), so there's never a double. Non-blocking; a transient
       // failure stays 'pending' for the outbox to retry, a permanent one is marked 'skipped'.
       if (don.receipt === 'pending') {
-        const to = updated?.donorEmail || don.donorEmail;
-        void sendReceiptEmail(to, c.title, updated?.donorName || don.donorName, pi.amount, pi.currency)
+        // `updated` carries the donor name/email + card brand/last4 filled in by markDonation.
+        void sendDonationReceipt(updated ?? don)
           .then((r) => {
             if (r.sent) store.setDonationReceipt(paymentIntentId, 'sent');
             else if (!r.retry) store.setDonationReceipt(paymentIntentId, 'skipped');

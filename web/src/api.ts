@@ -266,18 +266,19 @@ export interface EmailReceipt {
   subject: string;
   heading: string;
   body: string;
-  image: string;
   accent: string;
   /** True when running embedded under OpenMasjidOS (email is a Fabric feature). */
   embedded: boolean;
   emailStatus: EmailStatus;
 }
-export type EmailReceiptPatch = Partial<Pick<EmailReceipt, 'enabled' | 'subject' | 'heading' | 'body' | 'image' | 'accent'>>;
+export type EmailReceiptPatch = Partial<Pick<EmailReceipt, 'enabled' | 'subject' | 'heading' | 'body' | 'accent'>>;
 export const getEmailReceipt = () => request<EmailReceipt>('/api/admin/email-receipt');
 export const saveEmailReceipt = (patch: EmailReceiptPatch) =>
   request<EmailReceipt>('/api/admin/email-receipt', { method: 'PUT', body: JSON.stringify(patch) });
-export const sendTestReceipt = (to: string) =>
-  request<{ sent: boolean; reason?: string; emailStatus: EmailStatus }>('/api/admin/email-receipt/test', { method: 'POST', body: JSON.stringify({ to }) });
+/** Send a test receipt to the masjid's contact email (Settings → Your masjid) — no typed
+ *  recipient; `to` in the reply says where it went. */
+export const sendTestReceipt = () =>
+  request<{ sent: boolean; reason?: string; emailStatus: EmailStatus; to?: string }>('/api/admin/email-receipt/test', { method: 'POST' });
 
 export type AccountInput = { label?: string; publishableKey?: string; secretKey?: string; webhookSecret?: string };
 export const listAccounts = () => request<StripeAccount[]>('/api/admin/stripe-accounts');

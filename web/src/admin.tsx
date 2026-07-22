@@ -283,12 +283,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         {tab === 'overview' && <MetricsDashboard />}
         {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
         {tab === 'donations' && <DonationsCard />}
-        {tab === 'thankyou' && (
-          <div style={{ display: 'grid', gap: '1rem' }}>
-            <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />
-            <EmailReceiptCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />
-          </div>
-        )}
+        {tab === 'thankyou' && <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />}
         {tab === 'largegift' && <LargeDonationCard currency={settings.masjid.currency} />}
         {tab === 'payments' && (
           <>
@@ -302,6 +297,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
           <>
             <MasjidCard masjid={settings.masjid} onSaved={onReload} />
             <Notifications embedded={embedded} />
+            <EmailReceiptCard masjid={settings.masjid} currency={settings.masjid.currency} />
             <section className="glass panel">
               <div className="row-between">
                 <div className="row"><ShieldCheck size={18} className="panel-ico" aria-hidden="true" /><span className="muted">{embedded ? 'Signed in with your OpenMasjidOS login.' : 'Signed in with your local admin password.'}</span></div>
@@ -1276,33 +1272,49 @@ function emailReasonText(reason?: string): string {
 }
 
 /** A small preview of the emailed receipt (sample values filled in; body newlines kept). */
-function EmailReceiptPreview({ value, masjidName, currency }: { value: EmailReceipt; masjidName: string; currency: string }) {
-  const vars = { name: 'Aisha', amount: money(50, currency || 'USD'), campaign: 'General Fund', masjid: masjidName || 'Your Masjid' };
+/** A light, Stripe-style preview of the emailed receipt (sample values; the amount/date/method/
+ *  fund render in a details table SEPARATE from the paragraph, with the masjid logo + contact). */
+function EmailReceiptPreview({ value, masjid, currency }: { value: EmailReceipt; masjid: MasjidProfile; currency: string }) {
+  const vars = { name: 'Aisha', amount: money(50, currency || 'USD'), campaign: 'General Fund', masjid: masjid.name || 'Your Masjid' };
   const accent = tyAccent(value.accent) || '#1FA37A';
-  const img = safeImg(value.image);
+  const logo = safeImg(masjid.logo);
+  const rowSty = { display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: '1px solid #eef1f3', fontSize: '12px' } as const;
+  const contact = [masjid.email, masjid.phone].filter((s) => s && s.trim()).join(' · ');
   return (
     <>
       <div className="cprev-head"><span className="hint">Email preview</span></div>
-      <div style={{ background: '#0e1814', borderRadius: '12px', padding: '14px' }}>
-        <div style={{ maxWidth: '360px', margin: '0 auto', background: '#152420', border: '1px solid #24382f', borderTop: `4px solid ${accent}`, borderRadius: '10px', padding: '18px 16px' }}>
-          {img ? <div style={{ textAlign: 'center', marginBottom: '12px' }}><img src={img} alt="" style={{ maxWidth: '120px', maxHeight: '60px' }} /></div> : null}
-          <div style={{ color: accent, fontSize: '16px', fontWeight: 700, textAlign: 'center', marginBottom: '8px' }}>{fillVars(value.heading || 'JazākAllāhu khayran, {name}!', vars)}</div>
-          <div style={{ color: '#c8d6cf', fontSize: '13px', lineHeight: 1.5, textAlign: 'center', whiteSpace: 'pre-wrap' }}>{fillVars(value.body || 'Your donation of {amount} to {campaign} was received.', vars)}</div>
-          {masjidName ? <div style={{ color: '#8a9a92', fontSize: '11px', textAlign: 'center', marginTop: '14px' }}>{masjidName}</div> : null}
+      <div style={{ background: '#f4f6f9', borderRadius: '12px', padding: '16px' }}>
+        <div style={{ maxWidth: '380px', margin: '0 auto', background: '#ffffff', border: '1px solid #e6eaed', borderRadius: '12px', padding: '20px 18px', color: '#16242b' }}>
+          <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+            {logo ? <img src={logo} alt="" style={{ maxHeight: '48px', maxWidth: '160px' }} /> : <div style={{ fontSize: '16px', fontWeight: 700 }}>{masjid.name || 'Your Masjid'}</div>}
+            <div style={{ marginTop: '8px', fontSize: '10px', letterSpacing: '.06em', textTransform: 'uppercase', color: '#9aa7af' }}>Receipt · 0065A17F</div>
+          </div>
+          <div style={{ color: accent, fontSize: '15px', fontWeight: 700, textAlign: 'center', marginBottom: '6px' }}>{fillVars(value.heading || 'JazākAllāhu khayran, {name}!', vars)}</div>
+          <div style={{ color: '#42535c', fontSize: '12px', lineHeight: 1.5, textAlign: 'center', whiteSpace: 'pre-wrap', marginBottom: '10px' }}>{fillVars(value.body || 'Thank you for your donation.', vars)}</div>
+          <div>
+            <div style={rowSty}><span style={{ color: '#7a8892' }}>Amount paid</span><b>{money(50, currency || 'USD')}</b></div>
+            <div style={rowSty}><span style={{ color: '#7a8892' }}>Date paid</span><span>Jul 15, 2026, 6:03 PM</span></div>
+            <div style={rowSty}><span style={{ color: '#7a8892' }}>Payment method</span><span>Visa •••• 4242</span></div>
+            <div style={rowSty}><span style={{ color: '#7a8892' }}>Fund</span><span>General Fund</span></div>
+          </div>
+          {contact && (
+            <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #eef1f3', textAlign: 'center', fontSize: '11px', color: '#7a8892' }}>
+              Questions? Contact {masjid.name || 'us'} — {contact}
+            </div>
+          )}
         </div>
       </div>
     </>
   );
 }
 
-/** The emailed-receipt editor (lives under the Thank-you tab, below the on-page thank-you).
- *  Sends through the OpenMasjidOS Fabric email provider; off until the admin opts in. */
-function EmailReceiptCard({ masjidName, currency }: { masjidName: string; currency: string }) {
+/** The emailed-receipt editor (lives in Settings, next to Notifications). Sends a Stripe-style
+ *  receipt through the OpenMasjidOS Fabric email provider; off until the admin opts in. */
+function EmailReceiptCard({ masjid, currency }: { masjid: MasjidProfile; currency: string }) {
   const [value, setValue] = useState<EmailReceipt | null>(null);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
-  const [testTo, setTestTo] = useState('');
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState('');
   useEffect(() => { getEmailReceipt().then(setValue).catch(() => setError('Couldn’t load the email receipt settings.')); }, []);
@@ -1312,18 +1324,18 @@ function EmailReceiptCard({ masjidName, currency }: { masjidName: string; curren
   const save = async () => {
     setBusy(true); setError('');
     try {
-      setValue(await saveEmailReceipt({ enabled: value.enabled, subject: value.subject, heading: value.heading, body: value.body, image: value.image, accent: value.accent }));
+      setValue(await saveEmailReceipt({ enabled: value.enabled, subject: value.subject, heading: value.heading, body: value.body, accent: value.accent }));
       setSaved(true); setTimeout(() => setSaved(false), 2000);
     } catch (e) { setError(msg(e)); } finally { setBusy(false); }
   };
   const test = async () => {
     setTesting(true); setTestMsg('');
     try {
-      const r = await sendTestReceipt(testTo.trim());
+      const r = await sendTestReceipt();
       setValue({ ...value, emailStatus: r.emailStatus });
       setTestMsg(
         r.sent
-          ? 'OpenMasjidOS accepted it and sent it from your Settings → Email address. Check that inbox AND spam. If nothing arrives, your email provider’s sending (From) domain likely needs verifying in OpenMasjidOS → Settings → Email.'
+          ? `Sent to ${r.to || 'your masjid contact email'} from your OpenMasjidOS Settings → Email address. Check that inbox AND spam — if nothing arrives, your provider’s sending (From) domain likely needs verifying in OpenMasjidOS → Settings → Email.`
           : emailReasonText(r.reason),
       );
     } catch (e) { setTestMsg(msg(e)); } finally { setTesting(false); }
@@ -1346,22 +1358,22 @@ function EmailReceiptCard({ masjidName, currency }: { masjidName: string; curren
         <Mail size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
           <h2 className="section-title-inline">Email receipt</h2>
-          <p className="muted">Email donors a branded receipt through your OpenMasjidOS email provider. It’s sent <b>from the address you set in OpenMasjidOS → Settings → Email</b> (this app never sees or sets the sender). Same variables: {'{name}'}, {'{amount}'}, {'{campaign}'}, {'{masjid}'}.</p>
+          <p className="muted">Email donors a proper receipt (amount, date, payment method, fund) with your masjid logo — through your OpenMasjidOS email provider, <b>from the address you set in OpenMasjidOS → Settings → Email</b>. You just write the thank-you note; the receipt details fill in automatically. Variables: {'{name}'}, {'{masjid}'}.</p>
         </div>
       </div>
       <p className="hint">{statusNote()}</p>
       <label className="check-row"><input type="checkbox" checked={value.enabled} onChange={(e) => set({ enabled: e.target.checked })} /><span>Email a receipt to donors who leave an email address</span></label>
       {value.enabled && (
         <>
-          <EmailReceiptPreview value={value} masjidName={masjidName} currency={currency} />
-          <Field id="er-s" label="Subject"><input id="er-s" className="input" value={value.subject} placeholder="Your donation to {masjid}" onChange={(e) => set({ subject: e.target.value })} /></Field>
+          <EmailReceiptPreview value={value} masjid={masjid} currency={currency} />
+          <Field id="er-s" label="Subject"><input id="er-s" className="input" value={value.subject} placeholder="Your donation receipt — {masjid}" onChange={(e) => set({ subject: e.target.value })} /></Field>
           <Field id="er-h" label="Heading"><input id="er-h" className="input" value={value.heading} placeholder="JazākAllāhu khayran, {name}!" onChange={(e) => set({ heading: e.target.value })} /></Field>
-          <Field id="er-b" label="Message"><textarea id="er-b" className="input" rows={4} value={value.body} onChange={(e) => set({ body: e.target.value })} /></Field>
+          <Field id="er-b" label="Thank-you note"><textarea id="er-b" className="input" rows={3} value={value.body} onChange={(e) => set({ body: e.target.value })} /></Field>
           <div className="row" style={{ gap: '0.35rem', flexWrap: 'wrap', margin: '-0.2rem 0 0.6rem' }}>
             <span className="hint" style={{ alignSelf: 'center' }}>Insert:</span>
-            {TY_VARS.map((v) => <button key={v} type="button" className="btn btn--ghost btn--sm mono" onClick={() => set({ body: `${value.body}${value.body && !value.body.endsWith(' ') ? ' ' : ''}${v}` })}>{v}</button>)}
+            {['{name}', '{masjid}'].map((v) => <button key={v} type="button" className="btn btn--ghost btn--sm mono" onClick={() => set({ body: `${value.body}${value.body && !value.body.endsWith(' ') ? ' ' : ''}${v}` })}>{v}</button>)}
           </div>
-          <ImageField id="er-img" label="Header image (optional)" hint="A logo/banner at the top of the email. Note: images only load in the email when your app is reachable over the internet (remote access)." value={value.image} onChange={(image) => set({ image })} />
+          <p className="hint" style={{ marginBlockStart: 0 }}>The masjid logo + contact details come from Settings → Your masjid. The amount, date, payment method and fund are added automatically as a receipt.</p>
           <Field id="er-a" label="Accent colour (optional)"><input id="er-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
         </>
       )}
@@ -1369,10 +1381,7 @@ function EmailReceiptCard({ masjidName, currency }: { masjidName: string; curren
       <div className="row" style={{ gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBlockStart: '0.4rem' }}>
         <button className="btn btn--primary" onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save'}</button>
         {value.embedded && (
-          <>
-            <input className="input" style={{ maxWidth: '15rem' }} type="email" placeholder="you@example.org" value={testTo} onChange={(e) => setTestTo(e.target.value)} />
-            <button className="btn btn--ghost" type="button" onClick={test} disabled={testing || !testTo.trim()}>{testing ? <span className="spinner" /> : <Send size={15} />} Send test</button>
-          </>
+          <button className="btn btn--ghost" type="button" onClick={test} disabled={testing}>{testing ? <span className="spinner" /> : <Send size={15} />} Send test to your masjid email</button>
         )}
       </div>
       {testMsg && <p className="hint">{testMsg}</p>}

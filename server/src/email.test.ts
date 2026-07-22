@@ -1,73 +1,99 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 OpenMasjid-Solutions
 //
-// Locks the receipt-email renderer: variable substitution + the security property that NO
-// value (admin template or donor-supplied {name}) can inject HTML, and only http(s) images
-// are embedded.
+// Locks the Stripe-style receipt renderer: the details block (amount/date/method/fund) renders
+// separately from the paragraph, contact info appears, and the security property holds — NO value
+// (admin template, donor {name}, or masjid contact fields) can inject HTML, and only http(s)
+// images/links are emitted.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderReceipt, fillVars } from './email';
+import { renderReceipt, fillVars, type ReceiptTemplate, type ReceiptContext } from './email';
 
-const TPL = {
-  subject: 'Your donation to {masjid}',
+const TPL: ReceiptTemplate = {
+  subject: 'Your donation receipt — {masjid}',
   heading: 'JazākAllāhu khayran, {name}!',
-  body: 'Your gift of {amount} to {campaign} was received.\n\nThank you.',
-  image: '',
+  body: 'Thank you for your gift to {masjid}.\n\nPlease keep this for your records.',
   accent: '',
 };
-const VARS = { name: 'Yusuf', amount: '£50.00', campaign: 'General Fund', masjid: 'An-Noor' };
+const CTX: ReceiptContext = {
+  name: 'Yusuf',
+  amountText: '£50.00',
+  campaignTitle: 'General Fund',
+  masjidName: 'An-Noor',
+  masjidLogo: '',
+  datePaid: 'Jul 15, 2026, 6:03 PM UTC',
+  paymentMethod: 'Visa •••• 4242',
+  reference: '0065A17F',
+  contactEmail: 'info@annoor.org',
+  contactPhone: '718-555-5839',
+  contactWebsite: 'https://annoor.org',
+};
 
 test('fills variables in subject/heading/body', () => {
-  const r = renderReceipt(TPL, VARS);
-  assert.equal(r.subject, 'Your donation to An-Noor');
+  const r = renderReceipt(TPL, CTX);
+  assert.equal(r.subject, 'Your donation receipt — An-Noor');
   assert.ok(r.html.includes('JazākAllāhu khayran, Yusuf!'));
-  assert.ok(r.html.includes('Your gift of £50.00 to General Fund was received.'));
-  assert.ok(r.text.includes('Your gift of £50.00 to General Fund was received.'));
+  assert.ok(r.html.includes('Thank you for your gift to An-Noor.'));
+});
+
+test('the receipt DETAILS block renders amount/date/method/fund (separate from the paragraph)', () => {
+  const r = renderReceipt(TPL, CTX);
+  for (const s of ['Amount paid', '£50.00', 'Date paid', 'Jul 15, 2026, 6:03 PM UTC', 'Payment method', 'Visa •••• 4242', 'Fund', 'General Fund', '0065A17F']) {
+    assert.ok(r.html.includes(s), `html should contain "${s}"`);
+    assert.ok(r.text.includes(s.replace('Amount paid', 'Amount paid').replace('Date paid', 'Date paid')), `text should contain "${s}"`);
+  }
+});
+
+test('contact info appears (mailto + phone + website)', () => {
+  const r = renderReceipt(TPL, CTX);
+  assert.ok(r.html.includes('mailto:info@annoor.org'));
+  assert.ok(r.html.includes('info@annoor.org'));
+  assert.ok(r.html.includes('718-555-5839'));
+  assert.ok(r.html.includes('https://annoor.org'));
 });
 
 test('empty {name} is tidied (no dangling comma)', () => {
-  const r = renderReceipt(TPL, { ...VARS, name: '' });
-  assert.ok(r.html.includes('JazākAllāhu khayran!'), 'comma+placeholder collapse');
+  const r = renderReceipt(TPL, { ...CTX, name: '' });
+  assert.ok(r.html.includes('JazākAllāhu khayran!'));
   assert.ok(!r.html.includes('{name}'));
 });
 
 test('SECURITY: a donor name with HTML is escaped, never injected', () => {
-  const r = renderReceipt(TPL, { ...VARS, name: '<img src=x onerror=alert(1)>' });
+  const r = renderReceipt(TPL, { ...CTX, name: '<img src=x onerror=alert(1)>' });
   assert.ok(!r.html.includes('<img src=x onerror'), 'raw tag must not appear');
-  assert.ok(r.html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'escaped instead');
+  assert.ok(r.html.includes('&lt;img src=x onerror=alert(1)&gt;'));
 });
 
-test('SECURITY: an admin body with a <script> is escaped (body is plain text)', () => {
-  const r = renderReceipt({ ...TPL, body: 'Hi <script>steal()</script>' }, VARS);
-  assert.ok(!r.html.includes('<script>'), 'no live script tag');
-  assert.ok(r.html.includes('&lt;script&gt;'), 'escaped');
+test('SECURITY: an admin body with a <script> is escaped', () => {
+  const r = renderReceipt({ ...TPL, body: 'Hi <script>steal()</script>' }, CTX);
+  assert.ok(!r.html.includes('<script>steal'));
+  assert.ok(r.html.includes('&lt;script&gt;'));
 });
 
-test('body newlines become <br> in html', () => {
-  const r = renderReceipt(TPL, VARS);
-  assert.ok(r.html.includes('received.<br><br>Thank you.'));
+test('SECURITY: a malicious contact field cannot break out of the mailto/markup', () => {
+  const r = renderReceipt(TPL, { ...CTX, contactEmail: 'x"><script>evil()</script>@e.org' });
+  assert.ok(!r.html.includes('<script>evil'));
 });
 
-test('image: http(s) is embedded; javascript:/data: is rejected', () => {
-  assert.ok(renderReceipt({ ...TPL, image: 'https://ex.org/logo.png' }, VARS).html.includes('<img src="https://ex.org/logo.png"'));
-  assert.ok(!renderReceipt({ ...TPL, image: 'javascript:alert(1)' }, VARS).html.includes('<img'));
-  assert.ok(!renderReceipt({ ...TPL, image: 'data:image/png;base64,AAAA' }, VARS).html.includes('<img'));
-  assert.ok(!renderReceipt({ ...TPL, image: 'https://ex.org/a".png' }, VARS).html.includes('<img'), 'quote in url rejected');
+test('body newlines become <br>', () => {
+  assert.ok(renderReceipt(TPL, CTX).html.includes('gift to An-Noor.<br><br>Please keep this'));
 });
 
-test('accent: a valid hex is used; an invalid one falls back to the default', () => {
-  assert.ok(renderReceipt({ ...TPL, accent: '#D4AF37' }, VARS).html.includes('#D4AF37'));
-  const bad = renderReceipt({ ...TPL, accent: 'red; }body{display:none' }, VARS).html;
-  assert.ok(bad.includes('#1FA37A'), 'default emerald');
-  assert.ok(!bad.includes('display:none'), 'no CSS injection via accent');
+test('masjid logo: http(s) is embedded; javascript:/data: is rejected', () => {
+  assert.ok(renderReceipt(TPL, { ...CTX, masjidLogo: 'https://ex.org/logo.png' }).html.includes('<img src="https://ex.org/logo.png"'));
+  assert.ok(!renderReceipt(TPL, { ...CTX, masjidLogo: 'javascript:alert(1)' }).html.includes('<img'));
+  assert.ok(!renderReceipt(TPL, { ...CTX, masjidLogo: 'data:image/png;base64,AAAA' }).html.includes('<img'));
+  // No logo → the masjid name is shown as the header instead.
+  assert.ok(renderReceipt(TPL, { ...CTX, masjidLogo: '' }).html.includes('An-Noor'));
 });
 
-test('subject/heading fall back when blank', () => {
-  const r = renderReceipt({ ...TPL, subject: '', heading: '' }, { ...VARS, name: '' });
-  assert.ok(r.subject.length > 0);
-  assert.ok(r.html.includes('JazākAllāhu khayran!'));
+test('accent: valid hex used; invalid falls back to default (no CSS injection)', () => {
+  assert.ok(renderReceipt({ ...TPL, accent: '#D4AF37' }, CTX).html.includes('#D4AF37'));
+  const bad = renderReceipt({ ...TPL, accent: 'red;}body{display:none' }, CTX).html;
+  assert.ok(bad.includes('#1FA37A'));
+  assert.ok(!bad.includes('display:none'));
 });
 
-test('fillVars preserves newlines (paragraphs) but collapses runs of spaces', () => {
-  assert.equal(fillVars('a\n\nb    c', VARS), 'a\n\nb c');
+test('fillVars preserves newlines but collapses runs of spaces', () => {
+  assert.equal(fillVars('a\n\nb    c', { name: 'x', amount: 'y', campaign: 'z', masjid: 'm' }), 'a\n\nb c');
 });

@@ -102,17 +102,14 @@ test('student payment record flow: outbox lists only pending-succeeded; status i
   assert.equal(s.getStudentPaymentByPI('pi_tui_2')?.studentsPaymentId, 'pay_71');
 });
 
-test('email receipt: defaults off; allowlists image + accent, caps text', () => {
+test('email receipt: defaults off; caps text; allowlists accent', () => {
   const s = fresh();
   assert.equal(s.getEmailReceipt().enabled, false, 'off by default — nothing emails until the admin opts in');
-  const r = s.setEmailReceipt({ enabled: true, image: 'javascript:alert(1)', accent: 'red; }x{', subject: 'x'.repeat(300), body: 'y'.repeat(5000) });
+  const r = s.setEmailReceipt({ enabled: true, accent: 'red; }x{', subject: 'x'.repeat(300), body: 'y'.repeat(5000) });
   assert.equal(r.enabled, true);
-  assert.equal(r.image, '', 'javascript: image rejected');
-  assert.equal(r.accent, '', 'invalid accent rejected');
+  assert.equal(r.accent, '', 'invalid accent rejected (no CSS injection)');
   assert.equal(r.subject.length, 200, 'subject capped');
   assert.equal(r.body.length, 4000, 'body capped');
-  assert.equal(s.setEmailReceipt({ image: '/uploads/logo_1.png' }).image, '/uploads/logo_1.png', 'uploaded image accepted');
-  assert.equal(s.setEmailReceipt({ image: 'https://ex.org/l.png' }).image, 'https://ex.org/l.png', 'https image accepted');
   assert.equal(s.setEmailReceipt({ accent: '#D4AF37' }).accent, '#D4AF37', 'valid hex accepted');
   assert.equal(s.getEmailReceipt().enabled, true, 'persists across reads');
 });
