@@ -524,31 +524,11 @@ async function main(): Promise<void> {
     if (patch.accent !== undefined) patch.accent = sanitizeAccent(patch.accent);
     return { data: emailReceiptView(store.setEmailReceipt(patch)) };
   });
-  // Send a test receipt to the masjid's own contact email (Settings → Your masjid) — no typed
-  // recipient. The platform deliberately doesn't expose the OS admin login email or the provider
-  // From address to apps, so the masjid contact email is the address the admin controls.
-  app.post('/api/admin/email-receipt/test', { preHandler: requireAdmin }, async (_req, reply) => {
-    const m = store.getMasjid();
-    const to = m.email.trim();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
-      return reply.code(400).send({ error: 'Add your masjid’s contact email in Settings → Your masjid first — the test is sent there.' });
-    }
-    const rendered = renderReceipt(store.getEmailReceipt(), {
-      name: 'Friend',
-      amountText: formatMoney(toMinorCur(50), cur()),
-      campaignTitle: 'General Fund',
-      masjidName: m.name || 'Your masjid',
-      masjidLogo: resolveEmailImage(m.logo),
-      datePaid: fmtReceiptDate(new Date().toISOString()),
-      paymentMethod: 'Visa •••• 4242',
-      reference: 'TEST1234',
-      contactEmail: m.email || '',
-      contactPhone: m.phone || '',
-      contactWebsite: m.website || '',
-    });
-    const res = await fabricEmail({ to, subject: `[Test] ${rendered.subject}`, text: rendered.text, html: rendered.html });
-    return { data: { ...res, emailStatus: emailStatus(), to } };
-  });
+  // NOTE: there is deliberately NO in-app "send test" here. Receipts go to DONORS (the app
+  // supplies their address to /api/fabric/email). The platform doesn't expose the admin's email
+  // to apps, so an app can't send the admin a test — that's the OS's own Settings → Email test
+  // (it sends to the admin address). The app reaches the admin only via /api/fabric/alert (our
+  // payment-failed / tuition-record-failed alerts already do).
 
   // ── Image upload (campaign cover/background) — saved to the data volume ──────
   // Raster images only (no SVG — it can carry scripts and we serve from same origin).
