@@ -185,3 +185,5 @@ For Stripe work (later slices) use **test keys** and Stripe's test cards.
 This is an OpenMasjidOS **app**; the platform that runs it lives in
 [OpenMasjidOS](https://github.com/OpenMasjid-Solutions/OpenMasjidOS), and apps are listed in
 [OpenMasjidAPPS](https://github.com/OpenMasjid-Solutions/OpenMasjidAPPS).
+
+live. laugh. coffee.
