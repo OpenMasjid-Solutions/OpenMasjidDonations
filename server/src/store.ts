@@ -196,10 +196,12 @@ export interface Donation {
 
 /** A tuition (Students-billing) payment. NOT a donation — it credits a family's balance in
  *  the OpenMasjid Students ledger. We hold only what the record/retry flow needs; NEVER the
- *  typed Student ID or a child's name. `allocations` is the JSON the parent chose ('' = full
- *  balance, auto-allocated by Students oldest-due-first). `recordStatus` tracks the durable
- *  push to Students: 'pending' (outbox will retry), 'recorded' (done), 'skipped' (a permanent
- *  app error — Students' own daily reconciliation is the backstop, so money is never lost). */
+ *  typed Student ID or a child's name. `allocations` is the per-INVOICE JSON the parent chose
+ *  and `studentsSplit` the per-CHILD JSON derived from it (both '' = pay the full balance,
+ *  which Students allocates oldest-due-first). Both are stored so an outbox retry books the
+ *  payment exactly as the first attempt would have. `recordStatus` tracks the durable push to
+ *  Students: 'pending' (outbox will retry), 'recorded' (done), 'skipped' (a permanent app
+ *  error — Students' own daily reconciliation is the backstop, so money is never lost). */
 export interface StudentPayment {
   id: string;
   campaignId: string;
@@ -212,6 +214,8 @@ export interface StudentPayment {
   amount: number;
   currency: string;
   allocations: string;
+  /** JSON `[{studentId, amountCents}]` — the per-child split; '' = let Students derive it. */
+  studentsSplit: string;
   payStatus: 'pending' | 'succeeded' | 'failed';
   recordStatus: 'pending' | 'recorded' | 'skipped';
   studentsPaymentId: string;
@@ -339,6 +343,7 @@ export class Store {
         amount INTEGER NOT NULL,
         currency TEXT NOT NULL,
         allocations TEXT NOT NULL DEFAULT '',
+        students_split TEXT NOT NULL DEFAULT '',
         pay_status TEXT NOT NULL DEFAULT 'pending',
         record_status TEXT NOT NULL DEFAULT 'pending',
         students_payment_id TEXT NOT NULL DEFAULT '',
@@ -370,6 +375,9 @@ export class Store {
     this.ensureColumn('donations', 'subscription_id', "TEXT NOT NULL DEFAULT ''");
     // Legacy rows default to 'stripe' (their receipts were Stripe's built-in ones).
     this.ensureColumn('donations', 'receipt', "TEXT NOT NULL DEFAULT 'stripe'");
+    // The per-child split of a tuition charge (students/billing v2). Legacy rows default to ''
+    // = "no split", which is exactly how they were pushed to Students before this existed.
+    this.ensureColumn('student_payments', 'students_split', "TEXT NOT NULL DEFAULT ''");
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
@@ -1054,6 +1062,7 @@ export class Store {
       amount: Number(r.amount),
       currency: String(r.currency),
       allocations: String(r.allocations ?? ''),
+      studentsSplit: String(r.students_split ?? ''),
       payStatus: String(r.pay_status) as StudentPayment['payStatus'],
       recordStatus: String(r.record_status) as StudentPayment['recordStatus'],
       studentsPaymentId: String(r.students_payment_id ?? ''),
@@ -1078,10 +1087,10 @@ export class Store {
       .prepare(
         `INSERT INTO student_payments
           (id, campaign_id, stripe_account_id, payment_intent_id, family_id, student_id, family_label,
-           amount, currency, allocations, pay_status, record_status, students_payment_id, created_at, occurred_at)
+           amount, currency, allocations, students_split, pay_status, record_status, students_payment_id, created_at, occurred_at)
          VALUES
           (@id, @campaignId, @stripeAccountId, @paymentIntentId, @familyId, @studentId, @familyLabel,
-           @amount, @currency, @allocations, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
+           @amount, @currency, @allocations, @studentsSplit, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
       )
       .run(p);
     return p;

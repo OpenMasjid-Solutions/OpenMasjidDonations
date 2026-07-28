@@ -182,7 +182,7 @@ test('info still speaks v:1 (unchanged at v2)', async () => {
   assert.deepEqual(calls[0].body, { v: 1 });
 });
 
-test('record-payment still speaks v:1, with allocations and no per-child breakdown', async () => {
+test('record-payment sends the per-child split (what actually books the ledger) on v:1', async () => {
   reply({ v: 2, recorded: true, paymentId: 'pay_71', duplicate: false });
   const r = await students.recordStudentPayment({
     idempotencyKey: 'pi_3PabcDEF',
@@ -193,10 +193,13 @@ test('record-payment still speaks v:1, with allocations and no per-child breakdo
     occurredAt: '2026-07-15T18:03:22Z',
     externalRef: { stripePaymentIntentId: 'pi_3PabcDEF', stripeChargeId: 'ch_1' },
     allocations: [{ invoiceId: 'inv_9', amountCents: 15000 }],
+    students: [{ studentId: 'stu_2', amountCents: 15000 }],
   });
   assert.deepEqual(r, { status: 'recorded', paymentId: 'pay_71', duplicate: false });
   assert.equal(calls[0].url, 'https://os.test/api/fabric/app/students/billing/record-payment');
   assert.deepEqual(calls[0].body, {
+    // v:1 on purpose: the method is byte-identical across versions and `students[]` is an
+    // additive optional field, so a pre-v2 provider ignores it instead of 400ing the money path.
     v: 1,
     idempotencyKey: 'pi_3PabcDEF',
     familyId: 'fam_x1',
@@ -207,9 +210,25 @@ test('record-payment still speaks v:1, with allocations and no per-child breakdo
     occurredAt: '2026-07-15T18:03:22Z',
     externalRef: { stripePaymentIntentId: 'pi_3PabcDEF', stripeChargeId: 'ch_1' },
     allocations: [{ invoiceId: 'inv_9', amountCents: 15000 }],
+    // The picked month belongs to stu_2, so stu_2 is who gets credited — even though stu_1 is
+    // the matched child. Without this the provider ignores `allocations` and derives its own
+    // split from the family's oldest bills, landing the money on the wrong child.
+    students: [{ studentId: 'stu_2', amountCents: 15000 }],
   });
-  // The optional v2 `students[]` split is deliberately omitted — the provider derives it.
-  assert.ok(!('students' in calls[0].body));
+});
+
+test('record-payment omits the split for a full balance (Students derives it)', async () => {
+  reply({ v: 2, recorded: true, paymentId: 'pay_80', duplicate: false });
+  await students.recordStudentPayment({
+    idempotencyKey: 'pi_full',
+    familyId: 'fam_x1',
+    amountCents: 35000,
+    currency: 'usd',
+    occurredAt: '2026-07-15T18:03:22Z',
+    externalRef: { stripePaymentIntentId: 'pi_full' },
+  });
+  assert.ok(!('students' in calls[0].body), 'no split for pay-everything');
+  assert.ok(!('allocations' in calls[0].body), 'no allocations for pay-everything');
 });
 
 test('record-payment: a permanent app error is rejected (stop), a transient one retried', async () => {

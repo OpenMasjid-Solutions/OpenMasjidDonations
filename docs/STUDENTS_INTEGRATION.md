@@ -187,11 +187,22 @@ Unchanged at v2 and still sent as `"v": 1`. After the PaymentIntent succeeds, ca
   charged for it). Students validates them (same family, not overpaying an invoice).
 - Idempotent on `idempotencyKey` (= the PI id): a replay returns the original `paymentId` with
   `duplicate:true`.
-- **v2's optional `students[]` per-child split: we omit it, deliberately.** With `allocations` (each
-  ticked invoice already carries its child) or with nothing at all (pay the whole balance), Students
-  derives exactly the same split itself — and a breakdown that failed to sum to `amountCents` to the
-  penny is a `422 invalid_allocation` for no gain. v2 also answers with a `payments[]` array (one
-  ledger row per child); we read the top-level `paymentId`, which the contract keeps for that reason.
+- **v2's `students[]` per-child split is what actually books the ledger — send it for picked months.**
+  Students records a charge as one ledger row **per child**, and it takes those rows from `students[]`
+  if you send one, otherwise it **derives** them by walking the *family's* open invoices
+  oldest-due-first. That derivation **ignores `allocations` entirely** (the provider parses the field
+  and then drops it — verified in `fabric/provider.ts` + `billing/ledger.ts` at 0.40.0). So a parent
+  who ticks *Maryam's July* while the family's oldest bill is *Yusuf's July* has the money booked
+  against **Yusuf** unless we say otherwise. We therefore send `students[]` derived server-side from
+  the same ticked invoices, and **omit it for "pay the full balance"**, where the derived split is
+  identical (every open invoice gets covered) and is what reconciliation would reproduce anyway.
+  Keep sending `allocations` too — it's harmless, contract-documented, and correct if the provider
+  ever honours it.
+- The split **must sum to `amountCents` to the penny** and every child must belong to `familyId`, or
+  Students answers `422 invalid_allocation`. If any picked invoice arrives without a `studentId`, send
+  **no** split and let Students derive one — degrading beats a rejected payment.
+- v2 also answers with a `payments[]` array (one ledger row per child); we read the top-level
+  `paymentId`, which the contract keeps for that reason.
 
 ### `check` — outbox retry
 If `record-payment` didn’t get a confirmed response (network blip after the card succeeded), retry with

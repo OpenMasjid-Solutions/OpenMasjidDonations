@@ -5,6 +5,10 @@
 // enforcement rules (Zakat always covers the fee; the qrImage allowlist) can't regress.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import Database from 'better-sqlite3';
 import { Store } from './store';
 
 function fresh(): Store {
@@ -76,7 +80,7 @@ test('tuition (Students-billing) payments are EXCLUDED from every donation total
   // A tuition payment (must NOT count as a donation anywhere).
   s.createStudentPayment({
     campaignId: camp.id, stripeAccountId: 'acct_test', paymentIntentId: 'pi_tui_1',
-    familyId: 'fam_x1', studentId: 'stu_1', familyLabel: 'Ismail family', amount: 35000, currency: 'USD', allocations: '',
+    familyId: 'fam_x1', studentId: 'stu_1', familyLabel: 'Ismail family', amount: 35000, currency: 'USD', allocations: '', studentsSplit: '',
   });
   s.markStudentPaymentPaid('pi_tui_1', 'succeeded', new Date().toISOString());
   const m = s.metrics();
@@ -92,14 +96,81 @@ test('student payment record flow: outbox lists only pending-succeeded; status i
   const s = fresh();
   s.createStudentPayment({
     campaignId: 'cmp_x', stripeAccountId: 'acct_test', paymentIntentId: 'pi_tui_2',
-    familyId: 'fam_y', studentId: '', familyLabel: 'Y family', amount: 12000, currency: 'GBP', allocations: '[{"invoiceId":"inv_9","amountCents":12000}]',
+    familyId: 'fam_y', studentId: '', familyLabel: 'Y family', amount: 12000, currency: 'GBP',
+    allocations: '[{"invoiceId":"inv_9","amountCents":12000}]',
+    studentsSplit: '[{"studentId":"stu_2","amountCents":12000}]',
   });
   assert.equal(s.listPendingStudentRecords().length, 0, 'not succeeded yet → not in the outbox');
   s.markStudentPaymentPaid('pi_tui_2', 'succeeded', new Date().toISOString());
   assert.equal(s.listPendingStudentRecords().length, 1, 'succeeded + pending → in the outbox');
+  // The per-child split survives to the retry, so an outbox push books the payment against the
+  // same child the first attempt would have (never re-derived onto a sibling's oldest bill).
+  assert.equal(
+    s.listPendingStudentRecords()[0].studentsSplit,
+    '[{"studentId":"stu_2","amountCents":12000}]',
+    'the split is durable, not recomputed at retry time',
+  );
   s.setStudentRecordStatus('pi_tui_2', 'recorded', 'pay_71');
   assert.equal(s.listPendingStudentRecords().length, 0, 'recorded → out of the outbox');
   assert.equal(s.getStudentPaymentByPI('pi_tui_2')?.studentsPaymentId, 'pay_71');
+});
+
+test('upgrade: an existing student_payments table gains students_split, keeping its rows', () => {
+  // The real upgrade an installed masjid hits. CREATE TABLE IF NOT EXISTS won't touch a table
+  // that already exists, so the column has to arrive via ensureColumn — and a tuition payment
+  // already queued in the outbox has to survive and stay pushable.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'omd-upgrade-'));
+  const dbPath = path.join(dir, 'donations.db');
+  try {
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE student_payments (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        stripe_account_id TEXT NOT NULL,
+        payment_intent_id TEXT NOT NULL,
+        family_id TEXT NOT NULL,
+        student_id TEXT NOT NULL DEFAULT '',
+        family_label TEXT NOT NULL DEFAULT '',
+        amount INTEGER NOT NULL,
+        currency TEXT NOT NULL,
+        allocations TEXT NOT NULL DEFAULT '',
+        pay_status TEXT NOT NULL DEFAULT 'pending',
+        record_status TEXT NOT NULL DEFAULT 'pending',
+        students_payment_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        occurred_at TEXT NOT NULL DEFAULT ''
+      );
+      INSERT INTO student_payments (id, campaign_id, stripe_account_id, payment_intent_id, family_id,
+        student_id, family_label, amount, currency, allocations, pay_status, record_status,
+        students_payment_id, created_at, occurred_at)
+      VALUES ('spy_old', 'cmp_x', 'acct_test', 'pi_old', 'fam_old', 'stu_old', 'Old family',
+        9900, 'GBP', '', 'succeeded', 'pending', '', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z');
+    `);
+    legacy.close();
+
+    const s = new Store(dbPath);
+    try {
+      const got = s.getStudentPaymentByPI('pi_old');
+      assert.ok(got, 'the legacy row survives the migration');
+      assert.equal(got.amount, 9900);
+      assert.equal(got.familyId, 'fam_old');
+      assert.equal(got.studentsSplit, '', 'no split on a legacy row → Students derives it, as it always did');
+      // Still retryable, and a new row on the upgraded table can carry a split.
+      assert.equal(s.listPendingStudentRecords().length, 1, 'the queued push is still in the outbox');
+      s.createStudentPayment({
+        campaignId: 'cmp_x', stripeAccountId: 'acct_test', paymentIntentId: 'pi_new',
+        familyId: 'fam_old', studentId: 'stu_old', familyLabel: 'Old family', amount: 5000, currency: 'GBP',
+        allocations: '[{"invoiceId":"inv_1","amountCents":5000}]',
+        studentsSplit: '[{"studentId":"stu_2","amountCents":5000}]',
+      });
+      assert.equal(s.getStudentPaymentByPI('pi_new')?.studentsSplit, '[{"studentId":"stu_2","amountCents":5000}]');
+    } finally {
+      s.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('email receipt: defaults off; caps text; allowlists accent', () => {

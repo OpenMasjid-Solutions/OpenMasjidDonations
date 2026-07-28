@@ -1205,6 +1205,14 @@ async function main(): Promise<void> {
       const a = JSON.parse(sp.allocations || 'null');
       if (Array.isArray(a) && a.length) allocations = a;
     } catch { /* full-balance (no allocations) */ }
+    // The per-child split (v2). Absent for a full-balance charge and for rows written before
+    // the column existed — in both cases Students derives the split, which is what those rows
+    // always relied on.
+    let studentsSplit: { studentId: string; amountCents: number }[] | undefined;
+    try {
+      const s = JSON.parse(sp.studentsSplit || 'null');
+      if (Array.isArray(s) && s.length) studentsSplit = s;
+    } catch { /* no split — Students derives it */ }
     const res = await recordStudentPayment({
       idempotencyKey: pi, // = the PaymentIntent id → Students dedups replays
       familyId: sp.familyId,
@@ -1214,6 +1222,7 @@ async function main(): Promise<void> {
       occurredAt: sp.occurredAt || new Date().toISOString(),
       externalRef: { stripePaymentIntentId: pi, stripeChargeId: retrieved.chargeId || undefined },
       allocations,
+      students: studentsSplit,
     });
     if (res.status === 'recorded') store.setStudentRecordStatus(pi, 'recorded', res.paymentId);
     else if (res.status === 'rejected') {
@@ -1282,7 +1291,9 @@ async function main(): Promise<void> {
       familyLabel: fam.label,
       currency: ccy,
       balanceCents: fam.balanceCents,
-      invoices: fam.openInvoices.map((i) => ({ id: i.id, balanceCents: i.balanceCents })),
+      // Keep each invoice's child: it's what lets the pay step tell Students WHOSE bill the
+      // parent's picked months are, without ever handing a studentId to the browser.
+      invoices: fam.openInvoices.map((i) => ({ id: i.id, studentId: i.studentId, balanceCents: i.balanceCents })),
     });
     // v2 bills are per child, so each open invoice names the child it belongs to. Resolve that
     // to a display name HERE — the studentIds stay server-side, in the session.
@@ -1386,6 +1397,9 @@ async function main(): Promise<void> {
       amount: chargeMinor,
       currency,
       allocations: amt.allocations ? JSON.stringify(amt.allocations) : '',
+      // Both splits are recomputed server-side from the session, then stored so the outbox
+      // retry books the payment exactly as this first attempt would have.
+      studentsSplit: amt.students ? JSON.stringify(amt.students) : '',
     });
     return { data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency } };
   });

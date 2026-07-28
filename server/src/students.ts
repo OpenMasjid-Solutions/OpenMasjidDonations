@@ -297,6 +297,10 @@ export interface RecordPaymentInput {
   externalRef: { stripePaymentIntentId: string; stripeChargeId?: string; stripeAccountId?: string };
   /** One entry per paid invoice; omit for "pay full balance" (Students auto-allocates). */
   allocations?: { invoiceId: string; amountCents: number }[];
+  /** The per-child split of this one charge. Must sum EXACTLY to amountCents and every child
+   *  must belong to familyId, or Students returns 422. Omit for "pay full balance". THIS is
+   *  what decides whose ledger the money lands on — see the note in recordStudentPayment. */
+  students?: { studentId: string; amountCents: number }[];
 }
 export type RecordResult =
   | { status: 'recorded'; paymentId: string; duplicate: boolean }
@@ -315,11 +319,18 @@ export async function recordStudentPayment(input: RecordPaymentInput): Promise<R
   };
   if (input.studentId) body.studentId = input.studentId;
   if (input.allocations && input.allocations.length) body.allocations = input.allocations;
-  // Unchanged by v2 and still sent as v1 (§11.0) — the money path doesn't move with the lookup
-  // screen. We also don't send v2's optional per-child `students[]` breakdown: with either
-  // `allocations` (picked months, each already tagged with its child) or none at all (pay the
-  // full balance), the provider derives the exact same split itself, and a breakdown that
-  // failed to sum to amountCents to the penny would be rejected 422 for no gain.
+  // WHY `students[]` matters, and why `allocations` is not enough: with one bill per child,
+  // Students records a charge as one ledger row PER CHILD. It decides those rows from
+  // `students[]` if we send one, and otherwise DERIVES them by walking the FAMILY's open
+  // invoices oldest-due-first — a path that ignores `allocations` entirely. So for a parent who
+  // ticked specific months, sending only `allocations` books the money against whichever child
+  // owns the family's oldest bill, which may not be the child whose month they picked. Sending
+  // the split we computed from those same ticked invoices is what makes the parent's choice the
+  // thing that lands. Omitted for "pay the full balance", where the derived split is identical
+  // (every open invoice gets covered) and is what reconciliation would reproduce anyway.
+  if (input.students && input.students.length) body.students = input.students;
+  // Still sent as v1: `record-payment` is byte-identical between v1 and v2 (§11.0), and
+  // `students[]` is an additive optional field the provider accepts on either version.
   const r = await brokerCall('record-payment', body);
   if (r.ok) {
     if (r.data.recorded === true) {
@@ -359,7 +370,9 @@ export interface TuitionSession {
   familyLabel: string;
   currency: string;
   balanceCents: number;
-  invoices: { id: string; balanceCents: number }[];
+  /** Each open invoice with the child it belongs to (v2 bills are per student). `studentId`
+   *  is what lets us tell Students WHICH child the parent's picked months belong to. */
+  invoices: { id: string; studentId: string; balanceCents: number }[];
   expires: number;
 }
 
@@ -390,27 +403,43 @@ export function getTuitionSession(id: string): TuitionSession | null {
 // ── Amount computation (PURE — the security-critical bit; unit-tested) ──────
 export type TuitionSelection = { kind: 'full' } | { kind: 'invoices'; invoiceIds: string[] };
 export type AmountResult =
-  | { amountCents: number; allocations: { invoiceId: string; amountCents: number }[] | null }
+  | {
+      amountCents: number;
+      allocations: { invoiceId: string; amountCents: number }[] | null;
+      /** The per-CHILD split of this charge — what actually books the Students ledger (see
+       *  `recordStudentPayment`). `null` = let Students derive it (correct for a full balance). */
+      students: { studentId: string; amountCents: number }[] | null;
+    }
   | { error: string };
 
-/** Compute the charge amount + allocations from the SERVER-side session, never the client's
- *  numbers. "full" pays the whole balance (allocations omitted → Students auto-allocates
- *  oldest-due-first); otherwise pay exactly the chosen open invoices, at their stored amounts. */
+/** Compute the charge amount, the per-invoice allocations AND the per-child split from the
+ *  SERVER-side session, never the client's numbers. "full" pays the whole balance (both splits
+ *  omitted → Students derives them oldest-due-first, which for a full balance is the same
+ *  answer); otherwise pay exactly the chosen open invoices, at their stored amounts, and tell
+ *  Students which child each of those months belongs to. */
 export function computeTuitionAmount(session: TuitionSession, selection: TuitionSelection): AmountResult {
   if (selection.kind === 'full') {
     if (session.balanceCents <= 0) return { error: 'nothing-due' };
-    return { amountCents: session.balanceCents, allocations: null };
+    return { amountCents: session.balanceCents, allocations: null, students: null };
   }
   const ids = [...new Set(selection.invoiceIds)];
   if (!ids.length) return { error: 'no-selection' };
   const allocations: { invoiceId: string; amountCents: number }[] = [];
+  const byStudent = new Map<string, number>();
   let sum = 0;
+  let everyInvoiceHasAChild = true;
   for (const id of ids) {
     const inv = session.invoices.find((i) => i.id === id);
     if (!inv || inv.balanceCents <= 0) return { error: 'unknown-invoice' };
     allocations.push({ invoiceId: id, amountCents: inv.balanceCents });
+    if (inv.studentId) byStudent.set(inv.studentId, (byStudent.get(inv.studentId) ?? 0) + inv.balanceCents);
+    else everyInvoiceHasAChild = false;
     sum += inv.balanceCents;
   }
   if (sum <= 0) return { error: 'nothing-due' };
-  return { amountCents: sum, allocations };
+  // A split must cover the WHOLE charge to the penny or Students rejects it (422). If any
+  // picked invoice arrived without a child (a provider we don't recognise), send no split at
+  // all and let Students derive one — degrading beats a rejected payment.
+  const students = everyInvoiceHasAChild && byStudent.size ? [...byStudent].map(([studentId, amountCents]) => ({ studentId, amountCents })) : null;
+  return { amountCents: sum, allocations, students };
 }

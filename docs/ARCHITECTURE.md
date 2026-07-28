@@ -216,9 +216,13 @@ contract: `students/billing` **v2** in `OpenMasjidStudentManager/docs/FABRIC_BIL
   `omos_app=donations`, `students_family_id`, optional `students_student_id`; description
   `School balance — <label>` — §11.3 bans a Student ID or a child's name from metadata/descriptions).
   On confirm/webhook we **retrieve** the PI (never trust the client) and push `record-payment`
-  (idempotencyKey = the PI id; v2's optional per-child `students[]` split is omitted — with
-  allocations, or with none for "pay everything", the provider derives the identical split itself).
-  A dropped response leaves `record_status:pending`;
+  (idempotencyKey = the PI id). **The per-child `students[]` split is what books the ledger:**
+  Students writes one row per child, taken from `students[]` or else **derived** from the *family's*
+  oldest-due invoices — a derivation that ignores `allocations`. So picked months carry an explicit
+  split, computed server-side from the ticked invoices (`computeTuitionAmount`) and **persisted**
+  (`student_payments.students_split`) so an outbox retry books it identically; "pay the full balance"
+  omits it, where the derived split is the same answer. A dropped response leaves
+  `record_status:pending`;
   a 60 s outbox `check`s-before-retry so it never double-records; a permanent app error → `skipped`.
   Students' own daily reconciliation (it scans succeeded `students-billing` PIs) is the final backstop,
   so **money is never lost** even if our push never lands. Receipts/wording say "payment", not "donation".
