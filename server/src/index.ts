@@ -25,6 +25,7 @@ import { renderReceipt, type ReceiptContext } from './email';
 import {
   billingConfigured,
   studentsInfo,
+  studentsIdentify,
   studentsLookup,
   recordStudentPayment,
   checkStudentPayment,
@@ -919,7 +920,7 @@ async function main(): Promise<void> {
     const ld = store.getLargeDonation();
     // A tuition campaign is a Students-billing shell: ask Students (over the Fabric broker)
     // whether it's set up. Unavailable / disabled → the donor page shows a friendly notice
-    // instead of the name+PIN form (fail-soft, contract §2). Amounts are in the SCHOOL's
+    // instead of the Student ID form (fail-soft, contract §11.1). Amounts are in the SCHOOL's
     // currency (from Students), not the masjid's donation currency.
     let students: { available: boolean; schoolName: string; tagline: string } | undefined;
     let currency = cur();
@@ -959,7 +960,7 @@ async function main(): Promise<void> {
       // the donor may still pay by card; the server never blocks above the threshold.
       largeDonation: { threshold: toMajorCur(ld.threshold), message: ld.message, qrImage: ld.qrImage },
       // Tuition (Students) status; undefined for donation/zakat. When present + !available the
-      // donor page shows "tuition payments aren't available right now" and no name+PIN form.
+      // donor page shows "tuition payments aren't available right now" and no Student ID form.
       students,
       publishableKey: acct?.publishableKey ?? '', // safe; never the secret
       ready: !!acct && stripeConfigured(acct),
@@ -1159,14 +1160,19 @@ async function main(): Promise<void> {
   });
 
   // ── Tuition (Students billing) — a `tuition` campaign is a shell around OpenMasjid ──
-  // Students. Parent enters child name + PIN → we look up the family balance over the OS
-  // Fabric broker → they pay all/some → we record it into the Students ledger. Students
-  // owns everything inside; we render the shell + charge the card. Contract: students/billing
-  // v1 (docs/STUDENTS_INTEGRATION.md). Everything fails soft when Students is unavailable.
+  // Students. Parent enters the child's Student ID → we confirm whose it is (`identify`) →
+  // they confirm the name → we look up the family's balances over the OS Fabric broker →
+  // they pay all/some → we record it into the Students ledger. Students owns everything
+  // inside; we render the shell + charge the card. Contract: students/billing v2
+  // (docs/STUDENTS_INTEGRATION.md). Everything fails soft when Students is unavailable.
 
-  // A stricter per-peer limiter for the PIN lookup so we can't be the open relay that lets an
-  // attacker grind PINs (Students also locks a PIN after repeated failures — defence in depth).
-  // Keyed on the real TCP peer (never a spoofable X-Forwarded-For), like the login limiter.
+  // A stricter per-peer limiter for the tuition lookup so we can't be the open relay that lets
+  // an attacker grind Student IDs (Students also hard-locks a code after 6 failed probes per
+  // hour — defence in depth). `identify` and `lookup` deliberately SHARE this bucket, exactly
+  // as the provider shares one bucket per code, so switching endpoints can't launder attempts.
+  // The cap is 40/min rather than 20 only because one honest flow is now two calls (identify →
+  // lookup): the effective attempt rate is unchanged. Keyed on the real TCP peer (never a
+  // spoofable X-Forwarded-For), like the login limiter.
   const lookupHits = new Map<string, { c: number; reset: number }>();
   const lookupRateOk = (ip: string): boolean => {
     const now = Date.now();
@@ -1176,7 +1182,7 @@ async function main(): Promise<void> {
       lookupHits.set(ip, { c: 1, reset: now + 60_000 });
       return true;
     }
-    if (w.c >= 20) return false;
+    if (w.c >= 40) return false;
     w.c += 1;
     return true;
   };
@@ -1219,11 +1225,40 @@ async function main(): Promise<void> {
     // 'unavailable' → leave pending; the outbox retries.
   };
 
-  // Look up a family by the child's name + PIN. The PIN + name are read from the body only
-  // and NEVER logged/echoed. Not-found is uniform (no hint which part was wrong). On success
-  // we stash the family SERVER-SIDE (a session) so the pay step can't be told a different
-  // family or a tampered amount — the browser only gets display data + an opaque session id.
-  const LookupBody = z.object({ name: z.string().min(1).max(120), pin: z.string().min(1).max(32) });
+  // A child's display name — a first name plus a last initial is all the contract ever returns
+  // (and a child recorded under one name has no initial). Rendered as plain text, never HTML.
+  const childName = (st: { firstName: string; lastInitial: string }): string =>
+    st.lastInitial ? `${st.firstName} ${st.lastInitial}.` : st.firstName;
+
+  // Step 1 of the v2 flow: turn a typed Student ID into "is this <child>?" so the parent
+  // confirms the right child BEFORE any balance appears. This confirmation is what replaced
+  // the PIN (contract §11.0) — it catches the realistic failure, a mistyped ID. The answer is
+  // deliberately thin (a first name + initial, nothing else) and uniform on not-found, so it
+  // is neither an enumeration oracle nor a disclosure. The code is body-only, never logged.
+  const IdentifyBody = z.object({ studentCode: z.string().min(1).max(64) });
+  app.post('/api/public/campaign/:slug/students/identify', async (req, reply) => {
+    if (!lookupRateOk(req.socket.remoteAddress ?? 'unknown')) {
+      return reply.code(429).send({ error: 'Too many attempts. Please wait a moment and try again.' });
+    }
+    const c = store.getCampaignBySlug((req.params as { slug: string }).slug);
+    if (!c || !c.active || c.type !== 'tuition') return reply.code(404).send({ error: 'This page isn’t available.' });
+    const parsed = IdentifyBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please enter the Student ID.' });
+    const r = await studentsIdentify(parsed.data.studentCode);
+    if (r.status === 'unavailable') {
+      return reply.code(503).send({ error: 'Tuition payments are temporarily unavailable. Please try again shortly.' });
+    }
+    if (r.status === 'not-found') return { data: { found: false } };
+    return { data: { found: true, student: r.student } };
+  });
+
+  // Step 2: the parent confirmed the name, so fetch the family's balances. v2 takes the
+  // Student ID ALONE — no name, no PIN (they'd 400). The code is read from the body only and
+  // NEVER logged/echoed. Not-found is uniform (unknown / withdrawn / locked / payments-off all
+  // look the same). On success we stash the family SERVER-SIDE (a session) so the pay step
+  // can't be told a different family or a tampered amount — the browser only gets display
+  // data + an opaque session id, never the internal family/student ids.
+  const LookupBody = z.object({ studentCode: z.string().min(1).max(64) });
   app.post('/api/public/campaign/:slug/students/lookup', async (req, reply) => {
     if (!lookupRateOk(req.socket.remoteAddress ?? 'unknown')) {
       return reply.code(429).send({ error: 'Too many attempts. Please wait a moment and try again.' });
@@ -1231,8 +1266,8 @@ async function main(): Promise<void> {
     const c = store.getCampaignBySlug((req.params as { slug: string }).slug);
     if (!c || !c.active || c.type !== 'tuition') return reply.code(404).send({ error: 'This page isn’t available.' });
     const parsed = LookupBody.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Please enter the student’s name and PIN.' });
-    const r = await studentsLookup(parsed.data.name.trim(), parsed.data.pin.trim());
+    if (!parsed.success) return reply.code(400).send({ error: 'Please enter the Student ID.' });
+    const r = await studentsLookup(parsed.data.studentCode);
     if (r.status === 'unavailable') {
       return reply.code(503).send({ error: 'Tuition payments are temporarily unavailable. Please try again shortly.' });
     }
@@ -1249,6 +1284,9 @@ async function main(): Promise<void> {
       balanceCents: fam.balanceCents,
       invoices: fam.openInvoices.map((i) => ({ id: i.id, balanceCents: i.balanceCents })),
     });
+    // v2 bills are per child, so each open invoice names the child it belongs to. Resolve that
+    // to a display name HERE — the studentIds stay server-side, in the session.
+    const nameById = new Map(fam.students.filter((st) => st.studentId).map((st) => [st.studentId, childName(st)]));
     // Return DISPLAY data only — never the internal family/student ids (they live in the session).
     return {
       data: {
@@ -1257,9 +1295,21 @@ async function main(): Promise<void> {
         currency: ccy,
         family: {
           label: fam.label,
-          students: fam.students,
+          // Per-child balances are new at v2 (one bill per child); the household total below
+          // is still what "pay the full balance" charges.
+          students: fam.students.map((st) => ({
+            firstName: st.firstName,
+            lastInitial: st.lastInitial,
+            balance: dec(st.balanceCents),
+          })),
           balance: dec(fam.balanceCents),
-          openInvoices: fam.openInvoices.map((i) => ({ id: i.id, label: i.label, dueDate: i.dueDate, amount: dec(i.balanceCents) })),
+          openInvoices: fam.openInvoices.map((i) => ({
+            id: i.id,
+            label: i.label,
+            student: nameById.get(i.studentId) ?? '',
+            dueDate: i.dueDate,
+            amount: dec(i.balanceCents),
+          })),
         },
       },
     };
@@ -1297,7 +1347,8 @@ async function main(): Promise<void> {
     if (!Number.isInteger(chargeMinor) || chargeMinor < 50) return reply.code(400).send({ error: 'That amount is too small to charge.' });
     if (chargeMinor > 99_999_999) return reply.code(400).send({ error: 'That amount is too large.' });
     // §11.3 metadata — the reconciliation discriminator + the family id (REQUIRED). NEVER the
-    // PIN or the typed name. Description uses the family label only.
+    // Student ID or a child's name (§11.3 bans both from metadata/descriptions/URLs outright,
+    // since metadata shows up in Stripe dashboards and exports). Description = family label.
     const metadata: Record<string, string> = {
       purpose: 'students-billing',
       omos_app: 'donations',
@@ -1315,7 +1366,7 @@ async function main(): Promise<void> {
         currency,
         metadata,
         idempotencyKey,
-        undefined, // no receipt email — the tuition flow collects only name + PIN
+        undefined, // no receipt email — the tuition flow collects only a Student ID
         `School balance — ${session.familyLabel || 'family'}`,
       );
       clientSecret = intent.clientSecret;

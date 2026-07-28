@@ -64,7 +64,8 @@ export interface StripeAccount extends StripeConfig {
  *  - `donation` — the admin may OFFER donors the option to cover the card fee.
  *  - `zakat` — the fee is always enforced (so the full Zakat reaches the masjid).
  *  - `tuition` — NOT a donation flow at all: a thin shell around the OpenMasjid Students
- *    app (name + PIN → family balance → pay → recorded in Students over the Fabric broker).
+ *    app (Student ID → confirm the child → family balance → pay → recorded in Students over
+ *    the Fabric broker).
  *    It has NO card-fee concept — the parent pays the exact school balance (grossing up
  *    would overpay an invoice and break Students' allocation). See docs/STUDENTS_INTEGRATION.md. */
 export type CampaignType = 'donation' | 'zakat' | 'tuition';
@@ -195,7 +196,7 @@ export interface Donation {
 
 /** A tuition (Students-billing) payment. NOT a donation — it credits a family's balance in
  *  the OpenMasjid Students ledger. We hold only what the record/retry flow needs; NEVER the
- *  PIN or the typed student name. `allocations` is the JSON the parent chose ('' = full
+ *  typed Student ID or a child's name. `allocations` is the JSON the parent chose ('' = full
  *  balance, auto-allocated by Students oldest-due-first). `recordStatus` tracks the durable
  *  push to Students: 'pending' (outbox will retry), 'recorded' (done), 'skipped' (a permanent
  *  app error — Students' own daily reconciliation is the backstop, so money is never lost). */
@@ -325,8 +326,8 @@ export class Store {
       -- Tuition (Students-billing) payments live in their OWN table, deliberately separate
       -- from donations: they are school payments, NOT gifts, so they must never appear in
       -- donation totals, metrics, the CSV, Gift Aid or year-end tax letters (contract §5).
-      -- We keep only what the record-payment outbox + retry need (never the PIN or the typed
-      -- student name). record_status drives the durable push to the Students ledger.
+      -- We keep only what the record-payment outbox + retry need (never the typed Student ID
+      -- or a child's name). record_status drives the durable push to the Students ledger.
       CREATE TABLE IF NOT EXISTS student_payments (
         id TEXT PRIMARY KEY,
         campaign_id TEXT NOT NULL,

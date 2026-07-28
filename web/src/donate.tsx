@@ -7,18 +7,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadStripe, type Stripe } from '@stripe/stripe-js';
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
-import { GraduationCap, HandCoins, HeartHandshake, Lock, Repeat, Search, ShieldCheck } from 'lucide-react';
+import { GraduationCap, HandCoins, HeartHandshake, Lock, Repeat, Search, ShieldCheck, UserCheck } from 'lucide-react';
 import {
   confirmDonation,
   confirmTuitionPayment,
   createIntent,
   createTuitionIntent,
   getPublicCampaign,
+  identifyStudent,
   lookupStudent,
   money,
   type ConfirmResponse,
   type IntentResponse,
   type PublicCampaign,
+  type StudentIdentity,
   type StudentLookupResult,
   type TuitionConfirmResponse,
   type TuitionIntentResponse,
@@ -482,12 +484,20 @@ function ThankYou({ result, campaign }: { result: ConfirmResponse; campaign: Pub
 }
 
 // ── Tuition (Students billing) ───────────────────────────────────────────────
-// A `tuition` campaign is a thin shell around OpenMasjid Students: name + PIN → family
-// balance (fetched over the OS Fabric) → pay all or pick months → Stripe → recorded in the
-// Students ledger. Everything says "payment", never "donation" (tuition isn't a gift).
+// A `tuition` campaign is a thin shell around OpenMasjid Students (contract v2): Student ID →
+// "is this <child>?" → the family's balances (fetched over the OS Fabric) → pay all or pick
+// months → Stripe → recorded in the Students ledger. There is no PIN: the parent confirming
+// the child's name is the safeguard that replaced it, so we never call `lookup` before that
+// confirmation. Everything says "payment", never "donation" (tuition isn't a gift).
+
+/** A child's display name. A first name + last initial is all the contract ever returns, and a
+ *  child recorded under a single name comes back with no initial — show just the given name. */
+const childName = (st: { firstName: string; lastInitial: string }): string =>
+  st.lastInitial ? `${st.firstName} ${st.lastInitial}.` : st.firstName;
+
 function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
-  const [name, setName] = useState('');
-  const [pin, setPin] = useState('');
+  const [code, setCode] = useState('');
+  const [student, setStudent] = useState<StudentIdentity | null>(null); // the child awaiting confirmation
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
@@ -518,18 +528,39 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   const selectionAmount = !fam ? 0 : payAll ? fam.balance : fam.openInvoices.filter((i) => checked[i.id]).reduce((s, i) => s + i.amount, 0);
   const selectedIds = fam ? fam.openInvoices.filter((i) => checked[i.id]).map((i) => i.id) : [];
 
-  const runLookup = async (e: React.FormEvent) => {
+  // Step 1 — who does this Student ID belong to? No balance is revealed yet.
+  const runIdentify = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !pin.trim()) return setError('Please enter the student’s name and PIN.');
+    if (!code.trim()) return setError('Please enter the Student ID.');
     setBusy(true); setError(''); setNotFound(false);
     try {
-      const r = await lookupStudent(campaign.slug, { name: name.trim(), pin: pin.trim() });
-      if (!r.found || !r.session || !r.family) setNotFound(true);
+      const r = await identifyStudent(campaign.slug, { studentCode: code.trim() });
+      if (!r.found || !r.student) setNotFound(true);
+      else setStudent(r.student);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Tuition payments are temporarily unavailable.');
+    } finally { setBusy(false); }
+  };
+
+  // Step 2 — the parent said "yes, that's my child", so now fetch the balances. A not-found
+  // here (the code was locked or switched off between the two calls) returns them to the ID
+  // step with the same uniform message, never a hint about what changed.
+  const confirmStudent = async () => {
+    if (!student) return;
+    setBusy(true); setError('');
+    try {
+      const r = await lookupStudent(campaign.slug, { studentCode: student.studentCode });
+      if (!r.found || !r.session || !r.family) { setStudent(null); setNotFound(true); }
       else { setLookup(r); setPayAll(true); setChecked({}); }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Tuition payments are temporarily unavailable.');
     } finally { setBusy(false); }
   };
+
+  /** Back to the ID field keeping what was typed (so a typo is a quick fix, not a retype). */
+  const editCode = () => { setStudent(null); setError(''); };
+  /** Back to a clean ID field — a different child entirely. */
+  const startOver = () => { setLookup(null); setStudent(null); setCode(''); setNotFound(false); setError(''); };
 
   const startPayment = async () => {
     if (!fam || !lookup?.session) return;
@@ -553,7 +584,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   if (result) return <TuitionThanks result={result} />;
   if (confirming) return <section className="glass-raised donate-card"><span className="spinner" aria-label="Confirming your payment" /></section>;
 
-  // Students not installed / set up / reachable → a friendly notice, never the name+PIN form.
+  // Students not installed / set up / reachable → a friendly notice, never the ID form.
   if (!campaign.students?.available) {
     return (
       <section className="glass-raised donate-card">
@@ -573,12 +604,21 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
         <Emblem />
         <h1 className="donate-title">{fam.label || school}</h1>
         {school && school !== fam.label ? <p className="donate-sub muted">{school}</p> : null}
-        {fam.students.length > 0 && (
-          // Show the looked-up children so the parent can confirm it's the right family (first
-          // name + last initial only — rendered as plain text, never HTML).
-          <p className="donate-sub muted">{fam.students.map((st) => `${st.firstName}${st.lastInitial ? ` ${st.lastInitial}.` : ''}`).join(' · ')}</p>
-        )}
+        {/* The child (or, with siblings, each child and what they owe) so the parent can see
+            it's the right family. First name + last initial only, always plain text. */}
+        {fam.students.length === 1 && <p className="donate-sub muted">{childName(fam.students[0])}</p>}
         <p className="donate-desc">Balance due: <b>{fmt(fam.balance)}</b></p>
+        {fam.students.length > 1 && (
+          // v2 bills are per child, so a family with siblings gets the split behind the total.
+          <div style={{ display: 'grid', gap: '0.2rem', marginBlockEnd: '0.6rem' }}>
+            {fam.students.map((st, i) => (
+              <div className="row-between hint" key={`${st.firstName}-${i}`}>
+                <span>{childName(st)}</span>
+                <span>{fmt(st.balance)}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {fam.openInvoices.length > 0 && (
           <div className="freq-toggle" role="group" aria-label="What to pay">
             <button type="button" className={`freq-opt${payAll ? ' is-active' : ''}`} onClick={() => setPayAll(true)}>Pay full balance</button>
@@ -590,37 +630,69 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
             {fam.openInvoices.map((inv) => (
               <label key={inv.id} className="check-row">
                 <input type="checkbox" checked={!!checked[inv.id]} onChange={(e) => setChecked((c) => ({ ...c, [inv.id]: e.target.checked }))} />
-                <span>{inv.label}{inv.dueDate ? ` · due ${inv.dueDate}` : ''} — <b>{fmt(inv.amount)}</b></span>
+                <span>{inv.label}{inv.student ? ` · ${inv.student}` : ''}{inv.dueDate ? ` · due ${inv.dueDate}` : ''} — <b>{fmt(inv.amount)}</b></span>
               </label>
             ))}
           </div>
         )}
         {error && <p className="form-error" role="alert">{error}</p>}
-        <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
-          {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}
-        </button>
-        <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={() => { setLookup(null); setError(''); }}>Look up a different student</button>
+        {/* Nothing owed at all — say so warmly instead of offering a dead "Pay 0" button. A zero
+            selection while picking months keeps the button (disabled), which reads as "tick one". */}
+        {fam.balance <= 0 && fam.openInvoices.length === 0 ? (
+          <p className="donate-desc">There’s nothing to pay right now — you’re all up to date. JazākAllāhu khayran.</p>
+        ) : (
+          <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
+            {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}
+          </button>
+        )}
+        <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={startOver}>Look up a different student</button>
       </section>
     );
   }
 
-  // Lookup step — the required name + PIN entry (nothing else).
+  // Confirmation step — echo the child's name back BEFORE any balance appears. This is the
+  // safeguard that replaced the PIN: it catches the realistic failure, a mistyped ID.
+  if (student) {
+    return (
+      <section className="glass-raised donate-card">
+        <Emblem />
+        <h1 className="donate-title">Is this {childName(student)}?</h1>
+        <p className="donate-desc">
+          Student ID <b>{student.studentCode}</b>. If that’s your child, continue to see the balance and pay.
+        </p>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy} onClick={confirmStudent}>
+          {busy ? <span className="spinner" /> : <UserCheck size={18} />} Yes, show the balance
+        </button>
+        <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={editCode}>No — check the Student ID</button>
+      </section>
+    );
+  }
+
+  // Student ID step — one field, nothing else (no PIN at v2, no amount box ever).
   return (
     <section className="glass-raised donate-card">
       <Emblem />
       <h1 className="donate-title">{campaign.title}</h1>
       {school && school !== campaign.title ? <p className="donate-sub muted">{school}</p> : null}
-      <p className="donate-desc">{campaign.students.tagline || 'Enter your child’s name and PIN to see your balance and pay.'}</p>
-      <form onSubmit={runLookup}>
+      <p className="donate-desc">{campaign.students.tagline || 'Enter your child’s Student ID to see your balance and pay.'}</p>
+      <form onSubmit={runIdentify}>
         <div className="field">
-          <label className="label" htmlFor="sname">Student name</label>
-          <input id="sname" className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" autoFocus />
+          <label className="label" htmlFor="scode">Student ID</label>
+          <input
+            id="scode"
+            className="input"
+            value={code}
+            onChange={(e) => setCode(e.target.value.toUpperCase())}
+            maxLength={32}
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            autoFocus
+          />
+          <p className="hint">It’s on your statement — three letters and four numbers, like YUS1234.</p>
         </div>
-        <div className="field">
-          <label className="label" htmlFor="spin">PIN</label>
-          <input id="spin" className="input" value={pin} onChange={(e) => setPin(e.target.value)} inputMode="numeric" autoComplete="off" />
-        </div>
-        {notFound && <p className="hint" role="alert">We couldn’t find that. Please check the name and PIN, or ask the school office.</p>}
+        {notFound && <p className="hint" role="alert">We couldn’t find that Student ID. Please check it, or ask the school office.</p>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="btn btn--primary btn--block donate-cta glow-accent" type="submit" disabled={busy}>
           {busy ? <span className="spinner" /> : <Search size={18} />} Find my balance

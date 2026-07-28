@@ -178,21 +178,35 @@ The `tuition` campaign type is **repurposed** (it was a card-fee variant in v0.2
 thin shell around the separate **OpenMasjid Students** app, reached through the OpenMasjidOS
 **app-to-app broker** (OS v0.40.0). Students owns everything inside a tuition campaign — the label,
 the lookup, balances, allocation, recording. We render the shell and charge the card. Authoritative
-contract: `students/billing` v1 in `OpenMasjidStudentManager/docs/FABRIC_BILLING_CONTRACT.md` §11
+contract: `students/billing` **v2** in `OpenMasjidStudentManager/docs/FABRIC_BILLING_CONTRACT.md` §11
 (mirrored locally in `docs/STUDENTS_INTEGRATION.md`).
 
 - **Transport (`server/src/students.ts`).** We POST `${OPENMASJID_BASE_URL}/api/fabric/app/students/billing/<method>`
   with **our own** per-app secret; the OS core verifies our manifest declares
   `fabric.consumes: [students/billing]` (string form — the APPS catalog validator + OS `parseFabric`
   require it) and proxies to Students. `brokerCall` NEVER throws, 10 s timeout, and NEVER logs the
-  body (the PIN + family data). Every broker error → `unavailable` → the tuition campaign hides
+  body (the Student ID + family data). Every broker error → `unavailable` → the tuition campaign hides
   itself / shows a friendly notice (fail-soft doctrine). `info` is cached ~5 min.
+- **Per-method wire version.** `identify` + `lookup` send `"v": 2`; `info`, `record-payment` and
+  `check` are unchanged by v2 and deliberately keep sending `"v": 1` (which the provider still
+  accepts), so a lookup-screen migration can never move the money path. `studentsFabric.test.ts`
+  locks both halves of that, plus the fail-soft rules.
+- **The PIN is gone (v2, provider 0.39.0 — §11.0).** The parent types a **Student ID alone**; we call
+  `identify` (a first name + last initial, nothing else — no balance, no family, no ids), the parent
+  confirms *"is this <child>?"*, and only then does `lookup` run. That confirmation **is** the
+  safeguard the PIN used to be: it catches the realistic failure, a mistyped ID. A v1 `{name, pin}`
+  body now **400s** — the flow can't silently half-work. Bills are also per child at v2, so `lookup`
+  returns a balance per student (shown behind the household total) and tags each open invoice with
+  the child it belongs to. Our `identify` + `lookup` routes share **one** per-peer rate-limit bucket
+  (40/min — one honest flow is two calls), mirroring the provider's single per-code bucket, and both
+  are uniform on not-found (unknown / withdrawn / locked / payments-off are indistinguishable).
 - **No client trust (the security core).** On a successful `lookup` we stash the family + its open
   invoices in a **server-side session** (in-memory, 15 min, 128-bit id); the browser gets only display
-  data + the opaque id — never the internal family/student ids. At pay time the client sends the
-  session id + which invoices (or "full"); `computeTuitionAmount` (pure, unit-tested) recomputes the
-  amount **and** the familyId server-side, so a crafted request can't attribute a charge to an
-  arbitrary family or pay a tampered amount. The PIN/name are body-only, never in a URL/log/metadata.
+  data + the opaque id — never the internal family/student ids (nor a sibling's Student ID). At pay
+  time the client sends the session id + which invoices (or "full"); `computeTuitionAmount` (pure,
+  unit-tested) recomputes the amount **and** the familyId server-side, so a crafted request can't
+  attribute a charge to an arbitrary family or pay a tampered amount. The typed Student ID is
+  body-only, never in a URL/log/metadata.
 - **Separate ledger (`student_payments` table).** Tuition payments are **not donations** — a distinct
   table, never joined into `metrics()`/`listDonations()`/`raisedForCampaign()`/the CSV, so they are
   excluded from every donation total, goal and year-end letter by construction (locked by a test).
@@ -200,8 +214,11 @@ contract: `students/billing` v1 in `OpenMasjidStudentManager/docs/FABRIC_BILLING
   balance; a gross-up would overpay an invoice and break Students' allocation.
 - **Record + durable outbox.** The PaymentIntent carries §11.3 metadata (`purpose=students-billing`,
   `omos_app=donations`, `students_family_id`, optional `students_student_id`; description
-  `School balance — <label>`). On confirm/webhook we **retrieve** the PI (never trust the client) and
-  push `record-payment` (idempotencyKey = the PI id). A dropped response leaves `record_status:pending`;
+  `School balance — <label>` — §11.3 bans a Student ID or a child's name from metadata/descriptions).
+  On confirm/webhook we **retrieve** the PI (never trust the client) and push `record-payment`
+  (idempotencyKey = the PI id; v2's optional per-child `students[]` split is omitted — with
+  allocations, or with none for "pay everything", the provider derives the identical split itself).
+  A dropped response leaves `record_status:pending`;
   a 60 s outbox `check`s-before-retry so it never double-records; a permanent app error → `skipped`.
   Students' own daily reconciliation (it scans succeeded `students-billing` PIs) is the final backstop,
   so **money is never lost** even if our push never lands. Receipts/wording say "payment", not "donation".

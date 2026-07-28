@@ -843,7 +843,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
         </select>
         <span className="hint">
           {type === 'zakat' ? 'Zakat always covers the card fee, so the full Zakat reaches the masjid.'
-            : type === 'tuition' ? 'Tuition is powered by OpenMasjid Students — parents look up their child by name + PIN and pay the school balance. Amounts and records come from Students.'
+            : type === 'tuition' ? 'Tuition is powered by OpenMasjid Students — parents look up their child by Student ID and pay the school balance. Amounts and records come from Students.'
             : 'For a donation you can offer donors the option to cover the card fee.'}
         </span>
       </Field>
@@ -884,7 +884,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       {type === 'tuition' && (
         <div className="glass-inset" style={{ padding: '0.7rem 0.85rem', display: 'grid', gap: '0.35rem' }}>
           <p className="hint" style={{ marginBlock: 0 }}>
-            <GraduationCap size={13} /> This is a <b>tuition</b> page powered by <b>OpenMasjid Students</b>. Parents enter their child’s name + PIN, see the family balance and open months, and pay by card — the payment is recorded straight into Students.
+            <GraduationCap size={13} /> This is a <b>tuition</b> page powered by <b>OpenMasjid Students</b>. Parents enter their child’s <b>Student ID</b> (printed on the statement), confirm the child’s name, then see the balance and open months and pay by card — the payment is recorded straight into Students.
           </p>
           <p className="hint" style={{ marginBlock: 0 }}>
             Choose the <b>same Stripe account OpenMasjid Students uses</b>, so tuition lands in the school’s account and reconciles there. Nothing else on this page (amounts, goals, fees) applies — Students owns all of that.

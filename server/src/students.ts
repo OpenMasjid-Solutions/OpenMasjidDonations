@@ -4,8 +4,17 @@
 /**
  * OpenMasjid Students billing — the `tuition` campaign type talks to the OpenMasjid
  * Students app through the OpenMasjidOS Fabric app-to-app broker (never to Students
- * directly). Contract: `students/billing` v1 — authoritative source
+ * directly). Contract: `students/billing` v2 — authoritative source
  * `OpenMasjidStudentManager/docs/FABRIC_BILLING_CONTRACT.md` §11 (also docs/STUDENTS_INTEGRATION.md).
+ *
+ * v1 → v2 (provider 0.39.0, contract §11.0): PINs are gone. `lookup` no longer takes a name
+ * and a PIN — it takes the **Student ID alone** — and a v1-shaped body now 400s, so the flow
+ * cannot half-work. The confirmation step that replaced the PIN is `identify`: we echo the
+ * matched child's first name back and the parent confirms it BEFORE any balance appears,
+ * which catches the realistic failure (a mistyped ID) that a PIN never did. Bills are also
+ * per child at v2, so `lookup` reports a balance per student as well as the household total.
+ * `info`, `record-payment` and `check` are unchanged and still accept `v: 1`, so the money
+ * path is untouched by this migration — only the lookup screen moved.
  *
  * Transport: our backend POSTs
  *   ${OPENMASJID_BASE_URL}/api/fabric/app/students/billing/<method>
@@ -21,10 +30,13 @@
  * network fault) means "tuition unavailable, the rest of the donation site is fine" — never
  * a crash. A tuition campaign hides itself / shows a friendly notice when unavailable.
  *
- * SECURITY: the PIN + the typed name are INERT input — sent in the JSON body only, NEVER
- * put in a URL, a log line, Stripe metadata, a description, or an email, and never stored.
- * We log method names only, never request/response bodies. Secrets are read from env every
- * start (config.ts), never persisted.
+ * SECURITY: the typed Student ID is INERT input — sent in the JSON body only, NEVER put in a
+ * URL, a log line, Stripe metadata, a description, or an email, and never stored. (§11.3 bans
+ * a Student ID or a child's name from Stripe metadata/descriptions/URLs outright.) A Student
+ * ID is not a secret — it is printed on statements — but it is the whole credential, so we
+ * still rate-limit it per peer and never become the relay that grinds codes. We log method
+ * names only, never request/response bodies. Secrets are read from env every start
+ * (config.ts), never persisted.
  */
 import crypto from 'node:crypto';
 import { config } from './config';
@@ -48,7 +60,10 @@ type BrokerUnavailable = { ok: false; unavailable: true; code: string };
 type BrokerAppError = { ok: false; unavailable: false; code: string; message: string };
 type BrokerResult = BrokerOk | BrokerUnavailable | BrokerAppError;
 
-async function brokerCall(method: string, body: Record<string, unknown>): Promise<BrokerResult> {
+/** The wire version to send, per method. `identify`/`lookup` MUST be v2 (the PIN-free flow —
+ *  §11.0); `info`, `record-payment` and `check` are unchanged and keep sending v1, which the
+ *  provider still accepts, so the money path can't be broken by the lookup migration. */
+async function brokerCall(method: string, body: Record<string, unknown>, v: 1 | 2 = 1): Promise<BrokerResult> {
   if (!billingConfigured()) return { ok: false, unavailable: true, code: 'no-fabric' };
   try {
     const ctrl = new AbortController();
@@ -56,7 +71,7 @@ async function brokerCall(method: string, body: Record<string, unknown>): Promis
     const res = await fetch(`${config.omosBaseUrl}/api/fabric/app/${BILLING_PATH}/${method}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-openmasjid-app-secret': config.omosAppSecret },
-      body: JSON.stringify({ v: 1, ...body }), // every request/response carries "v":1
+      body: JSON.stringify({ v, ...body }), // every request/response carries a "v"
       signal: ctrl.signal,
       redirect: 'error', // never follow a redirect to some other host
     });
@@ -78,7 +93,7 @@ async function brokerCall(method: string, body: Record<string, unknown>): Promis
     if (!j || typeof j !== 'object') return { ok: false, unavailable: true, code: 'bad_response' };
     return { ok: true, data: j };
   } catch (err) {
-    // Message only (never the body) — the body carries the PIN + family data.
+    // Message only (never the body) — the body carries the Student ID + family data.
     log.debug(`students/billing ${method} unreachable: ${err instanceof Error ? err.message : 'error'}`);
     return { ok: false, unavailable: true, code: 'unreachable' };
   }
@@ -90,6 +105,14 @@ const intNonNeg = (v: unknown): number => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
+
+/** Canonicalise a typed Student ID the way the provider does — case, spaces and hyphens
+ *  (§11.2: "yus-1234" is fine) — so the `identify` we confirm and the `lookup` that follows
+ *  ask about the same code. Deliberately NOT a format check: the provider owns the format,
+ *  and a client that validated it would reject codes the school later starts issuing. */
+export function normaliseStudentCode(raw: string): string {
+  return raw.replace(/[\s-]+/g, '').toUpperCase().slice(0, 64);
+}
 
 // ── info ────────────────────────────────────────────────────────────────────
 export interface StudentsInfo {
@@ -121,7 +144,7 @@ export async function studentsInfo(force = false): Promise<InfoResult> {
     const ttl = infoCache.value.available ? INFO_OK_MS : INFO_BAD_MS;
     if (now - infoCache.at < ttl) return infoCache.value;
   }
-  const r = await brokerCall('info', {});
+  const r = await brokerCall('info', {}); // unchanged at v2; keeps sending v1 (§11.0)
   const value: InfoResult = r.ok ? { available: true, info: parseInfo(r.data) } : { available: false };
   infoCache = { at: now, value };
   return value;
@@ -132,22 +155,73 @@ export function cachedStudentsInfo(): InfoResult {
   return infoCache?.value ?? { available: false };
 }
 
-// ── lookup (name + PIN → family + balance) ──────────────────────────────────
+// ── identify (Student ID → whose it is) ─────────────────────────────────────
+// Step 1 of the v2 flow and NOT optional: it is the confirmation that replaced the PIN
+// (§11.0). Deliberately thin — a first name + last initial and nothing else: no balance, no
+// invoices, no sibling list, not even the family id — which is what makes it safe to answer
+// before the parent has confirmed anything.
+export interface IdentifiedStudent {
+  /** The code as the provider echoes it back (normalised) — what we then `lookup` with. */
+  studentCode: string;
+  firstName: string;
+  /** '' for a child recorded under a single name (plenty don't split into two halves). */
+  lastInitial: string;
+}
+export type IdentifyResult =
+  | { status: 'found'; student: IdentifiedStudent }
+  | { status: 'not-found' }
+  | { status: 'unavailable' };
+
+/** Ask who a typed Student ID belongs to. `not-found` is uniform — an unknown code, a
+ *  withdrawn student, a locked code and "external payments switched off" all look identical,
+ *  so we are not an enumeration oracle. Any broker/app error → `unavailable` (fail soft). */
+export async function studentsIdentify(studentCode: string): Promise<IdentifyResult> {
+  const code = normaliseStudentCode(studentCode);
+  if (!code) return { status: 'not-found' };
+  const r = await brokerCall('identify', { studentCode: code }, 2);
+  if (!r.ok) return { status: 'unavailable' };
+  if (r.data.found !== true) return { status: 'not-found' };
+  const s = r.data.student && typeof r.data.student === 'object' ? (r.data.student as Record<string, unknown>) : null;
+  const firstName = str(s?.firstName, 60);
+  // A "found" we can't put a name to can't be confirmed by a parent — don't guess at it.
+  if (!firstName) return { status: 'unavailable' };
+  return {
+    status: 'found',
+    student: { studentCode: str(s?.studentCode, 64) || code, firstName, lastInitial: str(s?.lastInitial, 4) },
+  };
+}
+
+// ── lookup (Student ID → family + per-child balances) ───────────────────────
 export interface StudentInvoice {
   id: string;
+  /** Which child this bill belongs to (new at v2 — bills are per student). */
+  studentId: string;
   label: string;
   dueDate: string;
+  balanceCents: number;
+}
+/** A child on the family's bill. We keep the contract's `studentId` (needed to tag invoices
+ *  with the child they belong to) but deliberately NOT its `studentCode`: we never offer a
+ *  "pay for a sibling" switch, and a sibling's code must not reach the browser. */
+export interface StudentFamilyMember {
+  studentId: string;
+  firstName: string;
+  lastInitial: string;
+  /** What THIS child owes (new at v2) — the household total is `family.balanceCents`. */
   balanceCents: number;
 }
 export interface StudentFamily {
   id: string;
   label: string;
-  students: { firstName: string; lastInitial: string }[];
+  students: StudentFamilyMember[];
   balanceCents: number;
   currency: string;
   openInvoices: StudentInvoice[];
 }
 export type LookupResult =
+  // `matchedStudentId` is the child whose ID was typed (v2 also reports that child's own
+  // `balanceCents`, which we don't read: the per-child figures we display come from
+  // `family.students[]`, and the charge always comes from the family total or ticked invoices).
   | { status: 'found'; matchedStudentId: string; family: StudentFamily }
   | { status: 'not-found' }
   | { status: 'unavailable' };
@@ -161,12 +235,23 @@ function parseFamily(d: Record<string, unknown>): StudentFamily | null {
   const students = studentsRaw
     .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
     .slice(0, 40)
-    .map((s) => ({ firstName: str(s.firstName, 60), lastInitial: str(s.lastInitial, 4) }));
+    .map((s) => ({
+      studentId: str(s.studentId, 128),
+      firstName: str(s.firstName, 60),
+      lastInitial: str(s.lastInitial, 4),
+      balanceCents: intNonNeg(s.balanceCents),
+    }));
   const invRaw = Array.isArray(f.openInvoices) ? f.openInvoices : [];
   const openInvoices = invRaw
     .filter((i): i is Record<string, unknown> => !!i && typeof i === 'object')
     .slice(0, 60)
-    .map((i) => ({ id: str(i.id, 128), label: str(i.label, 120), dueDate: str(i.dueDate, 40), balanceCents: intNonNeg(i.balanceCents) }))
+    .map((i) => ({
+      id: str(i.id, 128),
+      studentId: str(i.studentId, 128),
+      label: str(i.label, 120),
+      dueDate: str(i.dueDate, 40),
+      balanceCents: intNonNeg(i.balanceCents),
+    }))
     .filter((i) => i.id); // an invoice with no id can't be paid specifically
   return {
     id,
@@ -178,22 +263,26 @@ function parseFamily(d: Record<string, unknown>): StudentFamily | null {
   };
 }
 
-/** Resolve a student name + PIN to a family + balance. The PIN/name are sent in the body
- *  only and are NEVER logged. `not-found` is uniform (the provider returns the same shape
- *  for a wrong PIN or a name mismatch — no enumeration oracle). */
-export async function studentsLookup(name: string, pin: string): Promise<LookupResult> {
-  const r = await brokerCall('lookup', { name, pin });
+/** Resolve a Student ID to a family + its per-child balances. Call this only AFTER the parent
+ *  confirmed the name from `identify` — that confirmation is the safeguard the PIN used to be
+ *  (§11.0). The code is sent in the body only and is NEVER logged. `not-found` is uniform
+ *  (unknown / withdrawn / locked / payments-off all look identical — no enumeration oracle). */
+export async function studentsLookup(studentCode: string): Promise<LookupResult> {
+  const code = normaliseStudentCode(studentCode);
+  if (!code) return { status: 'not-found' };
+  const r = await brokerCall('lookup', { studentCode: code }, 2);
   if (r.ok) {
     if (r.data.found === true) {
       const family = parseFamily(r.data);
       if (!family) return { status: 'unavailable' }; // malformed "found" payload → don't guess
-      const matchedStudentId = str((r.data.matchedStudent as { id?: unknown } | undefined)?.id, 128);
-      return { status: 'found', matchedStudentId, family };
+      const m = r.data.matchedStudent && typeof r.data.matchedStudent === 'object' ? (r.data.matchedStudent as Record<string, unknown>) : null;
+      return { status: 'found', matchedStudentId: str(m?.id, 128), family };
     }
     return { status: 'not-found' };
   }
-  // Any broker/app error on a lookup is treated as unavailable (fail soft) — we never leak
-  // whether the PIN or name was the problem, and a transient outage isn't a "wrong PIN".
+  // Any broker/app error on a lookup is treated as unavailable (fail soft) — a transient
+  // outage must never read as "wrong ID", and a 400 means WE are behind on the contract
+  // (a v1-shaped body): tell the parent to try later, never that their code is bad.
   return { status: 'unavailable' };
 }
 
@@ -226,6 +315,11 @@ export async function recordStudentPayment(input: RecordPaymentInput): Promise<R
   };
   if (input.studentId) body.studentId = input.studentId;
   if (input.allocations && input.allocations.length) body.allocations = input.allocations;
+  // Unchanged by v2 and still sent as v1 (§11.0) — the money path doesn't move with the lookup
+  // screen. We also don't send v2's optional per-child `students[]` breakdown: with either
+  // `allocations` (picked months, each already tagged with its child) or none at all (pay the
+  // full balance), the provider derives the exact same split itself, and a breakdown that
+  // failed to sum to amountCents to the penny would be rejected 422 for no gain.
   const r = await brokerCall('record-payment', body);
   if (r.ok) {
     if (r.data.recorded === true) {
@@ -241,6 +335,8 @@ export async function recordStudentPayment(input: RecordPaymentInput): Promise<R
 export type CheckResult = { status: 'recorded'; paymentId: string } | { status: 'not-recorded' } | { status: 'unavailable' };
 
 export async function checkStudentPayment(idempotencyKey: string): Promise<CheckResult> {
+  // Unchanged at v2, still v1: we ask with the plain key we sent and read `paymentId`, which
+  // the contract keeps alongside v2's new `paymentIds[]` for exactly this reason.
   const r = await brokerCall('check', { idempotencyKey });
   if (r.ok) {
     if (r.data.recorded === true) return { status: 'recorded', paymentId: str(r.data.paymentId, 128) };

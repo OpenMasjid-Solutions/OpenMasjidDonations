@@ -135,8 +135,8 @@ export async function createPaymentIntent(
       metadata,
       automatic_payment_methods: { enabled: true },
       ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
-      // Tuition (Students billing) sets "School balance — <family label>". NEVER the PIN or
-      // the typed student name (a description is visible in Stripe dashboards + exports).
+      // Tuition (Students billing) sets "School balance — <family label>". NEVER a Student ID
+      // or a child's name (a description is visible in Stripe dashboards + exports).
       ...(description ? { description: description.slice(0, 200) } : {}),
     },
     { idempotencyKey },

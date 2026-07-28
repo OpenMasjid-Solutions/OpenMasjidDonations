@@ -359,7 +359,7 @@ export interface PublicCampaign {
   largeDonation?: LargeDonation; // global; advisory dialog above threshold
   /** Present only for a `tuition` campaign (a Students-billing shell). `available` false =
    *  OpenMasjid Students isn't installed / set up / reachable → show a friendly notice, not
-   *  the name+PIN form. */
+   *  the Student ID form. */
   students?: { available: boolean; schoolName: string; tagline: string };
   publishableKey: string;
   ready: boolean;
@@ -401,23 +401,41 @@ export const confirmDonation = (body: { paymentIntentId: string; slug: string; t
   request<ConfirmResponse>('/api/public/confirm', { method: 'POST', body: JSON.stringify(body) });
 
 // ── Tuition (Students billing) — the `tuition` campaign flow ─────────────────
+// Contract students/billing v2: the parent types a Student ID (no PIN), `identify` echoes the
+// child's name back for confirmation, and only then does `lookup` reveal the balances.
 /** One open invoice a parent can choose to pay (amount in major units). */
 export interface StudentInvoiceView {
   id: string;
   label: string;
+  /** Which child this bill is for (v2 bills are per child) — a display name, or '' if unknown. */
+  student: string;
   dueDate: string;
   amount: number;
 }
-/** The family a name+PIN lookup resolved to. Internal ids stay server-side (in the session);
- *  the browser only gets display data + the opaque `session` used for the pay step. */
+/** Who a Student ID belongs to: a first name + last initial and nothing else — no balance, no
+ *  family, no ids. This confirmation step is what replaced the PIN (contract §11.0). */
+export interface StudentIdentity {
+  /** The code as the server normalised it — pass this straight to `lookupStudent`. */
+  studentCode: string;
+  firstName: string;
+  /** '' for a child recorded under a single name — render just the given name. */
+  lastInitial: string;
+}
+export interface StudentIdentifyResult {
+  found: boolean;
+  student?: StudentIdentity;
+}
+/** The family a confirmed Student ID resolved to. Internal ids stay server-side (in the
+ *  session); the browser only gets display data + the opaque `session` used for the pay step. */
 export interface StudentLookupResult {
   found: boolean;
   session?: string;
   currency?: string;
   family?: {
     label: string;
-    students: { firstName: string; lastInitial: string }[];
-    balance: number; // major units
+    /** One entry per child, each with what THAT child owes (major units) — new at v2. */
+    students: { firstName: string; lastInitial: string; balance: number }[];
+    balance: number; // the household total, major units — what "pay full balance" charges
     openInvoices: StudentInvoiceView[];
   };
 }
@@ -438,7 +456,11 @@ export interface TuitionConfirmResponse {
 /** What to pay: the whole balance, or a chosen set of open invoices. */
 export type TuitionSelection = { kind: 'full' } | { kind: 'invoices'; invoiceIds: string[] };
 
-export const lookupStudent = (slug: string, body: { name: string; pin: string }) =>
+/** Step 1: whose Student ID is this? Ask before showing any balance (contract §11.0). */
+export const identifyStudent = (slug: string, body: { studentCode: string }) =>
+  request<StudentIdentifyResult>(`${campaignPath(slug)}/students/identify`, { method: 'POST', body: JSON.stringify(body) });
+/** Step 2, only after the parent confirmed the name: the Student ID alone — no PIN at v2. */
+export const lookupStudent = (slug: string, body: { studentCode: string }) =>
   request<StudentLookupResult>(`${campaignPath(slug)}/students/lookup`, { method: 'POST', body: JSON.stringify(body) });
 export const createTuitionIntent = (slug: string, body: { session: string; selection: TuitionSelection }) =>
   request<TuitionIntentResponse>(`${campaignPath(slug)}/students/intent`, { method: 'POST', body: JSON.stringify(body) });
