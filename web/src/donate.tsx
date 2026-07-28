@@ -495,6 +495,10 @@ function ThankYou({ result, campaign }: { result: ConfirmResponse; campaign: Pub
 const childName = (st: { firstName: string; lastInitial: string }): string =>
   st.lastInitial ? `${st.firstName} ${st.lastInitial}.` : st.firstName;
 
+/** What to pay: the whole balance, particular months, or an amount the parent types (an
+ *  advance or part payment — the only option when there's nothing due). */
+type PayMode = 'full' | 'pick' | 'amount';
+
 function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   const [code, setCode] = useState('');
   const [student, setStudent] = useState<StudentIdentity | null>(null); // the child awaiting confirmation
@@ -502,7 +506,8 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   const [error, setError] = useState('');
   const [notFound, setNotFound] = useState(false);
   const [lookup, setLookup] = useState<StudentLookupResult | null>(null);
-  const [payAll, setPayAll] = useState(true);
+  const [mode, setMode] = useState<PayMode>('full');
+  const [custom, setCustom] = useState(''); // the typed amount, major units
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [intent, setIntent] = useState<TuitionIntentResponse | null>(null);
   const [result, setResult] = useState<TuitionConfirmResponse | null>(null);
@@ -525,8 +530,19 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
       .finally(() => setConfirming(false));
   }, [campaign.slug]);
 
-  const selectionAmount = !fam ? 0 : payAll ? fam.balance : fam.openInvoices.filter((i) => checked[i.id]).reduce((s, i) => s + i.amount, 0);
+  const minAmount = campaign.students?.minAmount || 1;
+  const canAdvance = !!campaign.students?.allowAdvance;
+  const typedAmount = Number.parseFloat(custom);
   const selectedIds = fam ? fam.openInvoices.filter((i) => checked[i.id]).map((i) => i.id) : [];
+  const selectionAmount = !fam
+    ? 0
+    : mode === 'full'
+      ? fam.balance
+      : mode === 'pick'
+        ? fam.openInvoices.filter((i) => checked[i.id]).reduce((s, i) => s + i.amount, 0)
+        : Number.isFinite(typedAmount) && typedAmount > 0
+          ? typedAmount
+          : 0;
 
   // Step 1 — who does this Student ID belong to? No balance is revealed yet.
   const runIdentify = async (e: React.FormEvent) => {
@@ -551,7 +567,16 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
     try {
       const r = await lookupStudent(campaign.slug, { studentCode: student.studentCode });
       if (!r.found || !r.session || !r.family) { setStudent(null); setNotFound(true); }
-      else { setLookup(r); setPayAll(true); setChecked({}); }
+      else {
+        setLookup(r);
+        setChecked({});
+        // With something due, start on "pay the balance"; with nothing due, the only thing to
+        // offer is an advance. Either way the amount field is pre-filled with the balance when
+        // there is one and left blank when there isn't (§11.0a).
+        const bal = r.family.balance;
+        setMode(bal > 0 ? 'full' : 'amount');
+        setCustom(bal > 0 ? String(bal) : '');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Tuition payments are temporarily unavailable.');
     } finally { setBusy(false); }
@@ -560,12 +585,19 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   /** Back to the ID field keeping what was typed (so a typo is a quick fix, not a retype). */
   const editCode = () => { setStudent(null); setError(''); };
   /** Back to a clean ID field — a different child entirely. */
-  const startOver = () => { setLookup(null); setStudent(null); setCode(''); setNotFound(false); setError(''); };
+  const startOver = () => { setLookup(null); setStudent(null); setCode(''); setNotFound(false); setError(''); setCustom(''); };
 
   const startPayment = async () => {
     if (!fam || !lookup?.session) return;
-    if (!payAll && selectedIds.length === 0) return setError('Please choose at least one item to pay.');
-    const selection: TuitionSelection = payAll ? { kind: 'full' } : { kind: 'invoices', invoiceIds: selectedIds };
+    if (mode === 'pick' && selectedIds.length === 0) return setError('Please choose at least one item to pay.');
+    if (mode === 'amount') {
+      if (!Number.isFinite(typedAmount) || typedAmount <= 0) return setError('Please enter an amount.');
+      // The school's own floor, so a parent is stopped here by a friendly line rather than by
+      // a card decline. The server re-checks it against its own copy.
+      if (typedAmount < minAmount) return setError(`The smallest payment we can take is ${money(minAmount, ccy)}.`);
+    }
+    const selection: TuitionSelection =
+      mode === 'full' ? { kind: 'full' } : mode === 'pick' ? { kind: 'invoices', invoiceIds: selectedIds } : { kind: 'amount', amount: typedAmount };
     setBusy(true); setError('');
     try {
       setIntent(await createTuitionIntent(campaign.slug, { session: lookup.session, selection }));
@@ -604,28 +636,45 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
         <Emblem />
         <h1 className="donate-title">{fam.label || school}</h1>
         {school && school !== fam.label ? <p className="donate-sub muted">{school}</p> : null}
-        {/* The child (or, with siblings, each child and what they owe) so the parent can see
+        {/* The child (or, with siblings, each child and where they stand) so the parent can see
             it's the right family. First name + last initial only, always plain text. */}
         {fam.students.length === 1 && <p className="donate-sub muted">{childName(fam.students[0])}</p>}
-        <p className="donate-desc">Balance due: <b>{fmt(fam.balance)}</b></p>
+        {/* A balance of zero means two different things — square, or paid ahead — so say which.
+            Credit isn't a footnote here: once an advance settles its invoice it's the only
+            record of it the parent can see (there are no open months left to show). */}
+        {fam.balance > 0 ? (
+          <p className="donate-desc">Balance due: <b>{fmt(fam.balance)}</b></p>
+        ) : fam.credit > 0 ? (
+          <p className="donate-desc">Nothing due — you’re <b>{fmt(fam.credit)}</b> in credit, which comes off the next bill.</p>
+        ) : (
+          <p className="donate-desc">Nothing due right now. JazākAllāhu khayran.</p>
+        )}
         {fam.students.length > 1 && (
-          // v2 bills are per child, so a family with siblings gets the split behind the total.
+          // v2 bills each child separately, so a household total can't say who is behind or
+          // ahead — show each child, and whether their figure is owed or in credit.
           <div style={{ display: 'grid', gap: '0.2rem', marginBlockEnd: '0.6rem' }}>
             {fam.students.map((st, i) => (
               <div className="row-between hint" key={`${st.firstName}-${i}`}>
                 <span>{childName(st)}</span>
-                <span>{fmt(st.balance)}</span>
+                <span>{st.credit > 0 ? `${fmt(st.credit)} in credit` : st.balance > 0 ? fmt(st.balance) : 'nothing due'}</span>
               </div>
             ))}
           </div>
         )}
-        {fam.openInvoices.length > 0 && (
+        {/* What to pay. "Choose what to pay" only exists when there are months to tick, and
+            "Another amount" only when the school takes payments in advance. */}
+        {(fam.openInvoices.length > 0 || canAdvance) && fam.balance > 0 && (
           <div className="freq-toggle" role="group" aria-label="What to pay">
-            <button type="button" className={`freq-opt${payAll ? ' is-active' : ''}`} onClick={() => setPayAll(true)}>Pay full balance</button>
-            <button type="button" className={`freq-opt${!payAll ? ' is-active' : ''}`} onClick={() => setPayAll(false)}>Choose what to pay</button>
+            <button type="button" className={`freq-opt${mode === 'full' ? ' is-active' : ''}`} onClick={() => setMode('full')}>Pay the balance</button>
+            {fam.openInvoices.length > 0 && (
+              <button type="button" className={`freq-opt${mode === 'pick' ? ' is-active' : ''}`} onClick={() => setMode('pick')}>Choose months</button>
+            )}
+            {canAdvance && (
+              <button type="button" className={`freq-opt${mode === 'amount' ? ' is-active' : ''}`} onClick={() => setMode('amount')}>Another amount</button>
+            )}
           </div>
         )}
-        {!payAll && (
+        {mode === 'pick' && (
           <div style={{ display: 'grid', gap: '0.4rem', marginBlock: '0.4rem' }}>
             {fam.openInvoices.map((inv) => (
               <label key={inv.id} className="check-row">
@@ -635,11 +684,33 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
             ))}
           </div>
         )}
+        {mode === 'amount' && canAdvance && (
+          <div className="field">
+            <label className="label" htmlFor="tamt">Amount to pay ({ccy})</label>
+            <input
+              id="tamt"
+              className="input"
+              type="number"
+              min={minAmount}
+              step="0.01"
+              inputMode="decimal"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              autoFocus={fam.balance <= 0}
+            />
+            <p className="hint">
+              {fam.balance > 0
+                ? `Pay part of the balance, or more to build up credit. Smallest payment ${money(minAmount, ccy)}.`
+                : `Paying ahead is fine — it sits as credit and comes off the next bill. Smallest payment ${money(minAmount, ccy)}.`}
+            </p>
+          </div>
+        )}
         {error && <p className="form-error" role="alert">{error}</p>}
-        {/* Nothing owed at all — say so warmly instead of offering a dead "Pay 0" button. A zero
-            selection while picking months keeps the button (disabled), which reads as "tick one". */}
-        {fam.balance <= 0 && fam.openInvoices.length === 0 ? (
-          <p className="donate-desc">There’s nothing to pay right now — you’re all up to date. JazākAllāhu khayran.</p>
+        {/* Nothing due AND the school doesn't take money in advance → there is genuinely nothing
+            to offer, so say so instead of a dead "Pay 0" button. A zero selection while ticking
+            months keeps the button (disabled), which reads as "tick one". */}
+        {fam.balance <= 0 && !canAdvance ? (
+          <p className="hint">This school isn’t taking payments in advance right now — there’s nothing to pay today.</p>
         ) : (
           <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
             {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}

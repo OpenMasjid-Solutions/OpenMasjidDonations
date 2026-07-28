@@ -359,8 +359,9 @@ export interface PublicCampaign {
   largeDonation?: LargeDonation; // global; advisory dialog above threshold
   /** Present only for a `tuition` campaign (a Students-billing shell). `available` false =
    *  OpenMasjid Students isn't installed / set up / reachable → show a friendly notice, not
-   *  the Student ID form. */
-  students?: { available: boolean; schoolName: string; tagline: string };
+   *  the Student ID form. `allowAdvance` = the school takes money with nothing due (so offer
+   *  the amount field at a zero balance); `minAmount` is the floor for it, in major units. */
+  students?: { available: boolean; schoolName: string; tagline: string; allowAdvance: boolean; minAmount: number };
   publishableKey: string;
   ready: boolean;
 }
@@ -433,9 +434,14 @@ export interface StudentLookupResult {
   currency?: string;
   family?: {
     label: string;
-    /** One entry per child, each with what THAT child owes (major units) — new at v2. */
-    students: { firstName: string; lastInitial: string; balance: number }[];
+    /** One entry per child with what THAT child owes and what they've paid ahead (major
+     *  units). Both are non-negative and at most one of the pair is non-zero. */
+    students: { firstName: string; lastInitial: string; balance: number; credit: number }[];
     balance: number; // the household total, major units — what "pay full balance" charges
+    /** The household's credit — money already paid ahead. A balance of 0 alone can't say
+     *  whether a family is square or ahead, and once an advance settles its invoice this is
+     *  the only signal left (openInvoices is empty by then). */
+    credit: number;
     openInvoices: StudentInvoiceView[];
   };
 }
@@ -453,8 +459,13 @@ export interface TuitionConfirmResponse {
   schoolName: string;
   familyLabel: string;
 }
-/** What to pay: the whole balance, or a chosen set of open invoices. */
-export type TuitionSelection = { kind: 'full' } | { kind: 'invoices'; invoiceIds: string[] };
+/** What to pay: the whole balance, a chosen set of open invoices, or an amount the parent
+ *  typed (an advance or part payment — allowed even with nothing due, when the school takes
+ *  them; `amount` is in major units and the server floors it at `students.minAmount`). */
+export type TuitionSelection =
+  | { kind: 'full' }
+  | { kind: 'invoices'; invoiceIds: string[] }
+  | { kind: 'amount'; amount: number };
 
 /** Step 1: whose Student ID is this? Ask before showing any balance (contract §11.0). */
 export const identifyStudent = (slug: string, body: { studentCode: string }) =>

@@ -33,12 +33,38 @@ wire version), the `/api/public/campaign/:slug/students/{identify,lookup}` route
 `server/src/index.ts`, `TuitionShell` in `web/src/donate.tsx`, and `server/src/studentsFabric.test.ts`
 (which locks the wire shapes, including that the money path still speaks v1).
 
+## 0b. Additive since v2 — Students 0.41.0: advance payments + credit (§11.0a)
+
+Two response fields, no version bump. They exist because a *derived* balance of `0` is ambiguous —
+square, paid ahead, or "you can't pay here" — and a consumer had no way to tell those apart.
+
+| Field | Where | What we do with it |
+| --- | --- | --- |
+| `allowAdvance`, `minAmountCents` | `info` | Offer an **amount field** even when the balance is `0`; floor it at `minAmountCents`. |
+| `creditCents` | `lookup` — household, `matchedStudent`, each child | Show what's been **paid ahead**. Pairs with `balanceCents`; at most one is non-zero. |
+
+- **Never hide the campaign or disable the field because the balance is zero.** A family paying a term
+  up front, or clearing the year at the start of Ramadan, is normal — tuition is not a donation appeal.
+- **The floor is the stricter of the school's and ours** (`MIN_TUITION_CENTS`, $1): a provider
+  advertising 25¢ can't drag us under a pound/dollar, and one advertising $5 is honoured. It applies to
+  **every** path — full balance, picked months, typed amount — because it is "the smallest card payment
+  a parent may start, wherever they start it", the same constant the school's own portal enforces.
+- **Paying part of a real balance is not an advance** and needs no `allowAdvance`: only money *above*
+  the balance does. With nothing due, every amount is an advance.
+- **Submit normally.** A typed amount goes through `record-payment` unchanged — no `students[]`, no
+  `allocations`. Students covers the open invoices oldest-due-first and holds the rest as the **matched
+  child's** credit (the child whose ID was typed, which is the top-level `studentId` we send). We never
+  net credit off a charge ourselves; the ledger absorbs it against the next invoice.
+- `allowAdvance` is **advertised, never assumed** — it stays `false` against a Students that predates
+  0.41.0, so an old school doesn't silently start taking prepayments.
+
 ## 0. What the parent sees (the required flow)
 
 A `tuition` campaign renders **exactly this**, nothing more:
 
 1. **One field:** *Student ID* — the code printed on the statement (first 3 letters of the child's
-   first name + 4 digits, e.g. `YUS1234`). Nothing else — no PIN, no amount box up front.
+   first name + 4 digits, e.g. `YUS1234`). Nothing else — no PIN, no amount box up front. (The amount
+   field appears at step 5, once we know what the family owes.)
 2. Parent presses **Enter / “Find my balance”** → we call `identify` (the ID alone).
    - Not found → one friendly line (“We couldn’t find that Student ID — please check it, or ask the
      office”). **No hint about why** (Students returns a uniform `found:false` for an unknown code, a
@@ -46,12 +72,15 @@ A `tuition` campaign renders **exactly this**, nothing more:
 3. **Confirm the child:** *“Is this Yusuf I.?”* with the ID shown back, and a way to go correct it.
    **No balance is shown yet** — this confirmation is the safeguard that replaced the PIN, so we never
    call `lookup` before it.
-4. **Confirmed** → we call `lookup` and show the **family label**, the **current balance due** (plus a
-   per-child split when there are siblings), and the **open invoices** (one row per month/term, each
-   tagged with the child it's for, with its own amount + due date).
-5. **Pay:** two choices —
-   - **Pay the full balance** (the whole household `balanceCents`), or
-   - **Choose what to pay** — tick one or more invoices (e.g. one or two months) and pay just those.
+4. **Confirmed** → we call `lookup` and show the **family label**, then whichever of these is true:
+   **"Balance due: $200.00"**, **"Nothing due — you're $50.00 in credit"**, or **"Nothing due right
+   now"** — plus a per-child split when there are siblings (each child shown as owing or in credit),
+   and the **open invoices** (one row per month/term, tagged with the child it's for).
+5. **Pay:** up to three choices —
+   - **Pay the balance** (the whole household `balanceCents`), or
+   - **Choose months** — tick one or more invoices (e.g. one or two months) and pay just those, or
+   - **Another amount** — type any figure ≥ `minAmountCents` (a part payment, or money paid ahead).
+     With **nothing due this is the only option**, and it is offered, not hidden.
    Card entry (Stripe Elements) appears for the chosen amount.
 6. On success → we record it into Students and show a receipt that says **“payment”**, never
    “donation”. Done.

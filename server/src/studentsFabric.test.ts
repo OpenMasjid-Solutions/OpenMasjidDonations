@@ -112,10 +112,11 @@ const FOUND = {
     id: 'fam_x1',
     label: 'Ismail family',
     students: [
-      { studentId: 'stu_1', studentCode: 'YUS1234', firstName: 'Yusuf', lastInitial: 'I', balanceCents: 20000 },
-      { studentId: 'stu_2', studentCode: 'MAR8802', firstName: 'Maryam', lastInitial: 'I', balanceCents: 15000 },
+      { studentId: 'stu_1', studentCode: 'YUS1234', firstName: 'Yusuf', lastInitial: 'I', balanceCents: 20000, creditCents: 0 },
+      { studentId: 'stu_2', studentCode: 'MAR8802', firstName: 'Maryam', lastInitial: 'I', balanceCents: 15000, creditCents: 0 },
     ],
     balanceCents: 35000,
+    creditCents: 0,
     currency: 'usd',
     openInvoices: [{ id: 'inv_9', studentId: 'stu_2', label: 'Tuition — Jul 2026', dueDate: '2026-07-01', balanceCents: 15000 }],
   },
@@ -139,13 +140,62 @@ test('lookup parses the matched child, the per-child balances and the per-child 
   assert.equal(r.family.id, 'fam_x1');
   assert.equal(r.family.balanceCents, 35000, 'the household total is what "pay full balance" charges');
   assert.equal(r.family.currency, 'USD');
+  assert.equal(r.family.creditCents, 0);
   assert.deepEqual(r.family.students, [
-    { studentId: 'stu_1', firstName: 'Yusuf', lastInitial: 'I', balanceCents: 20000 },
-    { studentId: 'stu_2', firstName: 'Maryam', lastInitial: 'I', balanceCents: 15000 },
+    { studentId: 'stu_1', firstName: 'Yusuf', lastInitial: 'I', balanceCents: 20000, creditCents: 0 },
+    { studentId: 'stu_2', firstName: 'Maryam', lastInitial: 'I', balanceCents: 15000, creditCents: 0 },
   ]);
   assert.deepEqual(r.family.openInvoices, [
     { id: 'inv_9', studentId: 'stu_2', label: 'Tuition — Jul 2026', dueDate: '2026-07-01', balanceCents: 15000 },
   ]);
+});
+
+test('lookup parses a family that has PAID AHEAD — credit at all three levels (§11.0a)', async () => {
+  // The case a balance alone cannot express: nothing due, but money on the account. Once an
+  // advance settles its invoice, openInvoices is empty and credit is the only signal left.
+  reply({
+    v: 2,
+    found: true,
+    matchedStudent: { id: 'stu_1', balanceCents: 0, creditCents: 5000 },
+    family: {
+      id: 'fam_x1',
+      label: 'Ismail family',
+      students: [
+        { studentId: 'stu_1', studentCode: 'YUS1234', firstName: 'Yusuf', lastInitial: 'I', balanceCents: 0, creditCents: 5000 },
+        { studentId: 'stu_2', studentCode: 'MAR8802', firstName: 'Maryam', lastInitial: 'I', balanceCents: 0, creditCents: 0 },
+      ],
+      balanceCents: 0,
+      creditCents: 5000,
+      currency: 'usd',
+      openInvoices: [],
+    },
+  });
+  const r = await students.studentsLookup('YUS1234');
+  assert.equal(r.status, 'found');
+  if (r.status !== 'found') return;
+  assert.equal(r.family.balanceCents, 0);
+  assert.equal(r.family.creditCents, 5000, 'household credit');
+  assert.equal(r.family.students[0].creditCents, 5000, 'the child who is ahead');
+  assert.equal(r.family.students[1].creditCents, 0);
+  assert.deepEqual(r.family.openInvoices, [], 'nothing open — credit is the only record');
+  // The pair is complementary: never both non-zero on the same subject.
+  for (const st of r.family.students) assert.ok(st.balanceCents === 0 || st.creditCents === 0);
+});
+
+test('lookup: a credit from an un-upgraded Students reads as zero, never NaN', async () => {
+  reply({
+    v: 2,
+    found: true,
+    matchedStudent: { id: 'stu_1', balanceCents: 20000 },
+    family: {
+      id: 'fam_x1', label: 'F', balanceCents: 20000, currency: 'usd',
+      students: [{ studentId: 'stu_1', firstName: 'Y', lastInitial: 'I', balanceCents: 20000 }],
+      openInvoices: [],
+    },
+  });
+  const r = await students.studentsLookup('YUS1234');
+  assert.equal(r.status === 'found' && r.family.creditCents, 0);
+  assert.equal(r.status === 'found' && r.family.students[0].creditCents, 0);
 });
 
 test('lookup: found:false is uniform not-found', async () => {
@@ -174,12 +224,35 @@ test('lookup: a network fault fails soft', async () => {
 });
 
 // ── the money path: unchanged, still v1 ─────────────────────────────────────
-test('info still speaks v:1 (unchanged at v2)', async () => {
-  reply({ v: 2, enabled: true, schoolName: 'An-Noor', currency: 'usd', tagline: 'Pay with your Student ID' });
+test('info still speaks v:1, and picks up allowAdvance + minAmountCents (§11.0a)', async () => {
+  reply({ v: 2, enabled: true, schoolName: 'An-Noor', currency: 'usd', tagline: 'Pay with your Student ID', allowAdvance: true, minAmountCents: 100 });
   const r = await students.studentsInfo(true);
   assert.equal(r.available && r.info.schoolName, 'An-Noor');
   assert.equal(r.available && r.info.currency, 'USD');
+  assert.equal(r.available && r.info.allowAdvance, true);
+  assert.equal(r.available && r.info.minAmountCents, 100);
   assert.deepEqual(calls[0].body, { v: 1 });
+});
+
+test('info from an un-upgraded Students: no advance, but still a real floor', async () => {
+  // Advertised rather than assumed — a Students without §11.0a must not have advance payments
+  // inferred for it, but we still refuse to start a penny charge.
+  reply({ v: 2, enabled: true, schoolName: 'Old School', currency: 'gbp', tagline: 'x' });
+  const r = await students.studentsInfo(true);
+  assert.equal(r.available && r.info.allowAdvance, false, 'never assumed');
+  assert.equal(r.available && r.info.minAmountCents, students.MIN_TUITION_CENTS);
+});
+
+test('info: a floor advertised below ours is raised to ours (no sub-$1 charges)', async () => {
+  reply({ v: 2, enabled: true, schoolName: 'S', currency: 'usd', tagline: 'x', allowAdvance: true, minAmountCents: 25 });
+  const r = await students.studentsInfo(true);
+  assert.equal(r.available && r.info.minAmountCents, students.MIN_TUITION_CENTS, 'we take the stricter of the two');
+});
+
+test('info: a floor advertised ABOVE ours is honoured as-is', async () => {
+  reply({ v: 2, enabled: true, schoolName: 'S', currency: 'usd', tagline: 'x', allowAdvance: true, minAmountCents: 500 });
+  const r = await students.studentsInfo(true);
+  assert.equal(r.available && r.info.minAmountCents, 500);
 });
 
 test('record-payment sends the per-child split (what actually books the ledger) on v:1', async () => {

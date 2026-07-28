@@ -207,6 +207,16 @@ contract: `students/billing` **v2** in `OpenMasjidStudentManager/docs/FABRIC_BIL
   unit-tested) recomputes the amount **and** the familyId server-side, so a crafted request can't
   attribute a charge to an arbitrary family or pay a tampered amount. The typed Student ID is
   body-only, never in a URL/log/metadata.
+- **Advance payments + credit (Students 0.41.0, §11.0a).** `info` advertises `allowAdvance` +
+  `minAmountCents`; `lookup` reports `creditCents` for the household, the matched child and each
+  sibling. The balance step shows *balance due* / *in credit* / *nothing due* rather than a bare zero
+  (once an advance settles its invoice, credit is the only record left — `openInvoices` is empty), and
+  offers a third **"Another amount"** mode. That typed amount is the one figure a parent names: it's
+  safe because the session still fixes the family, the child and the currency, and any surplus becomes
+  that family's own credit. The **floor** is `max(school's minAmountCents, MIN_TUITION_CENTS = $1)`,
+  applied to every path — a provider advertising 25¢ can't drag us below a pound/dollar. A part payment
+  within a real balance needs no `allowAdvance`; only money above it does. `allowAdvance` is advertised,
+  never assumed, so a pre-0.41.0 Students keeps today's behaviour exactly.
 - **Separate ledger (`student_payments` table).** Tuition payments are **not donations** — a distinct
   table, never joined into `metrics()`/`listDonations()`/`raisedForCampaign()`/the CSV, so they are
   excluded from every donation total, goal and year-end letter by construction (locked by a test).

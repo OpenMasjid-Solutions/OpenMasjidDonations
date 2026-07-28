@@ -29,6 +29,8 @@ function session(over: Partial<TuitionSession> = {}): TuitionSession {
       { id: 'inv_9', studentId: 'stu_2', balanceCents: 15000 },
       { id: 'inv_10', studentId: 'stu_1', balanceCents: 20000 },
     ],
+    allowAdvance: true,
+    minAmountCents: 100, // the school's advertised floor ($1)
     ...over,
   });
 }
@@ -116,6 +118,80 @@ test('an invoice id NOT in the session is rejected (no arbitrary/tampered target
 
 test('empty invoice selection is rejected', () => {
   assert.deepEqual(computeTuitionAmount(session(), { kind: 'invoices', invoiceIds: [] }), { error: 'no-selection' });
+});
+
+// ── Advance / part payments + the floor (§11.0a, Students 0.41.0) ───────────
+test('an advance payment is allowed with NOTHING due (that is the point)', () => {
+  const s = session({ balanceCents: 0, invoices: [] });
+  // "full" has nothing to charge, but a typed amount must still go through: money beyond the
+  // open invoices becomes the child's credit, which their next invoice absorbs.
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'full' }), { error: 'nothing-due' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 50000 }), {
+    amountCents: 50000,
+    allocations: null,
+    // No split: Students covers any open invoices oldest-first and parks the rest as the
+    // matched child's credit — the child whose ID the parent typed.
+    students: null,
+  });
+});
+
+test('an advance payment on TOP of a balance is allowed (overpaying builds credit)', () => {
+  const s = session();
+  const r = computeTuitionAmount(s, { kind: 'amount', amountCents: 100000 }); // > the 35000 owed
+  assert.deepEqual(r, { amountCents: 100000, allocations: null, students: null });
+});
+
+test('the floor is enforced on a typed amount, and quoted from the SESSION not the client', () => {
+  const s = session({ minAmountCents: 100 });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 99 }), { error: 'below-min' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 100 }), { amountCents: 100, allocations: null, students: null });
+  // A school advertising a higher floor is honoured too.
+  const strict = session({ minAmountCents: 500 });
+  assert.deepEqual(computeTuitionAmount(strict, { kind: 'amount', amountCents: 400 }), { error: 'below-min' });
+});
+
+test('the floor also covers invoice-derived charges (one floor on every surface)', () => {
+  // MIN_PAYMENT_CENTS is "the smallest card payment a parent may start, wherever they start
+  // it" — so a 60¢ month can't be taken here either, exactly as the school's own portal.
+  const s = session({ balanceCents: 60, invoices: [{ id: 'inv_tiny', studentId: 'stu_1', balanceCents: 60 }] });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'invoices', invoiceIds: ['inv_tiny'] }), { error: 'below-min' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'full' }), { error: 'below-min' });
+});
+
+test('without allowAdvance a PART payment is still fine — only money ABOVE the balance is refused', () => {
+  // Paying part of a real balance isn't paying ahead, it's settling what's already owed, so it
+  // needs no permission. Only the excess does.
+  const s = session({ allowAdvance: false }); // balance 35000
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 5000 }), { amountCents: 5000, allocations: null, students: null });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 35000 }), { amountCents: 35000, allocations: null, students: null });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 35001 }), { error: 'advance-not-allowed' });
+  // With nothing due, EVERY amount is an advance — so all of them need the permission.
+  const square = session({ allowAdvance: false, balanceCents: 0, invoices: [] });
+  assert.deepEqual(computeTuitionAmount(square, { kind: 'amount', amountCents: 5000 }), { error: 'advance-not-allowed' });
+  // …and the normal paths still work.
+  assert.equal('amountCents' in computeTuitionAmount(s, { kind: 'full' }), true);
+});
+
+test('a school advertising a floor UNDER a pound/dollar cannot drag ours below it', () => {
+  // The floor is the stricter of theirs and ours: no sub-$1 card charge, whatever `info` says.
+  const s = session({ minAmountCents: 50 });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 50 }), { error: 'below-min' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 99 }), { error: 'below-min' });
+  assert.equal('amountCents' in computeTuitionAmount(s, { kind: 'amount', amountCents: 100 }), true);
+});
+
+test('a typed amount must be a positive whole number of minor units, and is capped', () => {
+  const s = session();
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 0 }), { error: 'bad-amount' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: -5000 }), { error: 'bad-amount' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 12.5 }), { error: 'bad-amount' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 100_000_000 }), { error: 'too-large' });
+});
+
+test('a session with no advertised floor still gets one (never a penny charge)', () => {
+  const s = session({ minAmountCents: 0 }); // an un-upgraded Students advertised nothing
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 50 }), { error: 'below-min' });
+  assert.equal('amountCents' in computeTuitionAmount(s, { kind: 'amount', amountCents: 100 }), true);
 });
 
 test('the amount comes ONLY from the session — a client cannot inflate it', () => {

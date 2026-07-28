@@ -24,6 +24,7 @@ import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabr
 import { renderReceipt, type ReceiptContext } from './email';
 import {
   billingConfigured,
+  MIN_TUITION_CENTS,
   studentsInfo,
   studentsIdentify,
   studentsLookup,
@@ -32,6 +33,7 @@ import {
   createTuitionSession,
   getTuitionSession,
   computeTuitionAmount,
+  type TuitionSelection,
 } from './students';
 import { csvCell } from './csv';
 import { LoginLimiter } from './rateLimit';
@@ -922,17 +924,21 @@ async function main(): Promise<void> {
     // whether it's set up. Unavailable / disabled → the donor page shows a friendly notice
     // instead of the Student ID form (fail-soft, contract §11.1). Amounts are in the SCHOOL's
     // currency (from Students), not the masjid's donation currency.
-    let students: { available: boolean; schoolName: string; tagline: string } | undefined;
+    let students: { available: boolean; schoolName: string; tagline: string; allowAdvance: boolean; minAmount: number } | undefined;
     let currency = cur();
     if (c.type === 'tuition') {
       const info = await studentsInfo();
       const available = info.available && info.info.enabled;
+      if (available && info.available && info.info.currency) currency = info.info.currency;
       students = {
         available,
         schoolName: available ? info.info.schoolName : '',
         tagline: available ? info.info.tagline : '',
+        // §11.0a: does this school take money with nothing due, and what's the smallest card
+        // payment it allows? The donor page needs both to render the amount field honestly.
+        allowAdvance: available ? info.info.allowAdvance : false,
+        minAmount: toMajor(available ? info.info.minAmountCents : MIN_TUITION_CENTS, currency),
       };
-      if (available && info.available && info.info.currency) currency = info.info.currency;
     }
     return {
       slug: c.slug,
@@ -1284,6 +1290,11 @@ async function main(): Promise<void> {
     const fam = r.family;
     const ccy = fam.currency || cur();
     const dec = (minor: number) => toMajor(minor, ccy);
+    // Advance-payment terms come from `info` (cached), captured into the session so the pay
+    // step reads the SERVER's copy of both (§11.0a).
+    const inf = await studentsInfo();
+    const allowAdvance = inf.available && inf.info.allowAdvance;
+    const minAmountCents = inf.available ? inf.info.minAmountCents : MIN_TUITION_CENTS;
     const session = createTuitionSession({
       campaignId: c.id,
       familyId: fam.id,
@@ -1294,6 +1305,8 @@ async function main(): Promise<void> {
       // Keep each invoice's child: it's what lets the pay step tell Students WHOSE bill the
       // parent's picked months are, without ever handing a studentId to the browser.
       invoices: fam.openInvoices.map((i) => ({ id: i.id, studentId: i.studentId, balanceCents: i.balanceCents })),
+      allowAdvance,
+      minAmountCents,
     });
     // v2 bills are per child, so each open invoice names the child it belongs to. Resolve that
     // to a display name HERE — the studentIds stay server-side, in the session.
@@ -1307,13 +1320,17 @@ async function main(): Promise<void> {
         family: {
           label: fam.label,
           // Per-child balances are new at v2 (one bill per child); the household total below
-          // is still what "pay the full balance" charges.
+          // is still what "pay the full balance" charges. `credit` is what a child has paid
+          // ahead (§11.0a) — without it a derived balance of 0 can't be told apart from
+          // "square", and once an advance settles its invoice it's the only signal left.
           students: fam.students.map((st) => ({
             firstName: st.firstName,
             lastInitial: st.lastInitial,
             balance: dec(st.balanceCents),
+            credit: dec(st.creditCents),
           })),
           balance: dec(fam.balanceCents),
+          credit: dec(fam.creditCents),
           openInvoices: fam.openInvoices.map((i) => ({
             id: i.id,
             label: i.label,
@@ -1326,13 +1343,17 @@ async function main(): Promise<void> {
     };
   });
 
-  // Start a tuition payment. The client sends the session id + which invoices to pay (or
-  // "full") — NEVER an amount or a family id; we recompute both server-side from the session.
+  // Start a tuition payment. The client sends the session id + WHAT to pay: "full", a picked
+  // set of months, or an advance amount (§11.0a — the one case a parent names the figure, since
+  // there's no invoice to derive it from). The family, the child, the currency, the floor and
+  // whether advance is allowed at all still come only from the server-side session, and an
+  // advance can only ever credit the family this session looked up.
   const StudentsIntentBody = z.object({
     session: z.string().min(1).max(64),
     selection: z.union([
       z.object({ kind: z.literal('full') }),
       z.object({ kind: z.literal('invoices'), invoiceIds: z.array(z.string().min(1).max(128)).min(1).max(60) }),
+      z.object({ kind: z.literal('amount'), amount: z.number().positive() }), // major units
     ]),
   });
   app.post('/api/public/campaign/:slug/students/intent', async (req, reply) => {
@@ -1349,14 +1370,31 @@ async function main(): Promise<void> {
     if (!session || session.campaignId !== c.id) {
       return reply.code(400).send({ error: 'Your session expired — please look up your balance again.' });
     }
-    const amt = computeTuitionAmount(session, parsed.data.selection);
-    if ('error' in amt) {
-      return reply.code(400).send({ error: amt.error === 'nothing-due' ? 'There’s nothing left to pay on that selection.' : 'Please choose what to pay.' });
-    }
     const currency = session.currency;
+    // A typed amount arrives in major units like the donation flow; convert with the same
+    // helper so the currency's minor-unit rules (and zero-decimal currencies) are applied once.
+    const sel: TuitionSelection =
+      parsed.data.selection.kind === 'amount'
+        ? { kind: 'amount', amountCents: toMinor(parsed.data.selection.amount, currency) }
+        : parsed.data.selection;
+    const amt = computeTuitionAmount(session, sel);
+    if ('error' in amt) {
+      const minLabel = formatMoney(session.minAmountCents, currency);
+      const msg =
+        amt.error === 'nothing-due'
+          ? 'There’s nothing left to pay on that selection.'
+          : amt.error === 'below-min'
+            ? `The smallest payment we can take is ${minLabel}.`
+            : amt.error === 'too-large'
+              ? 'That amount is too large.'
+              : amt.error === 'advance-not-allowed'
+                ? 'This school isn’t taking payments in advance right now — you can pay up to the balance due.'
+                : amt.error === 'bad-amount'
+                  ? 'Please enter a valid amount.'
+                  : 'Please choose what to pay.';
+      return reply.code(400).send({ error: msg });
+    }
     const chargeMinor = amt.amountCents;
-    if (!Number.isInteger(chargeMinor) || chargeMinor < 50) return reply.code(400).send({ error: 'That amount is too small to charge.' });
-    if (chargeMinor > 99_999_999) return reply.code(400).send({ error: 'That amount is too large.' });
     // §11.3 metadata — the reconciliation discriminator + the family id (REQUIRED). NEVER the
     // Student ID or a child's name (§11.3 bans both from metadata/descriptions/URLs outright,
     // since metadata shows up in Stripe dashboards and exports). Description = family label.
