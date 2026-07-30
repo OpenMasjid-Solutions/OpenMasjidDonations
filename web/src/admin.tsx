@@ -1200,7 +1200,7 @@ const tyAccent = (a: string) => (/^#[0-9a-fA-F]{3,8}$/.test(a.trim()) ? a.trim()
 
 /** Live preview of the thank-you screen, with sample variable values filled in. */
 function ThankYouPreview({ value, masjidName, currency }: { value: ThankYou; masjidName: string; currency: string }) {
-  const vars = { name: 'Aisha', amount: money(50, currency || 'USD'), campaign: 'General Fund', masjid: masjidName || 'Your Masjid' };
+  const vars = { name: 'Yusuf', amount: money(50, currency || 'USD'), campaign: 'General Fund', masjid: masjidName || 'Your Masjid' };
   const bg = safeImg(value.backgroundImage);
   const accent = tyAccent(value.accent);
   const readable = useReadableTheme(bg || undefined, 'dark');
@@ -1268,7 +1268,7 @@ function ThankYouCard({ masjidName, currency }: { masjidName: string; currency: 
 /** A light, Stripe-style preview of the emailed receipt (sample values; the amount/date/method/
  *  fund render in a details table SEPARATE from the paragraph, with the masjid logo + contact). */
 function EmailReceiptPreview({ value, masjid, currency }: { value: EmailReceipt; masjid: MasjidProfile; currency: string }) {
-  const vars = { name: 'Aisha', amount: money(50, currency || 'USD'), campaign: 'General Fund', masjid: masjid.name || 'Your Masjid' };
+  const vars = { name: 'Yusuf', amount: money(50, currency || 'USD'), campaign: 'General Fund', masjid: masjid.name || 'Your Masjid' };
   const accent = tyAccent(value.accent) || '#1FA37A';
   const logo = safeImg(masjid.logo);
   const rowSty = { display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderTop: '1px solid #eef1f3', fontSize: '12px' } as const;
