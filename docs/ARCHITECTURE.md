@@ -207,6 +207,18 @@ contract: `students/billing` **v2** in `OpenMasjidStudentManager/docs/FABRIC_BIL
   unit-tested) recomputes the amount **and** the familyId server-side, so a crafted request can't
   attribute a charge to an arbitrary family or pay a tampered amount. The typed Student ID is
   body-only, never in a URL/log/metadata.
+- **Itemised bills (Students 0.43.0, §11.0b).** `lookup`'s open invoices now carry `items[]` — the
+  lines a bill is made of ($200 tuition + a $50 book fee) — and `record-payment` takes `lines[]`, the
+  ids the parent ticked. The pick list groups lines under the bill label, offers only lines with a
+  balance (settled lines read "already paid", a bursary reads "credit applied"), starts fully ticked so
+  paying the lot stays one tap, and totals live on the pay button. `lines` goes on the wire **alone**:
+  Students resolves one breakdown in the order `lines → allocations → students → derive`, and a line
+  already resolves to its child. Itemisation is all-or-nothing **per family** (`itemised`), because that
+  chain can't express a mixture of lines and whole bills in one call; an invoice whose lines lack ids or
+  don't sum to the bill drops back to a single row. Ticked lines are persisted
+  (`student_payments.payment_lines`) so an outbox retry settles the same line. Tuition stays out of
+  donation reporting by construction — every donation query reads `FROM donations`, and itemising only
+  added columns to `student_payments`.
 - **Advance payments + credit (Students 0.41.0, §11.0a).** `info` advertises `allowAdvance` +
   `minAmountCents`; `lookup` reports `creditCents` for the household, the matched child and each
   sibling. The balance step shows *balance due* / *in credit* / *nothing due* rather than a bare zero

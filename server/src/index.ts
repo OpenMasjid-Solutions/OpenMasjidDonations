@@ -1219,6 +1219,13 @@ async function main(): Promise<void> {
       const s = JSON.parse(sp.studentsSplit || 'null');
       if (Array.isArray(s) && s.length) studentsSplit = s;
     } catch { /* no split — Students derives it */ }
+    // The ticked bill lines (§11.0b). Present only for an itemised selection; when it is, it's
+    // the ONLY breakdown that goes on the wire (recordStudentPayment enforces that).
+    let lines: { itemId: string; amountCents: number }[] | undefined;
+    try {
+      const l = JSON.parse(sp.paymentLines || 'null');
+      if (Array.isArray(l) && l.length) lines = l;
+    } catch { /* not an itemised payment */ }
     const res = await recordStudentPayment({
       idempotencyKey: pi, // = the PaymentIntent id → Students dedups replays
       familyId: sp.familyId,
@@ -1229,6 +1236,7 @@ async function main(): Promise<void> {
       externalRef: { stripePaymentIntentId: pi, stripeChargeId: retrieved.chargeId || undefined },
       allocations,
       students: studentsSplit,
+      lines,
     });
     if (res.status === 'recorded') store.setStudentRecordStatus(pi, 'recorded', res.paymentId);
     else if (res.status === 'rejected') {
@@ -1295,6 +1303,10 @@ async function main(): Promise<void> {
     const inf = await studentsInfo();
     const allowAdvance = inf.available && inf.info.allowAdvance;
     const minAmountCents = inf.available ? inf.info.minAmountCents : MIN_TUITION_CENTS;
+    // Itemised (§11.0b) only when EVERY open bill came with usable lines — the provider honours
+    // `lines` OR `allocations`, never both, so a selection mixing lines from one bill with a whole
+    // other bill can't be expressed in one call. All-or-nothing avoids ever needing to.
+    const itemised = fam.openInvoices.length > 0 && fam.openInvoices.every((i) => i.items.length > 0);
     const session = createTuitionSession({
       campaignId: c.id,
       familyId: fam.id,
@@ -1303,8 +1315,15 @@ async function main(): Promise<void> {
       currency: ccy,
       balanceCents: fam.balanceCents,
       // Keep each invoice's child: it's what lets the pay step tell Students WHOSE bill the
-      // parent's picked months are, without ever handing a studentId to the browser.
-      invoices: fam.openInvoices.map((i) => ({ id: i.id, studentId: i.studentId, balanceCents: i.balanceCents })),
+      // parent's picked months are, without ever handing a studentId to the browser. The lines
+      // (§11.0b) are held with their amounts so a ticked line's value comes from here.
+      invoices: fam.openInvoices.map((i) => ({
+        id: i.id,
+        studentId: i.studentId,
+        balanceCents: i.balanceCents,
+        items: i.items.map((it) => ({ id: it.id, balanceCents: it.balanceCents })),
+      })),
+      itemised,
       allowAdvance,
       minAmountCents,
     });
@@ -1331,12 +1350,27 @@ async function main(): Promise<void> {
           })),
           balance: dec(fam.balanceCents),
           credit: dec(fam.creditCents),
+          // Whether every bill is itemised, so the donor page and this server agree on which
+          // selection the pay step will accept.
+          itemised,
           openInvoices: fam.openInvoices.map((i) => ({
             id: i.id,
             label: i.label,
             student: nameById.get(i.studentId) ?? '',
             dueDate: i.dueDate,
             amount: dec(i.balanceCents),
+            // The lines that make up this bill (§11.0b) — display data plus the item id the pay
+            // step needs. `payable` is the only thing that decides whether it can be ticked: a
+            // settled line and a credit line (bursary/correction, already deducted above) both
+            // report a zero balance and are shown for information, never charged.
+            items: i.items.map((it) => ({
+              id: it.id,
+              label: it.label,
+              kind: it.kind,
+              amount: dec(it.balanceCents),
+              billed: dec(it.amountCents),
+              payable: it.balanceCents > 0,
+            })),
           })),
         },
       },
@@ -1353,6 +1387,7 @@ async function main(): Promise<void> {
     selection: z.union([
       z.object({ kind: z.literal('full') }),
       z.object({ kind: z.literal('invoices'), invoiceIds: z.array(z.string().min(1).max(128)).min(1).max(60) }),
+      z.object({ kind: z.literal('items'), itemIds: z.array(z.string().min(1).max(128)).min(1).max(200) }),
       z.object({ kind: z.literal('amount'), amount: z.number().positive() }), // major units
     ]),
   });
@@ -1391,7 +1426,9 @@ async function main(): Promise<void> {
                 ? 'This school isn’t taking payments in advance right now — you can pay up to the balance due.'
                 : amt.error === 'bad-amount'
                   ? 'Please enter a valid amount.'
-                  : 'Please choose what to pay.';
+                  : amt.error === 'unknown-item' || amt.error === 'not-itemised'
+                    ? 'Your balance changed — please look it up again.'
+                    : 'Please choose what to pay.';
       return reply.code(400).send({ error: msg });
     }
     const chargeMinor = amt.amountCents;
@@ -1435,9 +1472,10 @@ async function main(): Promise<void> {
       amount: chargeMinor,
       currency,
       allocations: amt.allocations ? JSON.stringify(amt.allocations) : '',
-      // Both splits are recomputed server-side from the session, then stored so the outbox
+      // Every breakdown is recomputed server-side from the session, then stored so the outbox
       // retry books the payment exactly as this first attempt would have.
       studentsSplit: amt.students ? JSON.stringify(amt.students) : '',
+      paymentLines: amt.lines ? JSON.stringify(amt.lines) : '',
     });
     return { data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency } };
   });

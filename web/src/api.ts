@@ -404,6 +404,18 @@ export const confirmDonation = (body: { paymentIntentId: string; slug: string; t
 // ── Tuition (Students billing) — the `tuition` campaign flow ─────────────────
 // Contract students/billing v2: the parent types a Student ID (no PIN), `identify` echoes the
 // child's name back for confirmation, and only then does `lookup` reveal the balances.
+/** One line of a bill (§11.0b) — e.g. "Monthly tuition" $200 and "Book fee" $50 under the same
+ *  February bill. `payable` false = already settled, or a credit line (a bursary or correction,
+ *  whose value is already deducted from the lines above): shown for information, never charged. */
+export interface StudentInvoiceItemView {
+  id: string;
+  label: string;
+  /** `tuition` | `charge` | `credit`, but an OPEN set — render an unfamiliar kind as a plain line. */
+  kind: string;
+  amount: number; // what's left on this line, major units
+  billed: number; // what it was billed at, major units
+  payable: boolean;
+}
 /** One open invoice a parent can choose to pay (amount in major units). */
 export interface StudentInvoiceView {
   id: string;
@@ -412,6 +424,8 @@ export interface StudentInvoiceView {
   student: string;
   dueDate: string;
   amount: number;
+  /** The lines this bill is made of. Empty (or a single line) = render it as one row, as before. */
+  items: StudentInvoiceItemView[];
 }
 /** Who a Student ID belongs to: a first name + last initial and nothing else — no balance, no
  *  family, no ids. This confirmation step is what replaced the PIN (contract §11.0). */
@@ -442,6 +456,10 @@ export interface StudentLookupResult {
      *  whether a family is square or ahead, and once an advance settles its invoice this is
      *  the only signal left (openInvoices is empty by then). */
     credit: number;
+    /** True when EVERY open bill arrived itemised, so the pay step accepts a line selection.
+     *  Decided for the whole family: the provider honours ticked lines OR whole invoices, never
+     *  a mixture, so the choice can't be made per bill. */
+    itemised: boolean;
     openInvoices: StudentInvoiceView[];
   };
 }
@@ -465,6 +483,8 @@ export interface TuitionConfirmResponse {
 export type TuitionSelection =
   | { kind: 'full' }
   | { kind: 'invoices'; invoiceIds: string[] }
+  /** The exact bill lines ticked (§11.0b) — used whenever the family's bills are itemised. */
+  | { kind: 'items'; itemIds: string[] }
   | { kind: 'amount'; amount: number };
 
 /** Step 1: whose Student ID is this? Ask before showing any balance (contract §11.0). */

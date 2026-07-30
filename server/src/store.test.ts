@@ -80,7 +80,7 @@ test('tuition (Students-billing) payments are EXCLUDED from every donation total
   // A tuition payment (must NOT count as a donation anywhere).
   s.createStudentPayment({
     campaignId: camp.id, stripeAccountId: 'acct_test', paymentIntentId: 'pi_tui_1',
-    familyId: 'fam_x1', studentId: 'stu_1', familyLabel: 'Ismail family', amount: 35000, currency: 'USD', allocations: '', studentsSplit: '',
+    familyId: 'fam_x1', studentId: 'stu_1', familyLabel: 'Ismail family', amount: 35000, currency: 'USD', allocations: '', studentsSplit: '', paymentLines: '',
   });
   s.markStudentPaymentPaid('pi_tui_1', 'succeeded', new Date().toISOString());
   const m = s.metrics();
@@ -99,6 +99,7 @@ test('student payment record flow: outbox lists only pending-succeeded; status i
     familyId: 'fam_y', studentId: '', familyLabel: 'Y family', amount: 12000, currency: 'GBP',
     allocations: '[{"invoiceId":"inv_9","amountCents":12000}]',
     studentsSplit: '[{"studentId":"stu_2","amountCents":12000}]',
+    paymentLines: '[{"itemId":"iti_book","amountCents":12000}]',
   });
   assert.equal(s.listPendingStudentRecords().length, 0, 'not succeeded yet → not in the outbox');
   s.markStudentPaymentPaid('pi_tui_2', 'succeeded', new Date().toISOString());
@@ -110,12 +111,19 @@ test('student payment record flow: outbox lists only pending-succeeded; status i
     '[{"studentId":"stu_2","amountCents":12000}]',
     'the split is durable, not recomputed at retry time',
   );
+  // Same for the ticked bill lines (§11.0b): a retry must settle the line the parent actually
+  // chose, not re-derive onto whatever is oldest by then.
+  assert.equal(
+    s.listPendingStudentRecords()[0].paymentLines,
+    '[{"itemId":"iti_book","amountCents":12000}]',
+    'the ticked lines are durable too',
+  );
   s.setStudentRecordStatus('pi_tui_2', 'recorded', 'pay_71');
   assert.equal(s.listPendingStudentRecords().length, 0, 'recorded → out of the outbox');
   assert.equal(s.getStudentPaymentByPI('pi_tui_2')?.studentsPaymentId, 'pay_71');
 });
 
-test('upgrade: an existing student_payments table gains students_split, keeping its rows', () => {
+test('upgrade: an existing student_payments table gains its new columns, keeping its rows', () => {
   // The real upgrade an installed masjid hits. CREATE TABLE IF NOT EXISTS won't touch a table
   // that already exists, so the column has to arrive via ensureColumn — and a tuition payment
   // already queued in the outbox has to survive and stay pushable.
@@ -156,6 +164,7 @@ test('upgrade: an existing student_payments table gains students_split, keeping 
       assert.equal(got.amount, 9900);
       assert.equal(got.familyId, 'fam_old');
       assert.equal(got.studentsSplit, '', 'no split on a legacy row → Students derives it, as it always did');
+      assert.equal(got.paymentLines, '', 'no ticked lines on a legacy row either');
       // Still retryable, and a new row on the upgraded table can carry a split.
       assert.equal(s.listPendingStudentRecords().length, 1, 'the queued push is still in the outbox');
       s.createStudentPayment({
@@ -163,8 +172,10 @@ test('upgrade: an existing student_payments table gains students_split, keeping 
         familyId: 'fam_old', studentId: 'stu_old', familyLabel: 'Old family', amount: 5000, currency: 'GBP',
         allocations: '[{"invoiceId":"inv_1","amountCents":5000}]',
         studentsSplit: '[{"studentId":"stu_2","amountCents":5000}]',
+        paymentLines: '[{"itemId":"iti_1","amountCents":5000}]',
       });
       assert.equal(s.getStudentPaymentByPI('pi_new')?.studentsSplit, '[{"studentId":"stu_2","amountCents":5000}]');
+      assert.equal(s.getStudentPaymentByPI('pi_new')?.paymentLines, '[{"itemId":"iti_1","amountCents":5000}]');
     } finally {
       s.close();
     }

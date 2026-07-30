@@ -216,6 +216,9 @@ export interface StudentPayment {
   allocations: string;
   /** JSON `[{studentId, amountCents}]` — the per-child split; '' = let Students derive it. */
   studentsSplit: string;
+  /** JSON `[{itemId, amountCents}]` — the exact bill LINES the parent ticked (§11.0b); '' = none.
+   *  Stored so an outbox retry books the same lines the first attempt would have. */
+  paymentLines: string;
   payStatus: 'pending' | 'succeeded' | 'failed';
   recordStatus: 'pending' | 'recorded' | 'skipped';
   studentsPaymentId: string;
@@ -344,6 +347,7 @@ export class Store {
         currency TEXT NOT NULL,
         allocations TEXT NOT NULL DEFAULT '',
         students_split TEXT NOT NULL DEFAULT '',
+        payment_lines TEXT NOT NULL DEFAULT '',
         pay_status TEXT NOT NULL DEFAULT 'pending',
         record_status TEXT NOT NULL DEFAULT 'pending',
         students_payment_id TEXT NOT NULL DEFAULT '',
@@ -378,6 +382,9 @@ export class Store {
     // The per-child split of a tuition charge (students/billing v2). Legacy rows default to ''
     // = "no split", which is exactly how they were pushed to Students before this existed.
     this.ensureColumn('student_payments', 'students_split', "TEXT NOT NULL DEFAULT ''");
+    // The ticked bill lines of a tuition charge (students/billing §11.0b). Legacy rows default to
+    // '' = "no lines", exactly how they were pushed to Students before itemised bills existed.
+    this.ensureColumn('student_payments', 'payment_lines', "TEXT NOT NULL DEFAULT ''");
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
@@ -1063,6 +1070,7 @@ export class Store {
       currency: String(r.currency),
       allocations: String(r.allocations ?? ''),
       studentsSplit: String(r.students_split ?? ''),
+      paymentLines: String(r.payment_lines ?? ''),
       payStatus: String(r.pay_status) as StudentPayment['payStatus'],
       recordStatus: String(r.record_status) as StudentPayment['recordStatus'],
       studentsPaymentId: String(r.students_payment_id ?? ''),
@@ -1087,10 +1095,10 @@ export class Store {
       .prepare(
         `INSERT INTO student_payments
           (id, campaign_id, stripe_account_id, payment_intent_id, family_id, student_id, family_label,
-           amount, currency, allocations, students_split, pay_status, record_status, students_payment_id, created_at, occurred_at)
+           amount, currency, allocations, students_split, payment_lines, pay_status, record_status, students_payment_id, created_at, occurred_at)
          VALUES
           (@id, @campaignId, @stripeAccountId, @paymentIntentId, @familyId, @studentId, @familyLabel,
-           @amount, @currency, @allocations, @studentsSplit, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
+           @amount, @currency, @allocations, @studentsSplit, @paymentLines, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
       )
       .run(p);
     return p;

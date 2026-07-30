@@ -58,6 +58,42 @@ square, paid ahead, or "you can't pay here" — and a consumer had no way to tel
 - `allowAdvance` is **advertised, never assumed** — it stays `false` against a Students that predates
   0.41.0, so an old school doesn't silently start taking prepayments.
 
+## 0c. Additive since v2 — Students 0.43.0: ITEMISED BILLS (§11.0b)
+
+A bill was one label and one number, so the only offer we could make was "pay the whole $250". In
+practice a February bill is **$200 monthly tuition + a $50 book fee**, and parents routinely want to
+pay just the book fee.
+
+| Field | Where | What we do with it |
+| --- | --- | --- |
+| `items[]` | `lookup` → each `openInvoices[]` | `{ id, label, kind, amountCents, balanceCents }`. Render as **lines under the bill's label**. |
+| `lines[]` | `record-payment` request | `[{ itemId, amountCents }]` — exactly what the parent ticked. **Sent alone.** |
+
+- `kind` is `tuition` \| `charge` \| `credit` and is an **open set**: we keep whatever arrives and render
+  an unfamiliar kind as a plain line rather than dropping money off the screen.
+- `sum(items[].balanceCents) === invoice.balanceCents`, always — so the running total is just a sum, no
+  special case. A **credit** line (bursary, correction) reports `balanceCents: 0` because its value is
+  already deducted from the lines above: shown as information, never payable.
+- **Settled** lines are still listed at `balanceCents: 0` — shown as "already paid" on a part-paid bill.
+  Only lines with a balance are offered. A **single-line bill gets no itemised UI**, exactly as before.
+- **`lines` is sent alone.** Students resolves exactly one breakdown, in the order
+  `lines → allocations → students → derive-it-itself`, so sending more than one is dead weight at best
+  and a contradiction to debug at worst. `lines` supersedes `students[]` (a line already resolves to its
+  child) and it is *honoured stickily*: the line the parent chose stays settled when Students later
+  recomputes its allocations.
+- **Itemisation is decided per FAMILY, not per bill** (`itemised` in our lookup response): the provider
+  honours lines OR whole invoices, never a mixture, so a selection mixing a line from one bill with a
+  whole other bill couldn't be expressed in one call. Every bill itemised, or none.
+- We **distrust itemisation we can't charge from**: if any line lacks an `id`, or the lines don't add up
+  to the bill, that invoice falls back to a single un-itemised row. Better to pay it as one thing than
+  show a parent a breakdown that doesn't reconcile.
+- **`allocations[]` works from 0.43.0.** It was in the contract from v1 and silently ignored until now
+  (which is why we also send `students[]` on that path — see §11.0b and the v0.34.0 note below). It's a
+  lenient *hint*: it must sum to `amountCents`, but if a named bill can't absorb the ask — the office
+  took cash between our lookup and our record-payment — the remainder is recorded as ordinary money on
+  that child rather than rejected, because the card is already captured by then. `lines` is strict by
+  contrast, since we build it from ids Students just gave us.
+
 ## 0. What the parent sees (the required flow)
 
 A `tuition` campaign renders **exactly this**, nothing more:
@@ -78,7 +114,10 @@ A `tuition` campaign renders **exactly this**, nothing more:
    and the **open invoices** (one row per month/term, tagged with the child it's for).
 5. **Pay:** up to three choices —
    - **Pay the balance** (the whole household `balanceCents`), or
-   - **Choose months** — tick one or more invoices (e.g. one or two months) and pay just those, or
+   - **Choose what to pay** — tick what you're paying, with the running total on the button.
+     On itemised bills (§11.0b) the bill label becomes a heading and each **line** is tickable, so the
+     book fee can be paid without the month's tuition; a single-line bill is one row as before.
+     Everything starts ticked, so "pay the lot" stays one tap, or
    - **Another amount** — type any figure ≥ `minAmountCents` (a part payment, or money paid ahead).
      With **nothing due this is the only option**, and it is offered, not hidden.
    Card entry (Stripe Elements) appears for the chosen amount.

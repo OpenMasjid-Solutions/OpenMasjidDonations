@@ -146,7 +146,9 @@ test('lookup parses the matched child, the per-child balances and the per-child 
     { studentId: 'stu_2', firstName: 'Maryam', lastInitial: 'I', balanceCents: 15000, creditCents: 0 },
   ]);
   assert.deepEqual(r.family.openInvoices, [
-    { id: 'inv_9', studentId: 'stu_2', label: 'Tuition — Jul 2026', dueDate: '2026-07-01', balanceCents: 15000 },
+    // No `items` in this fixture (a pre-0.43.0 Students) → not itemised, pay the bill as one
+    // thing exactly as before.
+    { id: 'inv_9', studentId: 'stu_2', label: 'Tuition — Jul 2026', dueDate: '2026-07-01', balanceCents: 15000, items: [] },
   ]);
 });
 
@@ -196,6 +198,75 @@ test('lookup: a credit from an un-upgraded Students reads as zero, never NaN', a
   const r = await students.studentsLookup('YUS1234');
   assert.equal(r.status === 'found' && r.family.creditCents, 0);
   assert.equal(r.status === 'found' && r.family.students[0].creditCents, 0);
+});
+
+test('lookup parses ITEMISED bills — tuition + a one-off charge + a bursary (§11.0b)', async () => {
+  reply({
+    v: 2,
+    found: true,
+    matchedStudent: { id: 'stu_1', balanceCents: 25000, creditCents: 0 },
+    family: {
+      id: 'fam_x1', label: 'Ismail family', balanceCents: 25000, creditCents: 0, currency: 'usd',
+      students: [{ studentId: 'stu_1', firstName: 'Yusuf', lastInitial: 'I', balanceCents: 25000, creditCents: 0 }],
+      openInvoices: [{
+        id: 'inv_feb', studentId: 'stu_1', label: 'Tuition — Feb 2027', dueDate: '2027-02-01', balanceCents: 25000,
+        items: [
+          { id: 'iti_1', label: 'Monthly tuition', kind: 'tuition', amountCents: 20000, balanceCents: 20000 },
+          { id: 'iti_2', label: 'Book fee', kind: 'charge', amountCents: 5000, balanceCents: 5000 },
+          // A bursary is billed as a NEGATIVE amount — clamping it would render "Bursary $0.00".
+          { id: 'iti_3', label: 'Bursary', kind: 'credit', amountCents: -3000, balanceCents: 0 },
+        ],
+      }],
+    },
+  });
+  const r = await students.studentsLookup('YUS1234');
+  assert.equal(r.status, 'found');
+  if (r.status !== 'found') return;
+  const inv = r.family.openInvoices[0];
+  assert.equal(inv.items.length, 3, 'every line is kept, including the credit');
+  assert.deepEqual(inv.items.map((it) => it.kind), ['tuition', 'charge', 'credit']);
+  // The contract's guarantee, which is what lets us total whatever the parent ticks with no
+  // special case: the lines add up to the bill (the credit is already deducted above).
+  assert.equal(inv.items.reduce((s, it) => s + it.balanceCents, 0), inv.balanceCents);
+  assert.equal(inv.items[2].balanceCents, 0, 'a credit line is never payable');
+  assert.equal(inv.items[2].amountCents, -3000, 'a credit keeps its sign, so the bill can show the deduction');
+});
+
+test('lookup keeps an UNKNOWN item kind as a plain line rather than dropping money', async () => {
+  reply({
+    v: 2, found: true, matchedStudent: { id: 'stu_1', balanceCents: 5000 },
+    family: {
+      id: 'fam_x1', label: 'F', balanceCents: 5000, currency: 'usd',
+      students: [{ studentId: 'stu_1', firstName: 'Y', lastInitial: 'I', balanceCents: 5000 }],
+      openInvoices: [{ id: 'inv_1', studentId: 'stu_1', label: 'Feb', dueDate: '', balanceCents: 5000,
+        items: [{ id: 'iti_x', label: 'Trip deposit', kind: 'excursion', amountCents: 5000, balanceCents: 5000 }] }],
+    },
+  });
+  const r = await students.studentsLookup('YUS1234');
+  assert.equal(r.status === 'found' && r.family.openInvoices[0].items[0].kind, 'excursion', 'kind is an open set');
+  assert.equal(r.status === 'found' && r.family.openInvoices[0].items.length, 1);
+});
+
+test('lookup DISTRUSTS itemisation that cannot reconcile or be paid by id', async () => {
+  // Lines that don't add up to the bill, or one without an id, would let us show a breakdown we
+  // can't charge from — drop to a single un-itemised bill instead.
+  const bad = (items: unknown[]) => ({
+    v: 2, found: true, matchedStudent: { id: 'stu_1', balanceCents: 25000 },
+    family: {
+      id: 'fam_x1', label: 'F', balanceCents: 25000, currency: 'usd',
+      students: [{ studentId: 'stu_1', firstName: 'Y', lastInitial: 'I', balanceCents: 25000 }],
+      openInvoices: [{ id: 'inv_1', studentId: 'stu_1', label: 'Feb', dueDate: '', balanceCents: 25000, items }],
+    },
+  });
+  reply(bad([{ id: 'iti_1', label: 'Tuition', kind: 'tuition', amountCents: 20000, balanceCents: 20000 }])); // sums to 20000, not 25000
+  let r = await students.studentsLookup('YUS1234');
+  assert.deepEqual(r.status === 'found' ? r.family.openInvoices[0].items : 'x', [], 'mismatched sum → not itemised');
+  reply(bad([
+    { label: 'Tuition', kind: 'tuition', amountCents: 20000, balanceCents: 20000 }, // no id
+    { id: 'iti_2', label: 'Book fee', kind: 'charge', amountCents: 5000, balanceCents: 5000 },
+  ]));
+  r = await students.studentsLookup('YUS1234');
+  assert.deepEqual(r.status === 'found' ? r.family.openInvoices[0].items : 'x', [], 'a line with no id → not itemised');
 });
 
 test('lookup: found:false is uniform not-found', async () => {
@@ -288,6 +359,49 @@ test('record-payment sends the per-child split (what actually books the ledger) 
     // split from the family's oldest bills, landing the money on the wrong child.
     students: [{ studentId: 'stu_2', amountCents: 15000 }],
   });
+});
+
+test('record-payment sends ticked LINES ALONE — never alongside students or allocations', async () => {
+  // The provider resolves exactly one breakdown (lines → allocations → students → derive), so
+  // sending more than one is at best dead weight and at worst a contradiction to debug.
+  reply({ v: 2, recorded: true, paymentId: 'pay_90', duplicate: false });
+  const r = await students.recordStudentPayment({
+    idempotencyKey: 'pi_lines',
+    familyId: 'fam_x1',
+    studentId: 'stu_1',
+    amountCents: 5000,
+    currency: 'USD',
+    occurredAt: '2027-02-15T10:00:00Z',
+    externalRef: { stripePaymentIntentId: 'pi_lines' },
+    lines: [{ itemId: 'iti_2', amountCents: 5000 }],
+    // Deliberately passed too: they must be dropped in favour of `lines`.
+    allocations: [{ invoiceId: 'inv_feb', amountCents: 5000 }],
+    students: [{ studentId: 'stu_1', amountCents: 5000 }],
+  });
+  assert.deepEqual(r, { status: 'recorded', paymentId: 'pay_90', duplicate: false });
+  assert.deepEqual(calls[0].body.lines, [{ itemId: 'iti_2', amountCents: 5000 }]);
+  assert.ok(!('allocations' in calls[0].body), 'lines supersedes allocations');
+  assert.ok(!('students' in calls[0].body), 'lines supersedes students[]');
+  assert.equal(calls[0].body.v, 1, 'still the v1 money path');
+});
+
+test('record-payment: without lines, whole-invoice payments still send allocations + students', async () => {
+  // The pre-0.43.0 belt-and-braces path: `allocations` was ignored back then, so `students`
+  // is what stopped a picked month landing on a sibling. Harmless on 0.43.0+ (allocations wins).
+  reply({ v: 2, recorded: true, paymentId: 'pay_91', duplicate: false });
+  await students.recordStudentPayment({
+    idempotencyKey: 'pi_inv',
+    familyId: 'fam_x1',
+    amountCents: 15000,
+    currency: 'usd',
+    occurredAt: '2027-02-15T10:00:00Z',
+    externalRef: { stripePaymentIntentId: 'pi_inv' },
+    allocations: [{ invoiceId: 'inv_9', amountCents: 15000 }],
+    students: [{ studentId: 'stu_2', amountCents: 15000 }],
+  });
+  assert.deepEqual(calls[0].body.allocations, [{ invoiceId: 'inv_9', amountCents: 15000 }]);
+  assert.deepEqual(calls[0].body.students, [{ studentId: 'stu_2', amountCents: 15000 }]);
+  assert.ok(!('lines' in calls[0].body));
 });
 
 test('record-payment omits the split for a full balance (Students derives it)', async () => {

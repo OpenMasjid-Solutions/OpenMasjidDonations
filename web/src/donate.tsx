@@ -495,9 +495,18 @@ function ThankYou({ result, campaign }: { result: ConfirmResponse; campaign: Pub
 const childName = (st: { firstName: string; lastInitial: string }): string =>
   st.lastInitial ? `${st.firstName} ${st.lastInitial}.` : st.firstName;
 
-/** What to pay: the whole balance, particular months, or an amount the parent types (an
+/** What to pay: the whole balance, particular lines/months, or an amount the parent types (an
  *  advance or part payment — the only option when there's nothing due). */
 type PayMode = 'full' | 'pick' | 'amount';
+
+/** The tickable rows on the "choose what to pay" list. When a family's bills are itemised
+ *  (§11.0b) a row is one LINE of a bill — "Book fee", $50 — so a parent can pay the book fee
+ *  without the month's tuition. Otherwise a row is a whole bill, exactly as before. Settled and
+ *  credit lines are never rows: they're shown for information and can't be charged. */
+const payableRowKeys = (f: NonNullable<StudentLookupResult['family']>): string[] =>
+  f.itemised
+    ? f.openInvoices.flatMap((inv) => inv.items.filter((it) => it.payable).map((it) => it.id))
+    : f.openInvoices.map((inv) => inv.id);
 
 function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   const [code, setCode] = useState('');
@@ -533,13 +542,21 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   const minAmount = campaign.students?.minAmount || 1;
   const canAdvance = !!campaign.students?.allowAdvance;
   const typedAmount = Number.parseFloat(custom);
-  const selectedIds = fam ? fam.openInvoices.filter((i) => checked[i.id]).map((i) => i.id) : [];
+  // Every tickable row with its amount, whether that's a bill line or a whole bill. The amounts
+  // are only for the running total the parent sees — the server recomputes the charge from its
+  // own copy of the session, so a tampered figure here buys nothing.
+  const payRows: { key: string; amount: number }[] = !fam
+    ? []
+    : fam.itemised
+      ? fam.openInvoices.flatMap((inv) => inv.items.filter((it) => it.payable).map((it) => ({ key: it.id, amount: it.amount })))
+      : fam.openInvoices.map((inv) => ({ key: inv.id, amount: inv.amount }));
+  const pickedKeys = payRows.filter((r) => checked[r.key]).map((r) => r.key);
   const selectionAmount = !fam
     ? 0
     : mode === 'full'
       ? fam.balance
       : mode === 'pick'
-        ? fam.openInvoices.filter((i) => checked[i.id]).reduce((s, i) => s + i.amount, 0)
+        ? payRows.filter((r) => checked[r.key]).reduce((s, r) => s + r.amount, 0)
         : Number.isFinite(typedAmount) && typedAmount > 0
           ? typedAmount
           : 0;
@@ -569,7 +586,10 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
       if (!r.found || !r.session || !r.family) { setStudent(null); setNotFound(true); }
       else {
         setLookup(r);
-        setChecked({});
+        // Everything starts ticked, so switching to "choose what to pay" and paying the lot stays
+        // one tap — a parent unticks the lines they're not paying rather than hunting for the ones
+        // they are.
+        setChecked(Object.fromEntries(payableRowKeys(r.family).map((k) => [k, true])));
         // With something due, start on "pay the balance"; with nothing due, the only thing to
         // offer is an advance. Either way the amount field is pre-filled with the balance when
         // there is one and left blank when there isn't (§11.0a).
@@ -589,7 +609,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
 
   const startPayment = async () => {
     if (!fam || !lookup?.session) return;
-    if (mode === 'pick' && selectedIds.length === 0) return setError('Please choose at least one item to pay.');
+    if (mode === 'pick' && pickedKeys.length === 0) return setError('Please choose at least one item to pay.');
     if (mode === 'amount') {
       if (!Number.isFinite(typedAmount) || typedAmount <= 0) return setError('Please enter an amount.');
       // The school's own floor, so a parent is stopped here by a friendly line rather than by
@@ -597,7 +617,15 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
       if (typedAmount < minAmount) return setError(`The smallest payment we can take is ${money(minAmount, ccy)}.`);
     }
     const selection: TuitionSelection =
-      mode === 'full' ? { kind: 'full' } : mode === 'pick' ? { kind: 'invoices', invoiceIds: selectedIds } : { kind: 'amount', amount: typedAmount };
+      mode === 'full'
+        ? { kind: 'full' }
+        : mode === 'pick'
+          ? // Itemised bills pay by LINE (the ticked line is the one Students settles, and stays
+            // settled); otherwise by whole bill, as before.
+            fam.itemised
+            ? { kind: 'items', itemIds: pickedKeys }
+            : { kind: 'invoices', invoiceIds: pickedKeys }
+          : { kind: 'amount', amount: typedAmount };
     setBusy(true); setError('');
     try {
       setIntent(await createTuitionIntent(campaign.slug, { session: lookup.session, selection }));
@@ -667,7 +695,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
           <div className="freq-toggle" role="group" aria-label="What to pay">
             <button type="button" className={`freq-opt${mode === 'full' ? ' is-active' : ''}`} onClick={() => setMode('full')}>Pay the balance</button>
             {fam.openInvoices.length > 0 && (
-              <button type="button" className={`freq-opt${mode === 'pick' ? ' is-active' : ''}`} onClick={() => setMode('pick')}>Choose months</button>
+              <button type="button" className={`freq-opt${mode === 'pick' ? ' is-active' : ''}`} onClick={() => setMode('pick')}>Choose what to pay</button>
             )}
             {canAdvance && (
               <button type="button" className={`freq-opt${mode === 'amount' ? ' is-active' : ''}`} onClick={() => setMode('amount')}>Another amount</button>
@@ -676,12 +704,52 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
         )}
         {mode === 'pick' && (
           <div style={{ display: 'grid', gap: '0.4rem', marginBlock: '0.4rem' }}>
-            {fam.openInvoices.map((inv) => (
-              <label key={inv.id} className="check-row">
-                <input type="checkbox" checked={!!checked[inv.id]} onChange={(e) => setChecked((c) => ({ ...c, [inv.id]: e.target.checked }))} />
-                <span>{inv.label}{inv.student ? ` · ${inv.student}` : ''}{inv.dueDate ? ` · due ${inv.dueDate}` : ''} — <b>{fmt(inv.amount)}</b></span>
-              </label>
-            ))}
+            {fam.openInvoices.map((inv) => {
+              const sub = `${inv.student ? `${inv.student}` : ''}${inv.student && inv.dueDate ? ' · ' : ''}${inv.dueDate ? `due ${inv.dueDate}` : ''}`;
+              // A bill of one line needs no breakdown — one row, exactly as before. More than one
+              // and the bill becomes a heading with its lines beneath it, so "$200 tuition + $50
+              // book fee" can be paid separately instead of only as $250.
+              const itemised = fam.itemised && inv.items.length > 1;
+              if (!itemised) {
+                return (
+                  <label key={inv.id} className="check-row">
+                    <input
+                      type="checkbox"
+                      checked={!!checked[fam.itemised ? (inv.items.find((i) => i.payable)?.id ?? inv.id) : inv.id]}
+                      onChange={(e) => {
+                        const key = fam.itemised ? (inv.items.find((i) => i.payable)?.id ?? inv.id) : inv.id;
+                        setChecked((c) => ({ ...c, [key]: e.target.checked }));
+                      }}
+                    />
+                    <span>{inv.label}{sub ? ` · ${sub}` : ''} — <b>{fmt(inv.amount)}</b></span>
+                  </label>
+                );
+              }
+              return (
+                <div key={inv.id} style={{ display: 'grid', gap: '0.15rem' }}>
+                  <p className="hint" style={{ marginBlock: '0.25rem 0', fontWeight: 600 }}>
+                    {inv.label}{sub ? ` · ${sub}` : ''}
+                  </p>
+                  <div style={{ paddingInlineStart: '0.35rem' }}>
+                    {inv.items.map((it) =>
+                      it.payable ? (
+                        <label key={it.id} className="check-row">
+                          <input type="checkbox" checked={!!checked[it.id]} onChange={(e) => setChecked((c) => ({ ...c, [it.id]: e.target.checked }))} />
+                          <span>{it.label} — <b>{fmt(it.amount)}</b></span>
+                        </label>
+                      ) : (
+                        // Settled lines and credit lines are both unpayable. Shown, not hidden: on
+                        // a part-paid bill "already paid" is the answer to "why is this less than
+                        // I remember", and a bursary is why the total is lower than the fees.
+                        <p key={it.id} className="hint" style={{ marginBlock: '0.3rem', paddingInlineStart: '1.35rem' }}>
+                          {it.label} — {it.kind === 'credit' ? (it.billed !== 0 ? fmt(it.billed) : 'credit applied') : 'already paid'}
+                        </p>
+                      ),
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
         {mode === 'amount' && canAdvance && (

@@ -105,6 +105,15 @@ const intNonNeg = (v: unknown): number => {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
+/** A SIGNED money field, bounded. Only a bill line's `amountCents` needs this: a credit line (a
+ *  bursary, a correction) is negative, and clamping it to zero would render "Bursary $0.00" on a
+ *  bill instead of the deduction it is. Balances stay non-negative — the contract says so, and the
+ *  items-sum-to-the-bill guarantee is over balances. */
+const intSigned = (v: unknown): number => {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(-MAX_TUITION_CENTS, Math.min(MAX_TUITION_CENTS, n));
+};
 
 /** Canonicalise a typed Student ID the way the provider does — case, spaces and hyphens
  *  (§11.2: "yus-1234" is fine) — so the `identify` we confirm and the `lookup` that follows
@@ -209,6 +218,21 @@ export async function studentsIdentify(studentCode: string): Promise<IdentifyRes
 }
 
 // ── lookup (Student ID → family + per-child balances) ───────────────────────
+/** One line of a bill (§11.0b, Students 0.43.0). A February bill is commonly $200 of tuition
+ *  plus a $50 book fee, and parents routinely want to pay just the book fee.
+ *  `sum(items[].balanceCents) === invoice.balanceCents`, always. */
+export interface StudentInvoiceItem {
+  id: string;
+  label: string;
+  /** `tuition` | `charge` | `credit` — an OPEN set: keep whatever arrives and render an
+   *  unrecognised kind as a plain line rather than dropping money off the screen. */
+  kind: string;
+  /** What the line was billed at. SIGNED — a credit line (bursary, correction) is negative. */
+  amountCents: number;
+  /** What's left on it. 0 = already settled, or a credit line (a bursary/correction, whose
+   *  value is already deducted from the lines above it) — never payable either way. */
+  balanceCents: number;
+}
 export interface StudentInvoice {
   id: string;
   /** Which child this bill belongs to (new at v2 — bills are per student). */
@@ -216,6 +240,9 @@ export interface StudentInvoice {
   label: string;
   dueDate: string;
   balanceCents: number;
+  /** The lines this bill is made of (§11.0b). Empty = not itemised (an older Students, or a
+   *  payload we couldn't trust) → pay it as one thing, exactly as before. */
+  items: StudentInvoiceItem[];
 }
 /** A child on the family's bill. We keep the contract's `studentId` (needed to tag invoices
  *  with the child they belong to) but deliberately NOT its `studentCode`: we never offer a
@@ -268,13 +295,33 @@ function parseFamily(d: Record<string, unknown>): StudentFamily | null {
   const openInvoices = invRaw
     .filter((i): i is Record<string, unknown> => !!i && typeof i === 'object')
     .slice(0, 60)
-    .map((i) => ({
-      id: str(i.id, 128),
-      studentId: str(i.studentId, 128),
-      label: str(i.label, 120),
-      dueDate: str(i.dueDate, 40),
-      balanceCents: intNonNeg(i.balanceCents),
-    }))
+    .map((i) => {
+      const balanceCents = intNonNeg(i.balanceCents);
+      const rawItems = Array.isArray(i.items) ? i.items : [];
+      const items = rawItems
+        .filter((it): it is Record<string, unknown> => !!it && typeof it === 'object')
+        .slice(0, 40)
+        .map((it) => ({
+          id: str(it.id, 128),
+          label: str(it.label, 120),
+          kind: str(it.kind, 40), // open set — kept verbatim, never matched against a closed list
+          amountCents: intSigned(it.amountCents), // a credit line is NEGATIVE — never clamp it
+          balanceCents: intNonNeg(it.balanceCents),
+        }));
+      // Only trust itemisation we can actually pay with: every line needs an id (a `lines[]`
+      // entry is an itemId), and the lines must add up to the bill as the contract guarantees.
+      // If either fails, drop to a single un-itemised bill rather than showing a parent a
+      // breakdown that doesn't reconcile or offering a line we can't name.
+      const usable = items.length > 0 && items.every((it) => it.id) && items.reduce((s, it) => s + it.balanceCents, 0) === balanceCents;
+      return {
+        id: str(i.id, 128),
+        studentId: str(i.studentId, 128),
+        label: str(i.label, 120),
+        dueDate: str(i.dueDate, 40),
+        balanceCents,
+        items: usable ? items : [],
+      };
+    })
     .filter((i) => i.id); // an invoice with no id can't be paid specifically
   return {
     id,
@@ -325,6 +372,11 @@ export interface RecordPaymentInput {
    *  must belong to familyId, or Students returns 422. Omit for "pay full balance". THIS is
    *  what decides whose ledger the money lands on — see the note in recordStudentPayment. */
   students?: { studentId: string; amountCents: number }[];
+  /** The exact bill LINES the parent ticked (§11.0b). Supersedes `students` and `allocations`,
+   *  so it is sent ALONE. Must sum exactly to amountCents and every itemId must belong to an
+   *  open bill of familyId, or Students returns 422 — strict on purpose, since we built these
+   *  ids from the lookup in this same session. */
+  lines?: { itemId: string; amountCents: number }[];
 }
 export type RecordResult =
   | { status: 'recorded'; paymentId: string; duplicate: boolean }
@@ -342,19 +394,29 @@ export async function recordStudentPayment(input: RecordPaymentInput): Promise<R
     externalRef: input.externalRef,
   };
   if (input.studentId) body.studentId = input.studentId;
-  if (input.allocations && input.allocations.length) body.allocations = input.allocations;
-  // WHY `students[]` matters, and why `allocations` is not enough: with one bill per child,
-  // Students records a charge as one ledger row PER CHILD. It decides those rows from
-  // `students[]` if we send one, and otherwise DERIVES them by walking the FAMILY's open
-  // invoices oldest-due-first — a path that ignores `allocations` entirely. So for a parent who
-  // ticked specific months, sending only `allocations` books the money against whichever child
-  // owns the family's oldest bill, which may not be the child whose month they picked. Sending
-  // the split we computed from those same ticked invoices is what makes the parent's choice the
-  // thing that lands. Omitted for "pay the full balance", where the derived split is identical
-  // (every open invoice gets covered) and is what reconciliation would reproduce anyway.
-  if (input.students && input.students.length) body.students = input.students;
-  // Still sent as v1: `record-payment` is byte-identical between v1 and v2 (§11.0), and
-  // `students[]` is an additive optional field the provider accepts on either version.
+  // Students resolves exactly ONE breakdown, in the order lines → allocations → students →
+  // derive-it-itself. So send exactly one and never a mixture: extra fields would be dead weight
+  // at best, and a contradiction to debug at worst.
+  if (input.lines && input.lines.length) {
+    // Ticked LINES (§11.0b). Best of the three: each line resolves to its own child (so it
+    // supersedes `students`), and the choice is stored and re-applied — the book fee a parent
+    // deliberately paid still reads settled on next month's statement.
+    body.lines = input.lines;
+  } else if (input.allocations && input.allocations.length) {
+    // Whole invoices. Honoured from Students 0.43.0 (before that it was parsed and silently
+    // ignored, which is why `students` below exists), and lenient by design: if the office took
+    // cash against a bill between our lookup and this call, the remainder is recorded as ordinary
+    // money on that child rather than rejected — the card is already captured by then.
+    body.allocations = input.allocations;
+    // Belt and braces for a pre-0.43.0 school, where `allocations` was dropped on the floor and
+    // the split would otherwise be derived from the FAMILY's oldest bills — landing a parent's
+    // chosen month on a sibling. Ignored by 0.43.0+ (allocations wins the chain), harmless there.
+    if (input.students && input.students.length) body.students = input.students;
+  } else if (input.students && input.students.length) {
+    body.students = input.students;
+  }
+  // Still sent as v1: `record-payment` is byte-identical between v1 and v2 (§11.0), and every
+  // breakdown above is an additive optional field the provider accepts on either version.
   const r = await brokerCall('record-payment', body);
   if (r.ok) {
     if (r.data.recorded === true) {
@@ -402,8 +464,14 @@ export interface TuitionSession {
   currency: string;
   balanceCents: number;
   /** Each open invoice with the child it belongs to (v2 bills are per student). `studentId`
-   *  is what lets us tell Students WHICH child the parent's picked months belong to. */
-  invoices: { id: string; studentId: string; balanceCents: number }[];
+   *  is what lets us tell Students WHICH child the parent's picked months belong to, and
+   *  `items` (§11.0b) what lets a parent pay ONE line of a bill — the ids and amounts are held
+   *  here so a ticked line's value comes from the server's copy, never the browser's. */
+  invoices: { id: string; studentId: string; balanceCents: number; items: { id: string; balanceCents: number }[] }[];
+  /** True when EVERY open bill arrived itemised. Decided per family, not per bill: the provider
+   *  chain is `lines` OR `allocations`, never both, so a selection mixing lines from one bill
+   *  with a whole other bill couldn't be expressed in one call. All-or-nothing removes that. */
+  itemised: boolean;
   /** From `info` at lookup time (§11.0a), held server-side so a client can't relax either. */
   allowAdvance: boolean;
   minAmountCents: number;
@@ -442,6 +510,8 @@ export const MAX_TUITION_CENTS = 99_999_999;
 export type TuitionSelection =
   | { kind: 'full' }
   | { kind: 'invoices'; invoiceIds: string[] }
+  /** The exact LINES the parent ticked (§11.0b) — ids from the session's own items. */
+  | { kind: 'items'; itemIds: string[] }
   /** An advance/part payment the parent typed (§11.0a): minor units, floored at the school's
    *  `minAmountCents`. Allowed with nothing due — that's the whole point. */
   | { kind: 'amount'; amountCents: number };
@@ -452,6 +522,10 @@ export type AmountResult =
       /** The per-CHILD split of this charge — what actually books the Students ledger (see
        *  `recordStudentPayment`). `null` = let Students derive it (correct for a full balance). */
       students: { studentId: string; amountCents: number }[] | null;
+      /** The exact LINES the parent ticked (§11.0b). When present this is the ONLY breakdown we
+       *  send: it supersedes `students` (a line already says whose bill it is) and it's honoured
+       *  stickily — the line stays settled when Students recomputes its allocations. */
+      lines: { itemId: string; amountCents: number }[] | null;
     }
   | { error: string };
 
@@ -479,11 +553,32 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
     // Paying AHEAD needs the school to have advertised it; paying part of a real balance never
     // does — that's just settling what's already owed, so only the excess needs permission.
     if (selection.amountCents > session.balanceCents && !session.allowAdvance) return { error: 'advance-not-allowed' };
-    return checked({ amountCents: selection.amountCents, allocations: null, students: null });
+    return checked({ amountCents: selection.amountCents, allocations: null, students: null, lines: null });
   }
   if (selection.kind === 'full') {
     if (session.balanceCents <= 0) return { error: 'nothing-due' };
-    return checked({ amountCents: session.balanceCents, allocations: null, students: null });
+    return checked({ amountCents: session.balanceCents, allocations: null, students: null, lines: null });
+  }
+  if (selection.kind === 'items') {
+    // Particular LINES of a bill (§11.0b) — e.g. the book fee but not the month's tuition. The
+    // amount is the sum of those lines' balances FROM THE SESSION, so a browser can name which
+    // lines but never what they cost. `lines` alone goes on the wire: it supersedes `students`
+    // (each line already resolves to a child) and is strict, since the ids came from us.
+    if (!session.itemised) return { error: 'not-itemised' };
+    const itemIds = [...new Set(selection.itemIds)];
+    if (!itemIds.length) return { error: 'no-selection' };
+    const lines: { itemId: string; amountCents: number }[] = [];
+    let total = 0;
+    for (const itemId of itemIds) {
+      // A settled line (balance 0) and a credit line are both unpayable — the browser is never
+      // offered them, and a crafted request naming one is refused rather than quietly dropped.
+      const line = session.invoices.flatMap((i) => i.items).find((it) => it.id === itemId);
+      if (!line || line.balanceCents <= 0) return { error: 'unknown-item' };
+      lines.push({ itemId, amountCents: line.balanceCents });
+      total += line.balanceCents;
+    }
+    if (total <= 0) return { error: 'nothing-due' };
+    return checked({ amountCents: total, allocations: null, students: null, lines });
   }
   const ids = [...new Set(selection.invoiceIds)];
   if (!ids.length) return { error: 'no-selection' };
@@ -504,5 +599,5 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
   // picked invoice arrived without a child (a provider we don't recognise), send no split at
   // all and let Students derive one — degrading beats a rejected payment.
   const students = everyInvoiceHasAChild && byStudent.size ? [...byStudent].map(([studentId, amountCents]) => ({ studentId, amountCents })) : null;
-  return checked({ amountCents: sum, allocations, students });
+  return checked({ amountCents: sum, allocations, students, lines: null });
 }
