@@ -243,6 +243,7 @@ For local dev: run the server, run `cd web && npm run dev` (Vite proxies `/api` 
 ---
 
 ## 16. CI & versioning
+- **Add a `web/src/changelog.ts` entry with every release** — it's what the "What's new" item in the account menu shows. Plain, non-technical, what changed *for the masjid*; same voice as the App Store note in OpenMasjidAPPS `registry.yaml`, since they see both. It is loaded on demand, so never import it eagerly (that would put admin-only text in the donation page's bundle).
 - **`VERSION`** file at the root is the single source of truth; stamp it into the build.
 - **Semver, `0.x` = pre-release.** Start at `0.1.0`. Tag releases `vX.Y.Z`.
 - **GitHub Actions:** on a `v*` tag, build the multi-arch (amd64 + arm64) image and **push to GHCR** with the version tag (mirror Display's workflow). Then the app is added/updated in OpenMasjidAPPS `registry.yaml` with the new `ref`.
