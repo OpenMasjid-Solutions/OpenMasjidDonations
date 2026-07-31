@@ -422,6 +422,8 @@ export interface StudentInvoiceView {
   label: string;
   /** Which child this bill is for (v2 bills are per child) — a display name, or '' if unknown. */
   student: string;
+  /** That child's opaque ref, so bills can be grouped under the child they belong to. */
+  studentRef: string;
   dueDate: string;
   amount: number;
   /** The lines this bill is made of. Empty (or a single line) = render it as one row, as before. */
@@ -449,8 +451,10 @@ export interface StudentLookupResult {
   family?: {
     label: string;
     /** One entry per child with what THAT child owes and what they've paid ahead (major
-     *  units). Both are non-negative and at most one of the pair is non-zero. */
-    students: { firstName: string; lastInitial: string; balance: number; credit: number }[];
+     *  units). Both are non-negative and at most one of the pair is non-zero. `ref` is the
+     *  opaque handle to pass back when paying money towards THIS child — with one ledger per
+     *  child, "add $50" has to say for whom. */
+    students: { ref: string; name: string; firstName: string; lastInitial: string; balance: number; credit: number }[];
     balance: number; // the household total, major units — what "pay full balance" charges
     /** The household's credit — money already paid ahead. A balance of 0 alone can't say
      *  whether a family is square or ahead, and once an advance settles its invoice this is
@@ -485,7 +489,8 @@ export type TuitionSelection =
   | { kind: 'invoices'; invoiceIds: string[] }
   /** The exact bill lines ticked (§11.0b) — used whenever the family's bills are itemised. */
   | { kind: 'items'; itemIds: string[] }
-  | { kind: 'amount'; amount: number };
+  /** A typed amount, optionally towards one child (`student` = their ref from the lookup). */
+  | { kind: 'amount'; amount: number; student?: string };
 
 /** Step 1: whose Student ID is this? Ask before showing any balance (contract §11.0). */
 export const identifyStudent = (slug: string, body: { studentCode: string }) =>

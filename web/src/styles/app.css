@@ -244,6 +244,40 @@ select.input { appearance: auto; }
 .check-row { display: flex; align-items: flex-start; gap: 0.55rem; margin-block: 0.4rem; font-size: 0.9rem; color: var(--color-ink); cursor: pointer; }
 .check-row input { margin-block-start: 0.2rem; flex-shrink: 0; }
 
+/* Tuition: a section per child — their standing, their bills, and money for them. Each bill is
+   its own quiet card so a month reads as one thing, with its lines indented under it. */
+.tuition-kids { display: grid; gap: 1rem; margin-block: 0.5rem 0.2rem; text-align: start; }
+.tuition-kid { display: grid; gap: 0.4rem; }
+.tuition-kid-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
+.tuition-kid-name { font-family: var(--font-display); font-size: 1.05rem; font-weight: 700; color: var(--color-ink); }
+.tuition-owed { font-size: 0.95rem; font-weight: 600; color: var(--color-ink-muted); }
+.tuition-ahead { font-size: 0.9rem; font-weight: 600; color: var(--color-primary); }
+.tuition-credit { color: var(--color-primary); }
+.tuition-note { text-align: center; margin-block: 0.15rem; }
+.tuition-bill {
+  display: grid; gap: 0.1rem; padding: 0.55rem 0.7rem;
+  border-radius: var(--radius-button); background: var(--glass-bg-inset);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.tuition-bill-head { display: flex; align-items: baseline; gap: 0.55rem; font-size: 0.92rem; color: var(--color-ink); }
+.tuition-bill-label { display: grid; gap: 0.05rem; flex: 1; min-width: 0; font-weight: 600; }
+.tuition-bill-sub { font-size: 0.74rem; font-weight: 500; color: var(--color-ink-faint); }
+.tuition-bill-amt { font-weight: 700; white-space: nowrap; }
+.tuition-line {
+  display: flex; align-items: baseline; gap: 0.55rem;
+  padding-block: 0.28rem; padding-inline-start: 0.45rem;
+  font-size: 0.86rem; color: var(--color-ink-muted); border-block-start: 1px solid var(--color-border);
+}
+.tuition-line:first-of-type { margin-block-start: 0.3rem; }
+.tuition-line-label { flex: 1; min-width: 0; }
+.tuition-line-amt { white-space: nowrap; }
+.tuition-line.is-done .tuition-line-amt { color: var(--color-ink-faint); font-style: italic; }
+.tuition-bill input[type='checkbox'], .tuition-line input[type='checkbox'] { flex-shrink: 0; cursor: pointer; }
+/* The whole row is the tap target while choosing, not just the tick box. */
+.tuition-bill-head.is-tickable, .tuition-line.is-tickable { cursor: pointer; }
+/* Thumb-sized enough to tap on a kiosk-mounted tablet without being a form control on a page. */
+.tuition-add { margin-block-start: 0.15rem; font-size: 0.88rem; }
+
 /* Campaign link row */
 .camp-link { display: flex; align-items: center; gap: 0.3rem; margin-block-start: 0.15rem; }
 .camp-link a { font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

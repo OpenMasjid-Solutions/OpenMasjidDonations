@@ -472,6 +472,10 @@ export interface TuitionSession {
    *  chain is `lines` OR `allocations`, never both, so a selection mixing lines from one bill
    *  with a whole other bill couldn't be expressed in one call. All-or-nothing removes that. */
   itemised: boolean;
+  /** The family's children, each with an opaque `ref` the browser uses to say WHICH child an
+   *  advance is for. The internal studentId stays here — a browser never sees one, so a crafted
+   *  request can only ever name a child of the family this session looked up. */
+  students: { ref: string; studentId: string; balanceCents: number }[];
   /** From `info` at lookup time (§11.0a), held server-side so a client can't relax either. */
   allowAdvance: boolean;
   minAmountCents: number;
@@ -513,8 +517,10 @@ export type TuitionSelection =
   /** The exact LINES the parent ticked (§11.0b) — ids from the session's own items. */
   | { kind: 'items'; itemIds: string[] }
   /** An advance/part payment the parent typed (§11.0a): minor units, floored at the school's
-   *  `minAmountCents`. Allowed with nothing due — that's the whole point. */
-  | { kind: 'amount'; amountCents: number };
+   *  `minAmountCents`. Allowed with nothing due — that's the whole point. `studentRef` names the
+   *  child it's for: with one ledger per child, "add $50" has to say for whom, and a family where
+   *  one child is clear while another owes is the ordinary case. */
+  | { kind: 'amount'; amountCents: number; studentRef?: string };
 export type AmountResult =
   | {
       amountCents: number;
@@ -526,6 +532,9 @@ export type AmountResult =
        *  send: it supersedes `students` (a line already says whose bill it is) and it's honoured
        *  stickily — the line stays settled when Students recomputes its allocations. */
       lines: { itemId: string; amountCents: number }[] | null;
+      /** Which child this charge is FOR, when the parent said so (a per-child advance). Goes on
+       *  the PaymentIntent metadata and the stored row; `null` = the child whose ID was typed. */
+      targetStudentId: string | null;
     }
   | { error: string };
 
@@ -545,19 +554,35 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
     return r;
   };
   if (selection.kind === 'amount') {
-    // A typed amount. Neither breakdown is sent: Students covers the family's open invoices
-    // oldest-due-first and holds anything beyond them as the matched child's credit (that child
-    // is the top-level studentId on record-payment) — which is exactly "pay $1,400 against a
-    // $350 month and settle the next three too".
+    // A typed amount: a part payment, or money paid AHEAD of any bill.
     if (!Number.isInteger(selection.amountCents) || selection.amountCents <= 0) return { error: 'bad-amount' };
     // Paying AHEAD needs the school to have advertised it; paying part of a real balance never
     // does — that's just settling what's already owed, so only the excess needs permission.
     if (selection.amountCents > session.balanceCents && !session.allowAdvance) return { error: 'advance-not-allowed' };
-    return checked({ amountCents: selection.amountCents, allocations: null, students: null, lines: null });
+    // Which child is it for? A ref names one explicitly; a family with a single child has only
+    // one answer. Either way we then send the whole amount as that child's split, so "money for
+    // Yusuf" lands on Yusuf's ledger even when a sibling owns the family's oldest unpaid bill —
+    // left to Students to derive, it would go there instead.
+    const target = selection.studentRef
+      ? session.students.find((s) => s.ref === selection.studentRef)
+      : session.students.length === 1
+        ? session.students[0]
+        : undefined;
+    if (selection.studentRef && !target) return { error: 'unknown-student' };
+    const targetId = target?.studentId || '';
+    return checked({
+      amountCents: selection.amountCents,
+      allocations: null,
+      // With no child to name, Students derives it: the open invoices oldest-due-first, and any
+      // remainder as the credit of the child whose ID was typed (our top-level studentId).
+      students: targetId ? [{ studentId: targetId, amountCents: selection.amountCents }] : null,
+      lines: null,
+      targetStudentId: targetId || null,
+    });
   }
   if (selection.kind === 'full') {
     if (session.balanceCents <= 0) return { error: 'nothing-due' };
-    return checked({ amountCents: session.balanceCents, allocations: null, students: null, lines: null });
+    return checked({ amountCents: session.balanceCents, allocations: null, students: null, lines: null, targetStudentId: null });
   }
   if (selection.kind === 'items') {
     // Particular LINES of a bill (§11.0b) — e.g. the book fee but not the month's tuition. The
@@ -578,7 +603,7 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
       total += line.balanceCents;
     }
     if (total <= 0) return { error: 'nothing-due' };
-    return checked({ amountCents: total, allocations: null, students: null, lines });
+    return checked({ amountCents: total, allocations: null, students: null, lines, targetStudentId: null });
   }
   const ids = [...new Set(selection.invoiceIds)];
   if (!ids.length) return { error: 'no-selection' };
@@ -599,5 +624,5 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
   // picked invoice arrived without a child (a provider we don't recognise), send no split at
   // all and let Students derive one — degrading beats a rejected payment.
   const students = everyInvoiceHasAChild && byStudent.size ? [...byStudent].map(([studentId, amountCents]) => ({ studentId, amountCents })) : null;
-  return checked({ amountCents: sum, allocations, students, lines: null });
+  return checked({ amountCents: sum, allocations, students, lines: null, targetStudentId: null });
 }

@@ -29,6 +29,11 @@ function session(over: Partial<TuitionSession> = {}): TuitionSession {
       { id: 'inv_9', studentId: 'stu_2', balanceCents: 15000, items: [] },
       { id: 'inv_10', studentId: 'stu_1', balanceCents: 20000, items: [] },
     ],
+    // The two children, each with the opaque ref the browser uses to say who an advance is for.
+    students: [
+      { ref: 'c0', studentId: 'stu_1', balanceCents: 20000 },
+      { ref: 'c1', studentId: 'stu_2', balanceCents: 15000 },
+    ],
     itemised: false,
     allowAdvance: true,
     minAmountCents: 100, // the school's advertised floor ($1)
@@ -60,6 +65,7 @@ function itemisedSession(over: Partial<TuitionSession> = {}): TuitionSession {
         ],
       },
     ],
+    students: [{ ref: 'c0', studentId: 'stu_1', balanceCents: 25000 }], // an only child
     itemised: true,
     allowAdvance: true,
     minAmountCents: 100,
@@ -80,7 +86,7 @@ test('full balance → whole balance, no splits (Students derives the same answe
   const r = computeTuitionAmount(s, { kind: 'full' });
   // No per-child split on purpose: paying everything covers every open invoice, so the split
   // Students derives is identical — and it's the one its reconciliation would reproduce.
-  assert.deepEqual(r, { amountCents: 35000, allocations: null, students: null, lines: null });
+  assert.deepEqual(r, { amountCents: 35000, allocations: null, students: null, lines: null, targetStudentId: null });
 });
 
 test('full balance of zero is rejected (nothing to pay)', () => {
@@ -98,6 +104,7 @@ test('picked invoices → sum of THOSE invoices + allocations + the per-child sp
     // matched child, and not whoever happens to own the family's oldest bill.
     students: [{ studentId: 'stu_2', amountCents: 15000 }],
     lines: null,
+    targetStudentId: null,
   });
   const both = computeTuitionAmount(s, { kind: 'invoices', invoiceIds: ['inv_9', 'inv_10'] });
   assert.deepEqual(both, {
@@ -105,6 +112,7 @@ test('picked invoices → sum of THOSE invoices + allocations + the per-child sp
     allocations: [{ invoiceId: 'inv_9', amountCents: 15000 }, { invoiceId: 'inv_10', amountCents: 20000 }],
     students: [{ studentId: 'stu_2', amountCents: 15000 }, { studentId: 'stu_1', amountCents: 20000 }],
     lines: null,
+    targetStudentId: null,
   });
 });
 
@@ -131,7 +139,7 @@ test('several months for the SAME child collapse into one split entry that sums'
 test('an invoice with no child yields NO split (degrade to derivation, never a 422)', () => {
   const s = session({ invoices: [{ id: 'inv_x', studentId: '', balanceCents: 5000, items: [] }], balanceCents: 5000 });
   const r = computeTuitionAmount(s, { kind: 'invoices', invoiceIds: ['inv_x'] });
-  assert.deepEqual(r, { amountCents: 5000, allocations: [{ invoiceId: 'inv_x', amountCents: 5000 }], students: null, lines: null });
+  assert.deepEqual(r, { amountCents: 5000, allocations: [{ invoiceId: 'inv_x', amountCents: 5000 }], students: null, lines: null, targetStudentId: null });
 });
 
 test('duplicate invoice ids are de-duped (no double charge, no doubled split)', () => {
@@ -142,6 +150,7 @@ test('duplicate invoice ids are de-duped (no double charge, no doubled split)', 
     allocations: [{ invoiceId: 'inv_9', amountCents: 15000 }],
     students: [{ studentId: 'stu_2', amountCents: 15000 }],
     lines: null,
+    targetStudentId: null,
   });
 });
 
@@ -166,6 +175,7 @@ test('one line of a bill: the book fee alone, priced from the session', () => {
     allocations: null,
     students: null,
     lines: [{ itemId: 'iti_book', amountCents: 5000 }],
+    targetStudentId: null,
   });
 });
 
@@ -198,7 +208,7 @@ test('a line id from outside the session is refused (the household wall, our sid
 test('duplicate line ids are de-duped (no double charge)', () => {
   const s = itemisedSession();
   const r = computeTuitionAmount(s, { kind: 'items', itemIds: ['iti_book', 'iti_book'] });
-  assert.deepEqual(r, { amountCents: 5000, allocations: null, students: null, lines: [{ itemId: 'iti_book', amountCents: 5000 }] });
+  assert.deepEqual(r, { amountCents: 5000, allocations: null, students: null, lines: [{ itemId: 'iti_book', amountCents: 5000 }], targetStudentId: null });
 });
 
 test('an empty line selection is refused', () => {
@@ -254,19 +264,65 @@ test('an advance payment is allowed with NOTHING due (that is the point)', () =>
     // matched child's credit — the child whose ID the parent typed.
     students: null,
     lines: null,
+    targetStudentId: null,
   });
+});
+
+test('an advance names WHICH child, and lands on that child even if a sibling owes older', () => {
+  // The whole point of per-child "add money": stu_2 (Maryam) owns the family's older bill, so a
+  // derived split would send Yusuf's money there. Naming him keeps it on his account.
+  const s = session();
+  const r = computeTuitionAmount(s, { kind: 'amount', amountCents: 5000, studentRef: 'c0' });
+  assert.deepEqual(r, {
+    amountCents: 5000,
+    allocations: null,
+    students: [{ studentId: 'stu_1', amountCents: 5000 }],
+    lines: null,
+    targetStudentId: 'stu_1',
+  });
+  // …and the sibling can be named just as well.
+  const forSibling = computeTuitionAmount(s, { kind: 'amount', amountCents: 5000, studentRef: 'c1' });
+  assert.deepEqual('students' in forSibling ? forSibling.students : null, [{ studentId: 'stu_2', amountCents: 5000 }]);
+  assert.equal('targetStudentId' in forSibling ? forSibling.targetStudentId : '', 'stu_2');
+});
+
+test('an advance for an only child needs no ref — there is one answer', () => {
+  const s = itemisedSession(); // a single child, stu_1
+  const r = computeTuitionAmount(s, { kind: 'amount', amountCents: 5000 });
+  assert.equal('targetStudentId' in r ? r.targetStudentId : '', 'stu_1');
+  assert.deepEqual('students' in r ? r.students : null, [{ studentId: 'stu_1', amountCents: 5000 }]);
+});
+
+test('a studentRef from outside the session is refused (the household wall, our side)', () => {
+  const s = session();
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 5000, studentRef: 'c99' }), { error: 'unknown-student' });
+  // A browser never holds a studentId, so naming one directly can't work either.
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 5000, studentRef: 'stu_1' }), { error: 'unknown-student' });
+});
+
+test('with several children and NO ref, Students derives the split (surplus → matched child)', () => {
+  const s = session();
+  const r = computeTuitionAmount(s, { kind: 'amount', amountCents: 5000 });
+  assert.equal('students' in r ? r.students : 'x', null);
+  assert.equal('targetStudentId' in r ? r.targetStudentId : 'x', null);
+});
+
+test('a per-child advance still honours the floor and the ceiling', () => {
+  const s = session();
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 99, studentRef: 'c0' }), { error: 'below-min' });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 100_000_000, studentRef: 'c0' }), { error: 'too-large' });
 });
 
 test('an advance payment on TOP of a balance is allowed (overpaying builds credit)', () => {
   const s = session();
   const r = computeTuitionAmount(s, { kind: 'amount', amountCents: 100000 }); // > the 35000 owed
-  assert.deepEqual(r, { amountCents: 100000, allocations: null, students: null, lines: null });
+  assert.deepEqual(r, { amountCents: 100000, allocations: null, students: null, lines: null, targetStudentId: null });
 });
 
 test('the floor is enforced on a typed amount, and quoted from the SESSION not the client', () => {
   const s = session({ minAmountCents: 100 });
   assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 99 }), { error: 'below-min' });
-  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 100 }), { amountCents: 100, allocations: null, students: null, lines: null });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 100 }), { amountCents: 100, allocations: null, students: null, lines: null, targetStudentId: null });
   // A school advertising a higher floor is honoured too.
   const strict = session({ minAmountCents: 500 });
   assert.deepEqual(computeTuitionAmount(strict, { kind: 'amount', amountCents: 400 }), { error: 'below-min' });
@@ -284,8 +340,8 @@ test('without allowAdvance a PART payment is still fine — only money ABOVE the
   // Paying part of a real balance isn't paying ahead, it's settling what's already owed, so it
   // needs no permission. Only the excess does.
   const s = session({ allowAdvance: false }); // balance 35000
-  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 5000 }), { amountCents: 5000, allocations: null, students: null, lines: null });
-  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 35000 }), { amountCents: 35000, allocations: null, students: null, lines: null });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 5000 }), { amountCents: 5000, allocations: null, students: null, lines: null, targetStudentId: null });
+  assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 35000 }), { amountCents: 35000, allocations: null, students: null, lines: null, targetStudentId: null });
   assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 35001 }), { error: 'advance-not-allowed' });
   // With nothing due, EVERY amount is an advance — so all of them need the permission.
   const square = session({ allowAdvance: false, balanceCents: 0, invoices: [] });

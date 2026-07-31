@@ -1323,13 +1323,18 @@ async function main(): Promise<void> {
         balanceCents: i.balanceCents,
         items: i.items.map((it) => ({ id: it.id, balanceCents: it.balanceCents })),
       })),
+      // Each child gets an opaque ref the browser uses to say which one an advance is for. The
+      // internal studentId stays here, so a crafted request can only name a child of THIS family.
+      students: fam.students.map((st, i) => ({ ref: `c${i}`, studentId: st.studentId, balanceCents: st.balanceCents })),
       itemised,
       allowAdvance,
       minAmountCents,
     });
     // v2 bills are per child, so each open invoice names the child it belongs to. Resolve that
-    // to a display name HERE — the studentIds stay server-side, in the session.
+    // to a display name + the child's opaque ref HERE — the studentIds stay server-side, in the
+    // session. The ref is what lets the donor page group bills under the child they belong to.
     const nameById = new Map(fam.students.filter((st) => st.studentId).map((st) => [st.studentId, childName(st)]));
+    const refById = new Map(fam.students.map((st, i) => [st.studentId, `c${i}`]));
     // Return DISPLAY data only — never the internal family/student ids (they live in the session).
     return {
       data: {
@@ -1342,7 +1347,9 @@ async function main(): Promise<void> {
           // is still what "pay the full balance" charges. `credit` is what a child has paid
           // ahead (§11.0a) — without it a derived balance of 0 can't be told apart from
           // "square", and once an advance settles its invoice it's the only signal left.
-          students: fam.students.map((st) => ({
+          students: fam.students.map((st, i) => ({
+            ref: `c${i}`, // opaque handle for "add money for this child"
+            name: childName(st),
             firstName: st.firstName,
             lastInitial: st.lastInitial,
             balance: dec(st.balanceCents),
@@ -1357,6 +1364,7 @@ async function main(): Promise<void> {
             id: i.id,
             label: i.label,
             student: nameById.get(i.studentId) ?? '',
+            studentRef: refById.get(i.studentId) ?? '', // groups this bill under its child
             dueDate: i.dueDate,
             amount: dec(i.balanceCents),
             // The lines that make up this bill (§11.0b) — display data plus the item id the pay
@@ -1388,7 +1396,8 @@ async function main(): Promise<void> {
       z.object({ kind: z.literal('full') }),
       z.object({ kind: z.literal('invoices'), invoiceIds: z.array(z.string().min(1).max(128)).min(1).max(60) }),
       z.object({ kind: z.literal('items'), itemIds: z.array(z.string().min(1).max(128)).min(1).max(200) }),
-      z.object({ kind: z.literal('amount'), amount: z.number().positive() }), // major units
+      // major units, and optionally WHICH child it's for (an opaque ref from the lookup)
+      z.object({ kind: z.literal('amount'), amount: z.number().positive(), student: z.string().max(16).optional() }),
     ]),
   });
   app.post('/api/public/campaign/:slug/students/intent', async (req, reply) => {
@@ -1410,7 +1419,7 @@ async function main(): Promise<void> {
     // helper so the currency's minor-unit rules (and zero-decimal currencies) are applied once.
     const sel: TuitionSelection =
       parsed.data.selection.kind === 'amount'
-        ? { kind: 'amount', amountCents: toMinor(parsed.data.selection.amount, currency) }
+        ? { kind: 'amount', amountCents: toMinor(parsed.data.selection.amount, currency), studentRef: parsed.data.selection.student }
         : parsed.data.selection;
     const amt = computeTuitionAmount(session, sel);
     if ('error' in amt) {
@@ -1426,7 +1435,7 @@ async function main(): Promise<void> {
                 ? 'This school isn’t taking payments in advance right now — you can pay up to the balance due.'
                 : amt.error === 'bad-amount'
                   ? 'Please enter a valid amount.'
-                  : amt.error === 'unknown-item' || amt.error === 'not-itemised'
+                  : amt.error === 'unknown-item' || amt.error === 'not-itemised' || amt.error === 'unknown-student'
                     ? 'Your balance changed — please look it up again.'
                     : 'Please choose what to pay.';
       return reply.code(400).send({ error: msg });
@@ -1441,7 +1450,10 @@ async function main(): Promise<void> {
       students_family_id: session.familyId,
       campaignId: c.id,
     };
-    if (session.studentId) metadata.students_student_id = session.studentId;
+    // Whose payment this is: the child the parent named for a per-child advance, else the child
+    // whose ID was typed. Drives §11.3 metadata AND where Students parks any surplus.
+    const forStudentId = amt.targetStudentId || session.studentId;
+    if (forStudentId) metadata.students_student_id = forStudentId;
     const idempotencyKey = crypto.randomUUID();
     let clientSecret = '';
     let paymentIntentId = '';
@@ -1467,7 +1479,7 @@ async function main(): Promise<void> {
       stripeAccountId: acct.id,
       paymentIntentId,
       familyId: session.familyId,
-      studentId: session.studentId,
+      studentId: forStudentId,
       familyLabel: session.familyLabel,
       amount: chargeMinor,
       currency,

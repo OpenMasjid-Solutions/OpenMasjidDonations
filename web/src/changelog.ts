@@ -23,6 +23,16 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.37.0',
+    date: '2026-07-31',
+    notes: [
+      'The tuition page is now laid out child by child: each child shows their own balance or credit, their own bills, and an “Add money” button of their own',
+      'Money paid ahead now goes to the child you choose, so it lands on their account even when a brother or sister has an older unpaid bill',
+      'Bills read as a statement until you choose to pay part of one — the tick boxes only appear once you tap “Choose what to pay”',
+      'Each bill is its own card with its lines indented underneath, so a month reads as one thing',
+    ],
+  },
+  {
     version: '0.36.0',
     date: '2026-07-30',
     notes: [

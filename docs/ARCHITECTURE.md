@@ -219,6 +219,13 @@ contract: `students/billing` **v2** in `OpenMasjidStudentManager/docs/FABRIC_BIL
   (`student_payments.payment_lines`) so an outbox retry settles the same line. Tuition stays out of
   donation reporting by construction — every donation query reads `FROM donations`, and itemising only
   added columns to `student_payments`.
+- **A section per child, and per-child advances (v0.37.0).** The balance step renders one section per
+  child — their balance or credit, their bills, their own "Add money" — since a household total can't
+  say who is behind. An advance is **per child**: the whole amount goes as that child's `students[]`
+  split, so it lands on their account rather than on whoever owns the family's oldest bill. The browser
+  names a child by an opaque `ref` (`c0`, `c1`, …) issued in the lookup and resolved back to a
+  `studentId` from the session, so no internal id ever reaches it. Bills read as a **statement** under
+  "pay the balance" and only become a checklist once the parent chooses to pick.
 - **Advance payments + credit (Students 0.41.0, §11.0a).** `info` advertises `allowAdvance` +
   `minAmountCents`; `lookup` reports `creditCents` for the household, the matched child and each
   sibling. The balance step shows *balance due* / *in credit* / *nothing due* rather than a bare zero

@@ -112,14 +112,23 @@ A `tuition` campaign renders **exactly this**, nothing more:
    **"Balance due: $200.00"**, **"Nothing due — you're $50.00 in credit"**, or **"Nothing due right
    now"** — plus a per-child split when there are siblings (each child shown as owing or in credit),
    and the **open invoices** (one row per month/term, tagged with the child it's for).
+   The balance step is laid out **a section per child** — their own balance or credit, their own
+   bills, and their own "Add money" — because with one ledger per child a household total can't say
+   who is behind or ahead, and an advance has to land on somebody's account.
 5. **Pay:** up to three choices —
-   - **Pay the balance** (the whole household `balanceCents`), or
+   - **Pay the balance** (the whole household `balanceCents`) — bills below read as a *statement*,
+     with no tick boxes until the parent asks to choose, or
    - **Choose what to pay** — tick what you're paying, with the running total on the button.
      On itemised bills (§11.0b) the bill label becomes a heading and each **line** is tickable, so the
      book fee can be paid without the month's tuition; a single-line bill is one row as before.
      Everything starts ticked, so "pay the lot" stays one tap, or
-   - **Another amount** — type any figure ≥ `minAmountCents` (a part payment, or money paid ahead).
-     With **nothing due this is the only option**, and it is offered, not hidden.
+   - **Add money for &lt;child&gt;** — its own step: type any figure ≥ `minAmountCents` (a part payment,
+     or money paid ahead). With **nothing due this is the only option**, and it is offered, not hidden.
+     It is **per child**, and the whole amount is sent as that child's `students[]` split, so it lands
+     on their account even when a sibling owns the family's oldest unpaid bill (left to Students to
+     derive, it would go there instead). The browser names the child by an opaque `ref` from the
+     lookup — it never holds a `studentId`, so a crafted request can only ever name a child of the
+     family this session looked up.
    Card entry (Stripe Elements) appears for the chosen amount.
 6. On success → we record it into Students and show a receipt that says **“payment”**, never
    “donation”. Done.
