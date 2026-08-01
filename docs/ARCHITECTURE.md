@@ -283,3 +283,207 @@ credentials or the From address.
   (`fabricAlert`); the admin chooses the channel (email/webhook/off) per alert in OpenMasjidOS. We do
   **not** declare `reader-offline` — this is a web/Stripe-Elements app with no card reader (that alert
   belongs to the Kiosk). Alert text carries no PII (only a Stripe PI id + a reason code).
+
+## Monthly plans: a local index over live Stripe state (v0.38.0)
+
+The admin "Monthly plans" tab lists every recurring donation plan and lets the masjid pause,
+resume or stop one, or give it an end. `server/src/plans.ts` holds the logic (pure half above,
+fail-soft Stripe transport below); the six `/api/admin/plans…` routes and the sync/cache glue
+sit in `index.ts`. Amounts cross the API in **major units**, dates as ISO strings (`''` for
+"we don't know") — like every other route here.
+
+The whole design follows from the LAN reality: **plan state cannot be mirrored in SQLite**,
+because keeping a mirror correct would mean receiving `customer.subscription.updated`,
+`invoice.paid` and `invoice.payment_failed` — inbound webhooks a LAN-only box may never get.
+A mirror that silently stops updating is worse than no mirror: it would show "Active" for a
+plan the donor's bank stopped paying months ago. So state (status, next payment, interval,
+end date, card) is **read live from Stripe per plan** on an outbound call, which always works.
+
+The **index**, however, is deliberately **local**: the `donations` rows with `recurring = 1`
+and a non-empty `subscription_id` (`store.listRecurringDonations()`, oldest first), folded by
+the pure `groupPlanSeeds()` into one seed per subscription — the earliest row being the plan's
+origin (campaign, Stripe account, donor name/email, currency, cover-fees, Gift Aid, card).
+Two security properties fall out of that and must be kept:
+
+- a subscription **we did not create** can never appear, which matters because a
+  Fabric-vaulted Stripe account is **shared** with the platform's other apps — listing
+  Stripe's subscriptions instead would show (and let an admin cancel) someone else's;
+- **tuition can never appear.** A tuition payment is written to `student_payments` and never
+  to `donations` at all (§13 route isolation), so there is no row here to group. It is
+  structurally absent, not filtered out.
+
+Every action route resolves its plan through that same local index first and 404s
+`{ error: 'Unknown plan.' }` otherwise — the guard is on the *write* path too, not just the list.
+
+**The money is local.** "Collected so far", "payments" and "last payment" are sums over those
+rows (succeeded only — a pending or failed row is not income), in the plan's own currency.
+
+The two **headline** figures (`stats.monthlyTotal`, `stats.collected`) wear a single symbol —
+`stats.currency`, the masjid currency — so only plans actually charged in that currency are
+folded into them, and `message` says so when any plan was left out. A second Stripe account in
+another currency would otherwise make the headline a sum of mixed units under one symbol, and
+worse with a zero-decimal currency, where ¥1,000 and £10.00 are the same number of minor units.
+
+### The 60-second cache and the `latest_invoice` change-detector
+
+`syncPlan()` caches each plan's live state for **60 s** (`?refresh=1` bypasses it), so opening
+and re-opening the tab doesn't hammer Stripe. The cached entry also keeps two markers about the
+subscription's `latest_invoice` — **its id and whether it was paid** — and keeps them **past the
+TTL**, on purpose: they are how the next sync knows whether new money can have landed. The
+invoices are re-listed when any of these is true, and skipped otherwise (so the **steady state
+is one Stripe call per plan**):
+
+- we have never synced this plan;
+- the newest invoice is a **different** one;
+- **`?refresh=1`** — a forced refresh always re-lists and reconciles, it doesn't merely skip the
+  TTL;
+- the newest invoice was **not paid** last time we looked. This is the case an id comparison
+  alone misses: when a renewal fails and Stripe **retries** it, the retry pays the *same*
+  invoice, so the id never changes and the money would go unrecorded until the plan raised its
+  next one (~30 days). Once an invoice *is* paid it can never gain money again, so "same id, and
+  already paid" really does mean there is nothing to reconcile — which is why the paid flag is
+  sufficient and no amount needs caching. `latest_invoice` is expanded on the same
+  `subscriptions.retrieve` call, so this costs nothing; an un-expanded invoice reads as unpaid,
+  erring toward an extra call rather than missed money.
+
+The markers only move forward once we have actually caught up (we saw the invoice list, or knew
+there was nothing new). If the list call failed, or the catch-up was deliberately skipped (see
+below), the old markers are kept so the next sync does it — a marker running ahead of the money
+would hide a renewal for a month.
+
+Entries are swept only when the map exceeds 2000 (dropping those over 24 h old), so the
+change-detector survives. The list refreshes at most **200 plans** per request, five in flight
+(`mapWithLimit` — a Pi must not open 200 sockets), and says so in `message` plus a log line
+rather than truncating silently. The order that cap is applied in is **`planSyncOrder()`:
+plans that have taken money first**, newest-first within each group — see "abandoned sign-ups"
+below for why newest-first alone was a denial of service on reconciliation.
+
+A failed live read is **not** backfilled from a stale cached state: `status: 'unknown'` /
+"Not known" is honest, a month-old status presented as current is not. It also matters *why* the
+read failed, so `syncPlan` reports three outcomes — `ok`, **`no-keys`** (no Stripe account with a
+secret key for this plan any more: removed from OpenMasjidOS, or the app lost the `stripe`
+capability) and `unreachable` (Stripe itself didn't answer). Only `unreachable` sets
+`stripeReachable: false` or says "please try again"; `no-keys` gets its own sentence pointing at
+Payments / OpenMasjidOS → Settings → Payments, because retrying can never fix it. The detail
+window and all four action routes use the same distinction.
+
+### Abandoned monthly sign-ups
+
+A recurring donation row is written at `/…/intent` — **before** the donor has entered a card —
+so every monthly checkout somebody starts and walks away from leaves a row behind for a
+subscription that never collected a penny, and a visitor on the masjid's own network can create
+them without logging in. Two consequences, fixed in two places:
+
+- **the refresh cap.** Filled newest-first, a burst of those sign-ups filled all 200 slots and
+  every real plan silently stopped being reconciled. `planSyncOrder()` puts paid plans first, so
+  the cap can no longer starve one.
+- **the list.** After the sync + reconciliation, a seed with **no payments** whose `startedAt` is
+  over **24 h** old (`isAbandonedSeed`, `ABANDONED_MS`) is omitted from `plans` and from
+  `stats`, and `message` says how many — hidden, but never hidden *silently*. Only a plan this
+  request actually **synced and was allowed to reconcile** may be hidden: one the cap left out
+  hasn't had its chance to heal, and once hidden the admin can't open it either, which is the
+  one route that would have reconciled it.
+
+The **order is the whole point**. A plan whose first payment really did succeed but whose
+`/confirm` never round-tripped (the donor closed the tab) *also* reads `payments === 0` locally,
+and reconciliation is the only thing that can tell the two apart. So the predicate is applied
+**after** syncing, to decide what to show — never as a filter inside `groupPlanSeeds()` or
+`listRecurringDonations()`, which feed the sync. Filtering there would permanently hide exactly
+the row that needed healing. Both halves are pure and unit-tested, including that trap case.
+
+### A GET that writes
+
+`GET /api/admin/plans` (and the detail route) reconcile, i.e. they **write**. The session cookie
+is `SameSite=Lax`, so a cross-site **top-level navigation** to `/api/admin/plans?refresh=1`
+carries it: a page an admin merely visits could force hundreds of outbound Stripe calls and
+donation `INSERT`s. It cannot read the JSON back, so this is forced work rather than disclosure —
+but the **write side only runs when the request looks like our own page's fetch**, i.e.
+`sec-fetch-site` is absent or `same-origin` (a browser navigation sends `cross-site`/`same-site`;
+`curl` and older browsers send nothing). The routes stay plain GETs and the read-only live state
+is unaffected.
+
+### Renewal reconciliation
+
+The local money figures are only truthful if renewals are recorded — which, again, is what the
+optional `invoice.paid` webhook would have done. So while syncing a plan (only when its newest
+invoice changed) we list its invoices, oldest first, and for each:
+
+- no PaymentIntent → **skip** (and log once). `payment_intent_id` is UNIQUE and defaults to
+  `''`, so inventing a key would collide with the next such invoice.
+- already have the row → if Stripe says paid and our row isn't `succeeded` (the donor closed
+  the tab), `markDonation(pi, 'succeeded')`. Stripe is the truth.
+- not paid, or `amount_paid <= 0` → skip. **A failed renewal is never recorded as a donation.**
+- otherwise `createDonation(...)`, everything descriptive copied from the plan's first row (a
+  renewal has no form of its own), stamped **`createdAt` = the date the money actually
+  arrived** (`status_transitions.paid_at`, else `created`) — otherwise a year of caught-up
+  renewals would all land in this month's total and wreck the 6-month trend chart.
+
+Idempotent twice over: we check `getDonationByPaymentIntent` first, and the UNIQUE index
+catches the concurrent-sync race (caught and logged, never breaking the tab).
+
+It is a **catch-up, not an event**: no `notify()` and no receipt email, or a masjid would get a
+dozen alerts the first time they opened the tab. Reconciled rows are written `receipt: 'stripe'`
+so the receipt outbox owes them no letter. (The webhook path keeps its `notify` — there, the
+money really did just arrive.) The one email that can still go out is the pre-existing outbox
+reacting to a *first* donation being marked succeeded: that is the donor's own receipt for
+their own payment, identical to a webhook confirm.
+
+This needed **no new table and no migration**. The only store changes are `createDonation`
+accepting optional `createdAt`/`cardBrand`/`cardLast4` (defaults unchanged for every existing
+caller) and the one read method `listRecurringDonations()`.
+
+### The manage actions, in Stripe terms
+
+- **Pause** → `subscriptions.update(id, { pause_collection: { behavior: 'void' } })`. `'void'`
+  is the only honest behaviour for a *donation*: the donor is not charged and is not billed for
+  the missed months later. A paused plan is therefore **not** a Stripe status — the
+  subscription stays `active` underneath — so `friendlyStatus()` checks `pause_collection`
+  **before** `sub.status`, or a paused plan would read "Active".
+- **Resume** → `pause_collection: null`. Not `subscriptions.resume`, which resumes the billing
+  *cycle* and can raise a catch-up invoice.
+- **Stop** → `subscriptions.cancel(id)`, always immediately. There is deliberately **no**
+  "stop at the end of the period" option (it existed briefly and was removed):
+  `cancel_at_period_end: true` does **not** take one more payment — Stripe raises no further
+  invoice — and a donation has no service period left to run out, so it is financially
+  identical to stopping now while *sounding* like the masjid still receives a month's money.
+  Offering it promised income that would never arrive. A masjid that genuinely wants one more
+  payment and then a stop uses **"stop after 1 further payment"** below, which really does take
+  one. `POST /api/admin/plans/:id/cancel` therefore takes **no body** (like pause/resume).
+  A cancelled subscription carries `ended_at` and **no** `cancel_at`, so `endsAtUnix()` reads
+  `ended_at` first — otherwise a plan the admin had just stopped would report itself
+  open-ended, one row under a "Stopped" pill.
+- **End on a date** → `cancel_at` = the **end** of that calendar day, UTC (so "stop on the
+  30th" includes the 30th), with `cancel_at_period_end: false` (the two ways of ending are
+  mutually exclusive and that field isn't Emptyable, so `false` is how it clears).
+  **Open-ended** clears both.
+- **Stop after N further payments** (N is *further* payments, not the total, and is labelled
+  that way in the UI; 1–120). Charges land at `nextPaymentAt`, then one interval later, so the
+  last charge we're promising is at `nextPaymentAt + (N − 1)` intervals and `cancel_at` must
+  fall strictly **after** it and strictly **before** the following one. We aim a day short of
+  the following charge — never *on* a charge instant, which would race Stripe's billing job.
+  For a very short interval a whole day would overshoot back past the last promised charge, so
+  the clearance is capped at half the gap; monthly (all we create) is unaffected. Month
+  arithmetic clamps the day to the target month's length (31 Jan + 1 month → 28/29 Feb),
+  matching what Stripe does with a monthly anchor. `addIntervals` / `endOfDayUnix` /
+  `cancelAtAfterCharges` are pure exports, unit-testable without Stripe.
+
+Each refusal gets its own plain sentence (already stopped, not yet taken its first payment,
+paused, no known next payment, an unworkable interval, out-of-range N, an invalid or past
+date). A Stripe failure is a **502** with one friendly sentence and a warning logged **without
+donor PII**. After a successful action we re-read the plan from Stripe and return it; if *that*
+re-read fails we return the local row (`live: false`) rather than an error — the change *was*
+applied, and a 502 there would invite the admin to do it twice.
+
+### Webhooks and degradation
+
+This feature needs **no webhook at all** — state is retrieved on demand and renewals are
+reconciled on demand, which is precisely the point. The optional per-account `invoice.paid`
+webhook stays as the faster path when the app *is* publicly reachable; the two write the same
+row and are idempotent on `payment_intent_id`.
+
+When Stripe is unreachable the tab still renders from local data — donor, campaign, amount,
+started, collected, payments, last payment — with `status: 'unknown'` ("Not known"), no next
+payment or end date, `live: false`, `stripeReachable: false` and a warm inline note. Never a
+stack trace, never an empty screen. The manage actions are the only things that genuinely
+can't work offline, and they say so. Nothing secret leaves the server: no keys, no webhook
+secret, no Stripe customer id.

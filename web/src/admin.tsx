@@ -8,17 +8,17 @@ import { useEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Bell, CalendarDays, CheckCircle2, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
-  KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, Pencil, Plus, QrCode, ReceiptText, RefreshCw, Send,
+  Ban, Bell, CalendarClock, CalendarDays, CheckCircle2, CloudOff, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
+  KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, Pause, Pencil, Play, Plus, QrCode, ReceiptText, RefreshCw, Repeat, Send,
   Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet, X,
 } from 'lucide-react';
 import {
-  checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations, getEmailReceipt,
-  getFabricStripeAccounts, getLargeDonation, getMetrics, getSession, getSettings, getThankYou, getTunnel, listCampaigns, login, logout, money,
-  saveEmailReceipt, saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
-  sendTestAlert, sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
+  cancelPlan, checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations, getEmailReceipt,
+  getFabricStripeAccounts, getLargeDonation, getMetrics, getPlan, getPlans, getSession, getSettings, getThankYou, getTunnel, listCampaigns, login, logout, money,
+  pausePlan, resumePlan, saveEmailReceipt, saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
+  schedulePlanEnd, sendTestAlert, sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
   type AccountInput, type AppInfo, type Campaign, type CampaignInput, type CampaignType, type Donation, type DonationsResult,
-  type EmailReceipt, type EmailReceiptPatch, type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
+  type EmailReceipt, type EmailReceiptPatch, type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Plan, type PlanDetailResult, type PlanSchedule, type PlansResult, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
 } from './api';
 import { useReadableTheme } from './prefs';
 import { BASE, asset, withBase } from './base';
@@ -200,11 +200,12 @@ function Onboarding({ settings, publicBase, embedded, onReload }: { settings: Se
 
 // Primary navigation — a bottom dock, like the other OpenMasjidOS apps. Each tab is a
 // distinct section; the Donations records get their own tab.
-type AdminTab = 'overview' | 'campaigns' | 'donations' | 'thankyou' | 'largegift' | 'payments' | 'settings';
+type AdminTab = 'overview' | 'campaigns' | 'donations' | 'plans' | 'thankyou' | 'largegift' | 'payments' | 'settings';
 const ADMIN_TABS: { id: AdminTab; label: string; Icon: typeof Megaphone }[] = [
   { id: 'overview', label: 'Overview', Icon: LayoutDashboard },
   { id: 'campaigns', label: 'Campaigns', Icon: Megaphone },
   { id: 'donations', label: 'Donations', Icon: ReceiptText },
+  { id: 'plans', label: 'Monthly', Icon: Repeat },
   { id: 'thankyou', label: 'Thank-you', Icon: HeartHandshake },
   { id: 'largegift', label: 'Large gifts', Icon: HandCoins },
   { id: 'payments', label: 'Payments', Icon: CreditCard },
@@ -266,6 +267,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
     overview: { title: 'Dashboard', sub: `${session.sso.username ? `Signed in as ${session.sso.username}` : 'Signed in'}${embedded ? ' · via OpenMasjidOS' : ''}` },
     campaigns: { title: 'Campaigns', sub: 'Create and manage your donation appeals.' },
     donations: { title: 'Donations', sub: 'Every gift your masjid has received.' },
+    plans: { title: 'Monthly plans', sub: 'Donors who give every month — and how to pause or stop a plan.' },
     thankyou: { title: 'Thank-you', sub: 'The message donors see right after they give.' },
     largegift: { title: 'Large gifts', sub: 'Gently suggest a fee-free way to give for big donations.' },
     payments: { title: 'Payments', sub: 'Your Stripe accounts and optional public access.' },
@@ -274,7 +276,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
 
   return (
     <>
-      <main className={`admin${tab === 'donations' ? ' admin--wide' : ''}`}>
+      <main className={`admin${tab === 'donations' || tab === 'plans' ? ' admin--wide' : ''}`}>
         <div className="page-head">
           <h1 className="page-title">{meta[tab].title}</h1>
           <p className="page-sub">{meta[tab].sub}</p>
@@ -283,6 +285,7 @@ function AdminHome({ info, session, settings, onReload, onSignedOut }: {
         {tab === 'overview' && <MetricsDashboard />}
         {tab === 'campaigns' && <CampaignsCard accounts={settings.stripeAccounts} fabric={settings.fabricStripe} currency={settings.masjid.currency} masjidName={settings.masjid.name} masjidLogo={settings.masjid.logo} publicBase={publicBase} />}
         {tab === 'donations' && <DonationsCard />}
+        {tab === 'plans' && <PlansCard />}
         {tab === 'thankyou' && (
           <div style={{ display: 'grid', gap: '1rem' }}>
             <ThankYouCard masjidName={settings.masjid.name} currency={settings.masjid.currency} />
@@ -935,8 +938,16 @@ function fmtDateTime(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
-/** "Mastercard - 5319" or '—'. */
-function cardLabel(d: Donation): string {
+/** Compact "12 Mar 2026" stamp — for dates where the time of day tells the admin nothing
+ *  (when a plan started, when the next payment is due). '' in, '' out. */
+function fmtDate(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+/** "Mastercard - 5319" or '—'. Takes anything card-shaped (a donation or a monthly plan). */
+function cardLabel(d: { cardBrand: string; cardLast4: string }): string {
   if (!d.cardBrand && !d.cardLast4) return '';
   const brand = d.cardBrand ? d.cardBrand.charAt(0).toUpperCase() + d.cardBrand.slice(1) : 'Card';
   return d.cardLast4 ? `${brand} - ${d.cardLast4}` : brand;
@@ -1074,6 +1085,542 @@ function DonationDetail({ donation, all, onClose, onPick }: {
               )}
             </>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Monthly plans (recurring donations) ─────────────────────────────────────
+/** How many plan rows the table draws. Plenty for any masjid, and it keeps the tab quick on a
+ *  Pi; anything past it is named under the table rather than quietly dropped. */
+const PLAN_ROWS = 200;
+/** The words that follow an amount: "a month", "a year", "every 3 months". Empty when we
+ *  couldn't read how often the plan repeats (Stripe unreachable). */
+function everyPhrase(p: { interval: string; intervalCount: number; frequency: string }): string {
+  if (p.intervalCount === 1) {
+    if (p.interval === 'month') return 'a month';
+    if (p.interval === 'year') return 'a year';
+    if (p.interval === 'week') return 'a week';
+    if (p.interval === 'day') return 'a day';
+  }
+  // Anything else ("Every 3 months") reads fine after an amount once it's lower-cased.
+  return p.frequency ? p.frequency.toLowerCase() : '';
+}
+/** "£25 a month" — or just "£25" when how often it repeats isn't known. */
+function planAmount(p: Plan): string {
+  const every = everyPhrase(p);
+  return every ? `${money(p.amount, p.currency)} ${every}` : money(p.amount, p.currency);
+}
+/** The plan's status in the donor-friendly words the server chose for it. Uses the phrase
+ *  variant of the pill: these labels are short sentences ("Payment failed", "Not known") and
+ *  the donations table's uppercase treatment would shout them. */
+function PlanStatus({ p }: { p: Plan }) {
+  return <span className={`don-status don-status--phrase don-status--${p.status}`}>{p.statusLabel}</span>;
+}
+/** "YYYY-MM-DD" for a date input, from an ISO stamp ('' stays ''). */
+function isoDay(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+}
+/** Step an ISO date on by `n` billing intervals. Used ONLY to show the admin, in words, which
+ *  payment will be the last one before they save "stop after N more" — the server does the
+ *  real cancel_at maths. Month/year steps clamp to the end of a short month (31 Jan + 1 month
+ *  is 28 Feb, not 2 Mar) so the sentence matches what Stripe will actually bill. */
+function addIntervals(iso: string, n: number, interval: string, intervalCount: number): Date | null {
+  const start = new Date(iso);
+  if (Number.isNaN(start.getTime()) || n < 0) return null;
+  const step = n * Math.max(1, intervalCount);
+  const out = new Date(start.getTime());
+  const day = out.getUTCDate();
+  if (interval === 'day') out.setUTCDate(out.getUTCDate() + step);
+  else if (interval === 'week') out.setUTCDate(out.getUTCDate() + step * 7);
+  else if (interval === 'month') out.setUTCMonth(out.getUTCMonth() + step);
+  else if (interval === 'year') out.setUTCFullYear(out.getUTCFullYear() + step);
+  else return null;
+  // A month/year step that overflowed (e.g. into 2 March) rolls back to the last day of the
+  // month we meant.
+  if ((interval === 'month' || interval === 'year') && out.getUTCDate() < day) out.setUTCDate(0);
+  return out;
+}
+
+/** Every monthly (recurring) plan the masjid has. The list of plans comes from our own
+ *  records; each plan's current state is read live from Stripe, so this page still works —
+ *  minus statuses — when the box can't reach the internet. */
+function PlansCard() {
+  const [data, setData] = useState<PlansResult | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false); // the Refresh button only — never the whole page
+  const [sel, setSel] = useState<Plan | null>(null);
+  // Only asked for when there are no plans at all, to tell "nobody has signed up yet" apart
+  // from "no appeal even offers monthly giving" — two very different things to say to an admin.
+  const [monthlyOffered, setMonthlyOffered] = useState<boolean | null>(null);
+
+  const load = async (refresh?: boolean) => {
+    if (refresh) setBusy(true);
+    try { setData(await getPlans(refresh)); setError(''); }
+    catch (e) { setError(msg(e)); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (!data || data.plans.length > 0 || monthlyOffered !== null) return;
+    listCampaigns()
+      .then((cs) => setMonthlyOffered(cs.some((c) => c.active && c.allowMonthly && c.type !== 'tuition')))
+      .catch(() => { /* the empty state simply stays general */ });
+  }, [data, monthlyOffered]);
+
+  const stats = data?.stats;
+  const plans = data?.plans ?? [];
+  const shown = plans.slice(0, PLAN_ROWS);
+  // With no live state every plan comes back 'unknown', so nothing counts as active and
+  // "£0.00 a month from 0 active plans" would be a measurement we never took. Only the two
+  // halves that come from our own records are true then. Keyed on whether any row actually
+  // carries live state — Stripe being reachable isn't enough, since a plan whose Stripe keys
+  // have gone reaches Stripe fine and still tells us nothing.
+  const liveStats = !!data?.stripeReachable && plans.some((p) => p.live);
+  return (
+    <section className="don-page">
+      <div className="card-head">
+        <Repeat size={18} className="panel-ico" aria-hidden="true" />
+        <div className="card-head__main">
+          <div className="row-between">
+            <h2 className="section-title-inline">Monthly plans</h2>
+            <button className="btn btn--ghost btn--sm" onClick={() => void load(true)} disabled={busy}>
+              {busy ? <span className="spinner" /> : <RefreshCw size={14} />} Refresh
+            </button>
+          </div>
+          {stats && (
+            <p className="muted">
+              {liveStats && (
+                <>
+                  {money(stats.monthlyTotal, stats.currency)} a month from {stats.active} active plan{stats.active === 1 ? '' : 's'}
+                  {' · '}
+                </>
+              )}
+              {stats.plans} plan{stats.plans === 1 ? '' : 's'} in all
+              {' · '}{money(stats.collected, stats.currency)} collected so far
+            </p>
+          )}
+        </div>
+      </div>
+
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {data && !data.stripeReachable && (
+        <p className="muted plan-note">
+          <CloudOff size={14} aria-hidden="true" />
+          {data.message || 'We couldn’t reach Stripe just now, so this is what your own records say. The amounts and dates are right; each plan’s current status will fill in once Stripe can be reached again.'}
+        </p>
+      )}
+      {data && data.stripeReachable && data.message && <p className="muted plan-note">{data.message}</p>}
+
+      {!data ? (error ? null : <span className="spinner" aria-label="Loading monthly plans" />) : plans.length === 0 ? (
+        monthlyOffered === false ? (
+          <p className="muted">
+            None of your appeals offer monthly giving yet. Open one on the <b>Campaigns</b> tab and tick
+            “Offer a monthly (recurring) option” — donors can then choose to give every month, and their plans
+            will appear here.
+          </p>
+        ) : (
+          <p className="muted">
+            No monthly plans yet. When a donor chooses to give every month, their plan appears here with everything
+            they’ve given so far — and you can pause or stop it from here.
+          </p>
+        )
+      ) : (
+        <div className="don-scroll">
+          <table className="don-table">
+            <thead><tr>
+              <th>Plan</th><th>Donor</th><th>Campaign</th><th>Amount</th><th>Collected</th><th>Last paid</th><th>Next payment</th><th>Card</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+              {shown.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    <button className="don-id" onClick={() => setSel(p)} title="Manage this monthly plan">{p.ref}</button>
+                    <div className="don-date">started {fmtDate(p.startedAt)}</div>
+                  </td>
+                  <td>
+                    {p.donorName
+                      ? <button className="don-id" onClick={() => setSel(p)}>{p.donorName}</button>
+                      : <span className="faint">Not given</span>}
+                    <div className="don-date">{p.donorEmail || '—'}</div>
+                  </td>
+                  <td>{p.campaignTitle || <span className="faint">—</span>}</td>
+                  <td>{planAmount(p)}</td>
+                  <td>{money(p.collected, p.currency)}<span className="faint"> · {p.payments} payment{p.payments === 1 ? '' : 's'}</span></td>
+                  <td>{fmtDate(p.lastPaymentAt) || <span className="faint">—</span>}</td>
+                  <td>{fmtDate(p.nextPaymentAt) || <span className="faint">—</span>}</td>
+                  <td>{cardLabel(p) || <span className="faint">—</span>}</td>
+                  <td><PlanStatus p={p} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {/* Say so rather than let the older rows simply disappear off the bottom. */}
+          {plans.length > shown.length && (
+            <p className="hint">Showing the {shown.length} newest of {plans.length} plans.</p>
+          )}
+        </div>
+      )}
+      {sel && <PlanDetail seed={sel} onClose={() => setSel(null)} onChanged={() => void load()} />}
+    </section>
+  );
+}
+
+/** One plan, with everything the masjid can do to it. The window opens on what the list
+ *  already knew (so it never flashes empty), then fills in the live detail + payment history. */
+function PlanDetail({ seed, onClose, onChanged }: { seed: Plan; onClose: () => void; onChanged: () => void }) {
+  const [detail, setDetail] = useState<PlanDetailResult | null>(null);
+  const [loadErr, setLoadErr] = useState('');
+  const [stopOpen, setStopOpen] = useState(false);
+  const [acting, setActing] = useState(''); // which action is running ('' = none)
+  const [actErr, setActErr] = useState('');
+  const [done, setDone] = useState('');
+
+  const load = async () => {
+    try { setDetail(await getPlan(seed.id)); setLoadErr(''); }
+    catch (e) { setLoadErr(msg(e)); }
+  };
+  useEffect(() => { void load(); }, [seed.id]);
+
+  // Lock the page behind the window while it's open. Deliberately its own effect: the Escape
+  // handler below re-runs as state changes, and re-capturing the scroll value each time would
+  // restore the wrong one on close.
+  useEffect(() => {
+    const html = document.documentElement;
+    const prev = html.style.overflow;
+    html.style.overflow = 'hidden';
+    return () => { html.style.overflow = prev; };
+  }, []);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (stopOpen) setStopOpen(false); else onClose(); // back out of the confirm first
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose, stopOpen]);
+
+  const plan = detail?.plan ?? seed;
+  const reachable = detail ? detail.stripeReachable : seed.live;
+  const stopped = plan.status === 'canceled';
+  const paused = plan.status === 'paused';
+
+  /** Run one action on the plan: busy state, a friendly error, the fresh plan, and the list
+   *  behind the window kept in step. Never leave the admin guessing whether it worked. */
+  const act = async (key: string, fn: () => Promise<{ plan: Plan }>, okWords: string) => {
+    setActing(key); setActErr(''); setDone('');
+    try {
+      const { plan: fresh } = await fn();
+      setDetail((d) => (d ? { ...d, plan: fresh } : d));
+      setDone(okWords);
+      onChanged();
+      void load(); // the history and the next payment date will have moved
+    } catch (e) { setActErr(msg(e)); } finally { setActing(''); }
+  };
+
+  return (
+    <>
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal glass-raised win plan-modal" role="dialog" aria-modal="true" aria-label={`Monthly plan ${plan.ref}`} onClick={(e) => e.stopPropagation()}>
+          <div className="tl-bar">
+            <button className="tl tl--red" onClick={onClose} aria-label="Close" title="Close"><X size={9} strokeWidth={3.5} /></button>
+          </div>
+          <div className="modal-head">
+            <div>
+              <h3 className="modal-title">Monthly plan {plan.ref}</h3>
+              <p className="muted" style={{ fontSize: '0.85rem' }}>{plan.donorName || 'A donor'} · started {fmtDate(plan.startedAt)}</p>
+            </div>
+            <PlanStatus p={plan} />
+          </div>
+
+          {!reachable && (
+            <p className="muted plan-note">
+              <CloudOff size={14} aria-hidden="true" />
+              {detail?.message || 'We couldn’t reach Stripe just now. Everything below comes from your own records — the plan’s current status and its next payment will show once Stripe can be reached again.'}
+            </p>
+          )}
+
+          <div className="detail-grid">
+            {/* No Status row: the pill in the window's header above already says it. */}
+            <DetailRow label="Amount" value={planAmount(plan)} />
+            <DetailRow label="Campaign" value={plan.campaignTitle || '—'} />
+            <DetailRow label="Donor" value={plan.donorName || '—'} />
+            <DetailRow label="Contact" value={plan.donorEmail || '—'} />
+            <DetailRow label="Card" value={cardLabel(plan) || '—'} />
+            <DetailRow label="Started" value={fmtDate(plan.startedAt) || '—'} />
+            <DetailRow label="Last payment" value={fmtDate(plan.lastPaymentAt) || 'None yet'} />
+            <DetailRow
+              label="Next payment"
+              value={fmtDate(plan.nextPaymentAt) || (
+                paused ? 'Nothing while paused'
+                  : stopped ? 'None — this plan has stopped'
+                  // An end set at or before the next charge means Stripe will take nothing more,
+                  // even though the plan is still 'active'. Saying "Not known" there would read as
+                  // a fault right beside the end date the admin has just chosen.
+                  : plan.endsAt ? `None — this plan ends on ${fmtDate(plan.endsAt)}`
+                  // These two we also KNOW nothing more is coming: Stripe has given up retrying
+                  // an unpaid plan, and one that never finished never took a first payment.
+                  : plan.status === 'unpaid' ? 'None — the payments kept failing, so Stripe stopped trying'
+                  : plan.status === 'incomplete' ? 'None — the first payment never went through'
+                  : 'Not known'
+              )}
+            />
+            <DetailRow label="Collected so far" value={`${money(plan.collected, plan.currency)} · ${plan.payments} payment${plan.payments === 1 ? '' : 's'}`} />
+            {/* A plan stopped by hand has an end date in the past, so it must not read as a
+                schedule — and if Stripe didn't give us one, "it keeps going" would be a flat
+                contradiction of the "Stopped" pill two rows above. */}
+            <DetailRow
+              label={stopped ? 'Stopped' : 'Ends'}
+              value={stopped ? fmtDate(plan.endsAt) || 'This plan has stopped' : fmtDate(plan.endsAt) || 'No end set — it keeps going'}
+            />
+            <DetailRow label="Plan reference" value={plan.id} mono />
+          </div>
+
+          <div className="detail-section">
+            <h4 className="metric-h">Manage this plan</h4>
+            {stopped ? (
+              <p className="muted">This plan has stopped, so there’s nothing left to change. The donor can start a new monthly gift from your donation page whenever they like.</p>
+            ) : !reachable ? (
+              <p className="muted">Changing a plan needs Stripe, and we couldn’t reach it just now. Close this window and press <b>Refresh</b> in a moment.</p>
+            ) : (
+              <div className="list">
+                <div className="list-row">
+                  <div className="list-row__main">
+                    <div className="list-row__title">{paused ? 'Payments are paused' : 'Pause payments'}</div>
+                    <div className="list-row__sub">
+                      {paused
+                        ? 'Nothing is being taken from the donor’s card. The months missed while paused are never billed afterwards — resume whenever you like and payments simply start again.'
+                        : 'Stop taking payments for a while. Nothing is taken from the donor’s card while paused, and the missed months are never billed later. You can resume any time.'}
+                    </div>
+                  </div>
+                  <button
+                    className="btn btn--ghost btn--sm"
+                    disabled={!!acting}
+                    onClick={() => paused
+                      ? void act('resume', () => resumePlan(plan.id), 'Payments have started again.')
+                      : void act('pause', () => pausePlan(plan.id), 'Payments are paused — nothing will be taken until you resume.')}
+                  >
+                    {acting === (paused ? 'resume' : 'pause') ? <span className="spinner" /> : paused ? <Play size={14} /> : <Pause size={14} />}
+                    {paused ? 'Resume payments' : 'Pause payments'}
+                  </button>
+                </div>
+
+                <PlanEnd
+                  plan={plan}
+                  busy={!!acting}
+                  saving={acting === 'schedule'}
+                  onSave={(body, words) => void act('schedule', () => schedulePlanEnd(plan.id, body), words)}
+                />
+
+                <div className="list-row">
+                  <div className="list-row__main">
+                    <div className="list-row__title">Stop this plan</div>
+                    <div className="list-row__sub">End this monthly gift for good. Nothing already given is refunded, and the donor is never charged again.</div>
+                  </div>
+                  <button className="btn btn--ghost btn--sm" disabled={!!acting} onClick={() => setStopOpen(true)}>
+                    {acting === 'cancel' ? <span className="spinner" /> : <Ban size={14} />} Stop plan…
+                  </button>
+                </div>
+              </div>
+            )}
+            {actErr && <p className="form-error" role="alert">{actErr}</p>}
+            {done && !actErr && <p className="hint plan-ok" role="status">{done}</p>}
+          </div>
+
+          <div className="detail-section">
+            <h4 className="metric-h">Payment history</h4>
+            {loadErr ? <p className="muted">{loadErr}</p>
+              : !detail ? <span className="spinner" aria-label="Loading payments" />
+              // "Couldn't read it" must never be shown as "there are none" — the figures above
+              // come from our own records and would contradict it.
+              : detail.historyUnavailable ? <p className="muted">We couldn’t load this plan’s payments just now. The totals above come from your own records and are unaffected.</p>
+              : detail.invoices.length === 0 ? <p className="muted">No payments on this plan yet.</p>
+              : (
+                <div className="don-scroll">
+                  <table className="don-table">
+                    <thead><tr><th>Date</th><th>Amount</th><th>Status</th><th>Tries</th><th>What happened</th></tr></thead>
+                    <tbody>
+                      {detail.invoices.map((iv) => (
+                        <tr key={iv.id}>
+                          <td>
+                            {fmtDate(iv.date) || '—'}
+                            {iv.number && <div className="don-date">{iv.number}</div>}
+                          </td>
+                          <td>{money(iv.paid > 0 ? iv.paid : iv.amount, iv.currency)}</td>
+                          <td><span className={`don-status don-status--phrase don-status--${iv.status}`}>{iv.statusLabel}</span></td>
+                          <td>{iv.attempts > 0 ? iv.attempts : <span className="faint">—</span>}</td>
+                          <td className="plan-why">
+                            {iv.failureReason || <span className="faint">—</span>}
+                            {iv.hostedUrl && (
+                              <> <a href={iv.hostedUrl} target="_blank" rel="noreferrer noopener">Open in Stripe <ExternalLink size={11} /></a></>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+          </div>
+        </div>
+      </div>
+      {/* A sibling of the window, not a child: the glass card's backdrop-filter would trap a
+          fixed-position dialog inside it. */}
+      {stopOpen && (
+        <PlanStopConfirm
+          plan={plan}
+          onClose={() => setStopOpen(false)}
+          onStop={() => {
+            setStopOpen(false);
+            void act('cancel', () => cancelPlan(plan.id), 'This plan has stopped — the donor won’t be charged again.');
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+/** "When it ends": keep going, finish on a chosen day, or take a set number of FURTHER
+ *  payments and stop. The consequence is spelled out before saving, because this is exactly
+ *  where a masjid would otherwise take one payment too many or one too few. */
+function PlanEnd({ plan, busy, saving, onSave }: {
+  plan: Plan; busy: boolean; saving: boolean; onSave: (body: PlanSchedule, words: string) => void;
+}) {
+  const [mode, setMode] = useState<'open-ended' | 'date' | 'count'>(plan.endsAt ? 'date' : 'open-ended');
+  const [date, setDate] = useState(() => isoDay(plan.endsAt));
+  const [count, setCount] = useState('3');
+  const [err, setErr] = useState('');
+  // Seed the form from the plan when a DIFFERENT plan is shown — deliberately not on
+  // `plan.endsAt`. Saving "stop after 5 further payments" makes the server derive an end date,
+  // and re-seeding on that would flip the admin's own choice to "End on a day" underneath them,
+  // contradicting the success line and turning the next Save into a plain date (which would
+  // replace the race-safe cancel_at the count path sets).
+  useEffect(() => {
+    setMode(plan.endsAt ? 'date' : 'open-ended');
+    setDate(isoDay(plan.endsAt));
+    setErr('');
+  }, [plan.id]);
+
+  const nextIso = plan.nextPaymentAt;
+  const canCount = !!nextIso && !!plan.interval;
+  // Why counting from the next payment isn't on offer — and how to get it back. An end already
+  // set at or before the next charge leaves us no next payment to count from, which is a very
+  // different thing from not knowing when it is.
+  // An existing end date is checked FIRST: it is the one thing the admin must clear before
+  // counting works, so leading with "resume payments" on a paused plan that also has an end set
+  // would send them round twice.
+  const countBlocked = canCount ? ''
+    : plan.endsAt
+      ? 'This plan already has an end date — choose “Keep going until I stop it” and save, then you can count from the next payment.'
+      : plan.status === 'paused'
+        ? 'Payments are paused, so there’s no next payment to count from — resume payments, then you can count from it.'
+        : 'We don’t know when the next payment is due yet, so we can’t count from it.';
+  const n = Number(count);
+  const countOk = Number.isInteger(n) && n >= 1 && n <= 120;
+  // The last payment is at the next one plus (n − 1) further intervals; the server then ends
+  // the plan between that charge and the one after it.
+  const lastPay = canCount && countOk ? addIntervals(nextIso, n - 1, plan.interval, plan.intervalCount) : null;
+  const endMoment = date ? new Date(`${date}T23:59:59Z`) : null;
+  const endsBeforeNext = !!(endMoment && nextIso && endMoment.getTime() < new Date(nextIso).getTime());
+
+  let consequence = 'It keeps going until you stop it.';
+  if (mode === 'date') {
+    if (!endMoment || Number.isNaN(endMoment.getTime())) consequence = 'Pick the day this plan should finish.';
+    else if (endsBeforeNext) consequence = `No further payment will be taken — the plan ends on ${fmtDate(endMoment.toISOString())}.`;
+    else consequence = `Payments carry on until ${fmtDate(endMoment.toISOString())}, then it ends.`;
+  } else if (mode === 'count') {
+    // The reason sits under the radio itself in this case, so don't say it twice.
+    if (!canCount) consequence = '';
+    else if (!countOk) consequence = 'Choose between 1 and 120 further payments.';
+    else if (lastPay) consequence = `Last payment ${fmtDate(lastPay.toISOString())}, then it ends.`;
+    else consequence = `${n} more payment${n === 1 ? '' : 's'}, then it ends.`;
+  }
+
+  const save = () => {
+    setErr('');
+    if (mode === 'open-ended') return onSave({ mode: 'open-ended' }, 'This plan will now keep going until you stop it.');
+    if (mode === 'date') {
+      if (!date || !endMoment || Number.isNaN(endMoment.getTime())) return setErr('Please pick the day this plan should end.');
+      if (endMoment.getTime() <= Date.now()) return setErr('Please pick a day in the future.');
+      return onSave({ mode: 'date', endDate: date }, `This plan will end on ${fmtDate(endMoment.toISOString())}.`);
+    }
+    if (!canCount) return setErr(countBlocked);
+    if (!countOk) return setErr('Please enter a number of further payments between 1 and 120.');
+    onSave({ mode: 'count', count: n }, lastPay
+      ? `Set — last payment ${fmtDate(lastPay.toISOString())}, then this plan ends.`
+      : `Set — this plan will stop after ${n} more payment${n === 1 ? '' : 's'}.`);
+  };
+
+  const radio = (value: 'open-ended' | 'date' | 'count', label: string, disabled?: boolean) => (
+    <label className="check-row">
+      <input type="radio" name={`plan-end-${plan.id}`} checked={mode === value} disabled={disabled} onChange={() => { setMode(value); setErr(''); }} />
+      <span>{label}</span>
+    </label>
+  );
+
+  return (
+    <div className="list-row">
+      <div className="list-row__main">
+        <div className="list-row__title">When it ends</div>
+        <div className="list-row__sub">Let this gift run on, finish it on a day you choose, or take a set number of further payments and then stop.</div>
+        <div className="subform glass-inset plan-end">
+          {radio('open-ended', 'Keep going until I stop it')}
+          {radio('date', 'End on a day')}
+          {mode === 'date' && (
+            <Field id={`plan-end-date-${plan.id}`} label="Day this plan ends">
+              <input id={`plan-end-date-${plan.id}`} className="input plan-in" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </Field>
+          )}
+          {radio('count', 'Stop after a set number of further payments', !canCount)}
+          {/* The disabled radio explains itself, right where it is greyed out. */}
+          {countBlocked && <p className="hint">{countBlocked}</p>}
+          {mode === 'count' && (
+            <Field id={`plan-end-count-${plan.id}`} label="Number of further payments">
+              <input id={`plan-end-count-${plan.id}`} className="input plan-in" type="number" min={1} max={120} step={1} value={count} onChange={(e) => setCount(e.target.value)} />
+            </Field>
+          )}
+          {consequence && <p className="hint">{consequence}</p>}
+          {err && <p className="form-error" role="alert" style={{ marginBlockEnd: 0 }}>{err}</p>}
+          <button className="btn btn--primary btn--sm plan-save" onClick={save} disabled={busy}>
+            {saving ? <span className="spinner" /> : <CalendarClock size={14} />} Save when it ends
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Stopping is the one change that can't be undone, so it asks first — the confirm pattern
+ *  from the donor page, in admin words.
+ *
+ *  Stopping is ONE action: straight away. There is no "stop after the next payment" here,
+ *  because Stripe raises no further invoice for a plan cancelled at the end of its period —
+ *  and for a donation there is no service period to run out either, so the two would have
+ *  been financially identical while promising the masjid money that never arrives. The way
+ *  to take one more payment and then stop is "When it ends", pointed at below. */
+function PlanStopConfirm({ plan, onClose, onStop }: {
+  plan: Plan; onClose: () => void; onStop: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal glass-raised confirm-modal" role="dialog" aria-modal="true" aria-label="Stop this monthly plan" onClick={(e) => e.stopPropagation()}>
+        <div className="donate-emblem" aria-hidden="true"><Ban size={28} /></div>
+        <h3 className="modal-title">Stop this monthly plan?</h3>
+        <p className="muted" style={{ marginBlockStart: '0.4rem' }}>
+          {plan.donorName ? `${plan.donorName}’s` : 'This'} gift of {planAmount(plan)} will end and they won’t be charged again.
+          Nothing already given is refunded, and they can start a new monthly gift whenever they like.
+        </p>
+        <p className="hint" style={{ marginBlockStart: '0.5rem' }}>
+          Want one more payment first? Set “Stop after a set number of further payments” to 1 under <b>When it ends</b>.
+        </p>
+        {/* Safe choice first, as on the donor page — the first Tab must never land on the
+            irreversible button. */}
+        <div className="confirm-actions">
+          <button className="btn btn--ghost" type="button" onClick={onClose}>Keep it going</button>
+          <button className="btn btn--danger" type="button" onClick={onStop}><Ban size={16} /> Stop now</button>
         </div>
       </div>
     </div>

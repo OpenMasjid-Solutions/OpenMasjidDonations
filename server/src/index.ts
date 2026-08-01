@@ -35,6 +35,31 @@ import {
   computeTuitionAmount,
   type TuitionSelection,
 } from './students';
+import {
+  MAX_FURTHER_PAYMENTS,
+  cancelAtAfterCharges,
+  cancelPlan,
+  endOfDayUnix,
+  endsAtUnix,
+  fetchPlanInvoices,
+  fetchPlanState,
+  frequencyLabel,
+  friendlyStatus,
+  groupPlanSeeds,
+  invoiceStatusLabel,
+  isAbandonedSeed,
+  isoFromUnix,
+  mapWithLimit,
+  nextPaymentUnix,
+  pausePlan,
+  planIsOver,
+  planSyncOrder,
+  resumePlan,
+  setPlanEnd,
+  type PlanInvoiceRaw,
+  type PlanSeed,
+  type PlanState,
+} from './plans';
 import { csvCell } from './csv';
 import { LoginLimiter } from './rateLimit';
 import { TunnelManager } from './tunnel';
@@ -810,6 +835,485 @@ async function main(): Promise<void> {
     }
     reply.header('content-type', 'text/csv; charset=utf-8').header('content-disposition', 'attachment; filename="donations.csv"');
     return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+  });
+
+  // ── Monthly plans (recurring donations) ─────────────────────────────────────
+  // The admin's view of every monthly donation plan, and the controls to pause, resume,
+  // stop or put an end date on one. Three sources, deliberately (the reasoning lives in
+  // plans.ts):
+  //   • the INDEX is LOCAL — recurring donation rows — so a subscription WE did not create
+  //     can never appear (it has no row here), which matters because a Fabric-vaulted
+  //     Stripe account is SHARED with the platform's other apps; and tuition can never
+  //     appear, because a tuition payment is written to `student_payments` and never to
+  //     `donations` at all (§13 route isolation) — structurally absent, not filtered out;
+  //   • plan STATE is read LIVE from Stripe per plan, an outbound call that works on a
+  //     LAN-only box where an inbound webhook never would;
+  //   • the MONEY is LOCAL, summed over those rows — which is only truthful if renewals
+  //     are recorded, hence reconcileRenewals below.
+  const PLAN_CACHE_MS = 60_000;
+  const PLAN_SYNC_CAP = 200; // most plans we'll ask Stripe about in one request
+  const PLAN_INVOICE_LIMIT = 24;
+  const PLAN_SYNC_CONCURRENCY = 5; // a Pi must not open 200 sockets at once
+  const STRIPE_PLAN_DOWN = 'We couldn’t reach Stripe to change this plan. Please try again.';
+  const STRIPE_PLAN_STALE = 'We couldn’t reach Stripe just now, so this shows what’s on file here. Please try again in a moment.';
+  // Missing keys are NOT an outage: the account was removed from OpenMasjidOS, or this app
+  // lost the `stripe` capability. Stripe is fine and retrying can never help, so we say so
+  // and point at the two places the admin can fix it.
+  const STRIPE_PLAN_NO_KEYS =
+    'This plan’s Stripe account isn’t set up on this device any more — check Payments, or OpenMasjidOS → Settings → Payments.';
+  const STRIPE_PLANS_NO_KEYS =
+    'Some of these plans were set up with a Stripe account that isn’t on this device any more, so we can’t show their live details — check Payments, or OpenMasjidOS → Settings → Payments.';
+
+  /** Live plan state, cached briefly so opening (or re-opening) the tab doesn't hammer
+   *  Stripe. The invoice markers are kept EVEN AFTER the TTL expires: they are how the next
+   *  sync knows whether any new money can have landed, and therefore whether listing the
+   *  invoices is worth doing. Steady state is one Stripe call per plan. */
+  const planCache = new Map<string, { at: number; state: PlanState; latestInvoiceId: string; latestInvoicePaid: boolean }>();
+
+  /** Round a summed major-unit total — floats accumulate noise once you add 200 of them. */
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+
+  /** Record any PAID invoice of this plan that we don't already hold as a donation.
+   *
+   *  This is the same insert the optional `invoice.paid` webhook performs, reached by the
+   *  reliable retrieve-on-demand route instead of an inbound hook a LAN-only masjid may
+   *  never receive. It is a CATCH-UP, not an event: no receipt email and no notify(), or a
+   *  masjid would get a dozen alerts the first time they open this tab. (The webhook path
+   *  keeps its notify — there, the money really did just arrive.)
+   *
+   *  Idempotent, twice over: `payment_intent_id` is UNIQUE, and we check for the row first.
+   *  A failed renewal is never recorded as a donation. */
+  const reconcileRenewals = (seed: PlanSeed, invoices: PlanInvoiceRaw[]): void => {
+    let warnedMissingIntent = false;
+    // Oldest first, so a plan's history lands in the order the money actually arrived.
+    for (const inv of [...invoices].sort((a, b) => a.momentUnix - b.momentUnix)) {
+      const piId = inv.paymentIntentId;
+      if (!piId) {
+        // No PaymentIntent = no key we can be idempotent on. The donations table's UNIQUE
+        // index sits on a column defaulting to '', so inventing a blank key would collide
+        // with the next such invoice. Skip it rather than guess.
+        if (!warnedMissingIntent) {
+          warnedMissingIntent = true;
+          log.warn(`monthly plan ${seed.subscriptionId}: skipped an invoice with no payment reference`);
+        }
+        continue;
+      }
+      const existing = store.getDonationByPaymentIntent(piId);
+      if (existing) {
+        // We already know this charge. If Stripe says it's paid but our row never got
+        // confirmed (the donor closed the tab, say), put that right — Stripe is the truth.
+        // (We still send nothing ourselves. If that row was owed a branded receipt, the
+        // existing receipt outbox posts it, exactly as it would after a webhook confirm —
+        // that's the donor's own receipt for their own payment, not a catch-up alert.)
+        if (inv.paid && inv.amountPaidMinor > 0 && existing.status !== 'succeeded') store.markDonation(piId, 'succeeded');
+        continue;
+      }
+      if (!inv.paid || inv.amountPaidMinor <= 0) continue; // a failed/open renewal is not income
+      try {
+        store.createDonation({
+          // Everything descriptive is copied from the plan's FIRST donation — the row the
+          // donor actually filled in. A renewal has no form of its own.
+          campaignId: seed.campaignId,
+          stripeAccountId: seed.stripeAccountId,
+          amount: inv.amountPaidMinor,
+          currency: (inv.currency || seed.currency).toUpperCase(),
+          status: 'succeeded',
+          donorName: seed.donorName,
+          donorEmail: seed.donorEmail,
+          coverFees: seed.coverFees,
+          giftAid: seed.giftAid,
+          paymentIntentId: piId,
+          recurring: true,
+          subscriptionId: seed.subscriptionId,
+          cardBrand: seed.cardBrand,
+          cardLast4: seed.cardLast4,
+          // The date the money ARRIVED, not today — otherwise a year of caught-up renewals
+          // would all land in this month's total and wreck the 6-month trend.
+          createdAt: isoFromUnix(inv.momentUnix) || new Date().toISOString(),
+          // 'stripe' = we owe no branded email for it. A catch-up must not post letters.
+          receipt: 'stripe',
+        });
+      } catch (e) {
+        // A concurrent sync of the same plan can lose the UNIQUE race — harmless, the other
+        // one wrote the row. Never let it break the tab.
+        log.warn(`monthly plan ${seed.subscriptionId}: couldn’t record a renewal: ${e instanceof Error ? e.message : 'error'}`);
+      }
+    }
+  };
+
+  /** Why a sync produced no live state. Three outcomes, not two: "we have no keys for this
+   *  plan's Stripe account any more" is a different thing from "Stripe didn't answer", and
+   *  telling an admin to try again when only the first is true wastes their afternoon. */
+  type PlanSyncOutcome = 'ok' | 'no-keys' | 'unreachable';
+  type PlanSync = { state: PlanState | null; invoices: PlanInvoiceRaw[] | null; account: ResolvedAccount | null; outcome: PlanSyncOutcome };
+
+  /** Bring one plan up to date: live state from Stripe (cached 60s unless forced), plus a
+   *  renewal reconciliation whenever new money can have landed. `state: null` means we have
+   *  no live view — the caller then renders the plan from local data alone, and reads
+   *  `outcome` to say WHY. We deliberately do NOT fall back to a stale cached state there:
+   *  "Not known" is honest, a month-old status presented as current is not.
+   *
+   *  `reconcile: false` keeps the read side and skips the WRITE side (see the list route's
+   *  same-origin check) — and then leaves the cached invoice markers alone, so the next real
+   *  sync still does the catch-up rather than believing it was already done. */
+  const syncPlan = async (seed: PlanSeed, force: boolean, reconcile = true): Promise<PlanSync> => {
+    const cached = planCache.get(seed.subscriptionId);
+    if (!force && cached && Date.now() - cached.at < PLAN_CACHE_MS) {
+      return { state: cached.state, invoices: null, account: null, outcome: 'ok' };
+    }
+    const account = await accountById(seed.stripeAccountId);
+    if (!account || !account.secretKey) return { state: null, invoices: null, account: null, outcome: 'no-keys' };
+    const state = await fetchPlanState(account.secretKey, seed.subscriptionId);
+    if (!state) return { state: null, invoices: null, account, outcome: 'unreachable' };
+    let invoices: PlanInvoiceRaw[] | null = null;
+    // When could new money have landed? Never synced this plan; a NEW newest invoice; a
+    // forced refresh (the admin pressed Refresh — always look, never just skip the TTL); or
+    // — the case a bare id comparison misses — a newest invoice that was NOT paid last time
+    // we looked. Stripe retries a failed renewal against the SAME invoice, so its id never
+    // changes; but once an invoice IS paid it can never gain money again, so "same id, and
+    // it was already paid" really does mean there is nothing to reconcile.
+    // …and once a plan is over for good, its newest invoice can never be paid either, so that
+    // last clause has to stop applying or a dead plan would re-list its invoices for ever.
+    const mayHaveNewMoney =
+      force ||
+      !cached ||
+      cached.latestInvoiceId !== state.latestInvoiceId ||
+      (!!state.latestInvoiceId && !cached.latestInvoicePaid && !planIsOver(state));
+    if (reconcile && mayHaveNewMoney) {
+      invoices = await fetchPlanInvoices(account.secretKey, seed.subscriptionId, PLAN_INVOICE_LIMIT);
+      if (invoices) reconcileRenewals(seed, invoices);
+    }
+    if (planCache.size > 2000) {
+      const stale = Date.now() - 24 * 3600_000;
+      for (const [k, v] of planCache) if (v.at < stale) planCache.delete(k);
+    }
+    // The markers may only move forward once we have actually caught up — i.e. we saw the
+    // invoice list, or there was nothing new to see. If the catch-up was skipped (not our own
+    // page's fetch) or the invoice list itself failed, keep the old markers so it happens next
+    // time; a marker that runs ahead of the money would hide a renewal until the month after.
+    const caughtUp = invoices !== null || !mayHaveNewMoney;
+    const markers = caughtUp
+      ? { latestInvoiceId: state.latestInvoiceId, latestInvoicePaid: state.latestInvoicePaid }
+      : { latestInvoiceId: cached?.latestInvoiceId ?? '', latestInvoicePaid: cached?.latestInvoicePaid ?? false };
+    // The TTL may only be extended by a sync that was allowed to WRITE. Otherwise a page an
+    // admin merely visits could navigate here every 50 seconds and keep the cache permanently
+    // warm, so the admin's own tab always got the cached early-return and reconciliation never
+    // ran — the same-origin guard above would have caused the very gap it exists to prevent.
+    planCache.set(seed.subscriptionId, { at: reconcile ? Date.now() : (cached?.at ?? 0), state, ...markers });
+    return { state, invoices, account, outcome: 'ok' };
+  };
+
+  /** One row of the plans list. Amounts cross the API in MAJOR units, in the PLAN's own
+   *  currency (which is what the donor is charged in). `live` is true when the row carries
+   *  real Stripe state — freshly fetched, or from the 60-second cache, which is still this
+   *  request's state and only seconds old; false only when we're showing local data alone. */
+  const buildPlan = (seed: PlanSeed, state: PlanState | null, titles: Map<string, string>) => {
+    const currency = (state?.currency || seed.currency || cur()).toUpperCase();
+    // Stripe's price is the truth about what's charged from now on; the first donation is
+    // the fallback (a tiered/custom price reports no unit_amount, and Stripe may be down).
+    const amountMinor = state && state.amountMinor != null ? state.amountMinor : seed.amountMinor;
+    const st = state ? friendlyStatus(state.status, state.paused) : ({ status: 'unknown', label: 'Not known' } as const);
+    const interval = state?.interval ?? '';
+    const intervalCount = state?.intervalCount ?? 0;
+    return {
+      id: seed.subscriptionId,
+      ref: donationRef(seed.firstDonationId),
+      campaignId: seed.campaignId,
+      campaignTitle: titles.get(seed.campaignId) ?? '—',
+      donorName: seed.donorName,
+      donorEmail: seed.donorEmail,
+      amount: toMajor(amountMinor, currency),
+      currency,
+      interval,
+      intervalCount,
+      frequency: frequencyLabel(interval, intervalCount),
+      status: st.status,
+      statusLabel: st.label,
+      cardBrand: state?.cardBrand || seed.cardBrand,
+      cardLast4: state?.cardLast4 || seed.cardLast4,
+      startedAt: seed.startedAt,
+      lastPaymentAt: seed.lastPaymentAt,
+      nextPaymentAt: state ? isoFromUnix(nextPaymentUnix(state)) : '',
+      collected: toMajor(seed.collectedMinor, currency),
+      payments: seed.payments,
+      endsAt: state ? isoFromUnix(endsAtUnix(state)) : '',
+      live: state !== null,
+    };
+  };
+
+  const campaignTitles = () => new Map(store.listCampaigns().map((c) => [c.id, c.title]));
+
+  /** Read + fold the whole recurring table. Not cheap, so every route reads it ONCE and
+   *  passes the array down; the only extra call is the deliberate re-read after a sync has
+   *  written renewals, which has to see the new money. */
+  const planSeeds = () => groupPlanSeeds(store.listRecurringDonations());
+
+  /** Resolve a plan from the LOCAL index. Every plan route goes through this and 404s when
+   *  the subscription id isn't one of ours — the guard that stops an admin, or a stray
+   *  request, acting on another app's subscription in a shared Stripe account. */
+  const findSeed = (seeds: PlanSeed[], id: string): PlanSeed | null => seeds.find((s) => s.subscriptionId === id) ?? null;
+
+  /** The plan as it now stands, re-read from Stripe after an action. If that re-read fails
+   *  we return the local row (live:false) rather than an error: the change WAS applied, and
+   *  a 502 here would invite the admin to do it a second time. The seed re-read is required,
+   *  not wasteful: the sync above may just have recorded a renewal. */
+  const planNow = async (seed: PlanSeed) => {
+    const r = await syncPlan(seed, true);
+    return buildPlan(findSeed(planSeeds(), seed.subscriptionId) ?? seed, r.state, campaignTitles());
+  };
+
+  /** Does this request look like our own admin page's fetch?
+   *
+   *  The session cookie is SameSite=Lax, so a cross-site TOP-LEVEL navigation to
+   *  `/api/admin/plans?refresh=1` carries it: a page an admin merely visits could force
+   *  hundreds of outbound Stripe calls and donation INSERTs. It can't read the JSON back, so
+   *  this is forced work rather than disclosure — but the WRITE side (reconciliation) is
+   *  still gated on this. Our own fetch sends `same-origin`; a browser navigation sends
+   *  `cross-site`/`same-site`; curl and older browsers send nothing at all. Live state is
+   *  read either way, so the route stays a plain GET for everybody. */
+  const ownPageFetch = (req: { headers: Record<string, unknown> }): boolean => {
+    const site = req.headers['sec-fetch-site'];
+    return site === undefined || site === 'same-origin';
+  };
+
+  app.get('/api/admin/plans', { preHandler: requireAdmin }, async (req) => {
+    const force = (req.query as { refresh?: string }).refresh === '1';
+    const ownPage = ownPageFetch(req);
+    const seeds = planSeeds(); // newest first
+    // Which plans get a live refresh, in which order. Plans that have taken money go FIRST:
+    // a recurring donation row is written at /intent, BEFORE the card is entered, so every
+    // abandoned monthly checkout leaves a £0 row behind — and a visitor on the masjid's own
+    // network can create them without logging in. Filled newest-first, a burst of those would
+    // fill the cap entirely and silently stop renewal reconciliation for every real plan.
+    const syncing = planSyncOrder(seeds).slice(0, PLAN_SYNC_CAP);
+    const capped = seeds.length > syncing.length;
+    if (capped) log.warn(`monthly plans: ${seeds.length} plans — refreshing ${PLAN_SYNC_CAP} (paid plans first)`);
+    const synced = await mapWithLimit(syncing, PLAN_SYNC_CONCURRENCY, (s) => syncPlan(s, force, ownPage));
+    const syncedBySub = new Map(syncing.map((s, i) => [s.subscriptionId, synced[i]]));
+    // Re-read the money side AFTER reconciliation, so a renewal we just caught up on counts
+    // in this very response (else the first open of the tab would under-report every plan).
+    const fresh = new Map(planSeeds().map((s) => [s.subscriptionId, s]));
+
+    // Only NOW may abandoned sign-ups be dropped — after the sync, never before it. A plan
+    // whose first payment succeeded but whose /confirm never round-tripped also shows £0
+    // locally, and the reconciliation above is what puts it right; filtering earlier would
+    // hide precisely the row that needed healing (see isAbandonedSeed).
+    // …and only for a plan this request actually SYNCED. A seed the cap left out (or that we
+    // deliberately didn't reconcile, below) has not had its chance to heal, so hiding it would
+    // be acting on the very £0 we haven't checked — and once hidden the admin can't open it
+    // either, which is the one route that would have reconciled it.
+    const nowMs = Date.now();
+    const shown: PlanSeed[] = [];
+    let abandoned = 0;
+    for (const s of seeds) {
+      const seed = fresh.get(s.subscriptionId) ?? s;
+      const checked = ownPage && syncedBySub.has(s.subscriptionId);
+      if (checked && isAbandonedSeed(seed, nowMs)) abandoned += 1;
+      else shown.push(seed);
+    }
+    const titles = campaignTitles();
+    const plans = shown.map((s) => buildPlan(s, syncedBySub.get(s.subscriptionId)?.state ?? null, titles));
+
+    // "Stripe is down" only when a live read actually FAILED. A plan whose keys have gone is
+    // not Stripe's fault and must not make the whole tab claim an outage.
+    const anyUnreachable = synced.some((r) => r.outcome === 'unreachable');
+    const anyMissingKeys = synced.some((r) => r.outcome === 'no-keys');
+    // Both headline totals wear ONE currency symbol, so only plans actually charged in that
+    // currency may be folded in. A second Stripe account in another currency would otherwise
+    // make the figure a sum of mixed units — worse with a zero-decimal currency, where
+    // ¥1,000 and £10.00 are the same number of minor units.
+    const currency = cur();
+    const inCurrency = (p: { currency: string }) => p.currency === currency;
+    const mixedCurrency = plans.some((p) => !inCurrency(p));
+    const active = plans.filter((p) => p.status === 'active');
+
+    const notes: string[] = [];
+    if (anyUnreachable) notes.push('We couldn’t reach Stripe just now, so these plans show what’s on file here. Please try again in a moment.');
+    if (anyMissingKeys) notes.push(STRIPE_PLANS_NO_KEYS);
+    // Warn about staleness only when a row we're actually SHOWING missed the refresh — the raw
+    // cap can bite entirely on abandoned sign-ups that aren't on screen at all.
+    if (shown.some((s) => !syncedBySub.has(s.subscriptionId))) {
+      notes.push(`Only ${PLAN_SYNC_CAP} plans can be refreshed at once, so some further down may be out of date.`);
+    }
+    if (abandoned) {
+      notes.push(
+        abandoned === 1
+          ? '1 monthly sign-up never went through, so it isn’t shown.'
+          : `${abandoned} monthly sign-ups never went through, so they aren’t shown.`,
+      );
+    }
+    // The plan COUNT still includes them (they are real plans); only the money totals can't.
+    if (mixedCurrency) notes.push('Some plans are charged in another currency, so they aren’t included in the money totals.');
+    return {
+      data: {
+        plans,
+        stats: {
+          active: active.length,
+          plans: plans.length,
+          // Only genuinely monthly plans count toward "every month". No annualising: turning
+          // a yearly plan into a twelfth (or a weekly one into 4.33) would print a figure the
+          // masjid never actually receives in any month.
+          monthlyTotal: round2(
+            active.filter((p) => inCurrency(p) && p.interval === 'month' && p.intervalCount === 1).reduce((t, p) => t + p.amount, 0),
+          ),
+          collected: round2(plans.filter(inCurrency).reduce((t, p) => t + p.collected, 0)),
+          currency,
+        },
+        stripeReachable: !anyUnreachable,
+        ...(notes.length ? { message: notes.join(' ') } : {}),
+      },
+    };
+  });
+
+  app.get('/api/admin/plans/:id', { preHandler: requireAdmin }, async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const seed = findSeed(planSeeds(), id);
+    if (!seed) return reply.code(404).send({ error: 'Unknown plan.' });
+    const force = (req.query as { refresh?: string }).refresh === '1';
+    const ownPage = ownPageFetch(req);
+    const r = await syncPlan(seed, force, ownPage);
+    // The sync only lists invoices when new money can have landed; the detail window always
+    // wants them, so fetch them here when it didn't (but only if Stripe answered at all).
+    let raw = r.invoices;
+    if (raw === null && r.state) {
+      const acct = r.account ?? (await accountById(seed.stripeAccountId));
+      if (acct?.secretKey) raw = await fetchPlanInvoices(acct.secretKey, id, PLAN_INVOICE_LIMIT);
+      // And reconcile from exactly the invoices we are about to show. Otherwise this window
+      // can list a PAID invoice directly above a "collected so far" figure that leaves it
+      // out — the admin reads two numbers that contradict each other.
+      if (raw && ownPage) reconcileRenewals(seed, raw);
+    }
+    // Re-read the money AFTER any reconciliation above, for the same reason.
+    const plan = buildPlan(findSeed(planSeeds(), id) ?? seed, r.state, campaignTitles());
+    // Stripe lists invoices newest first, which is the order the history reads best in.
+    const invoices = (raw ?? []).map((inv) => {
+      const st = invoiceStatusLabel(inv.status);
+      return {
+        id: inv.id,
+        number: inv.number,
+        date: isoFromUnix(inv.momentUnix),
+        amount: toMajor(inv.amountDueMinor, inv.currency),
+        paid: toMajor(inv.amountPaidMinor, inv.currency),
+        currency: inv.currency,
+        status: st.status,
+        statusLabel: st.label,
+        attempts: inv.attempts,
+        failureReason: inv.failureReason,
+        hostedUrl: inv.hostedUrl,
+      };
+    });
+    // No live state: say WHICH kind of "no" it is. Missing keys can't be fixed by waiting.
+    const stale = r.outcome === 'no-keys' ? STRIPE_PLAN_NO_KEYS : STRIPE_PLAN_STALE;
+    return {
+      data: {
+        plan,
+        invoices,
+        // "We couldn't read the history" is not "there are no payments". Without this the window
+        // would print "No payments on this plan yet" directly above a header saying 4 payments.
+        historyUnavailable: raw === null,
+        stripeReachable: r.outcome !== 'unreachable',
+        ...(r.state ? {} : { message: stale }),
+      },
+    };
+  });
+
+  // An action body carries nothing (pause/resume) — but validate it anyway, so a POST with
+  // a junk body is refused politely rather than ignored.
+  const NoBody = z.object({}).optional();
+
+  app.post('/api/admin/plans/:id/pause', { preHandler: requireAdmin }, async (req, reply) => {
+    if (!NoBody.safeParse(req.body).success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const seed = findSeed(planSeeds(), (req.params as { id: string }).id);
+    if (!seed) return reply.code(404).send({ error: 'Unknown plan.' });
+    const acct = await accountById(seed.stripeAccountId);
+    if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
+    if (!(await pausePlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    return { data: { plan: await planNow(seed) } };
+  });
+
+  app.post('/api/admin/plans/:id/resume', { preHandler: requireAdmin }, async (req, reply) => {
+    if (!NoBody.safeParse(req.body).success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const seed = findSeed(planSeeds(), (req.params as { id: string }).id);
+    if (!seed) return reply.code(404).send({ error: 'Unknown plan.' });
+    const acct = await accountById(seed.stripeAccountId);
+    if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
+    if (!(await resumePlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    return { data: { plan: await planNow(seed) } };
+  });
+
+  // Stopping a plan stops it, full stop — there is no "when" to choose. `cancel_at_period_end`
+  // takes no further payment (Stripe raises no more invoices) and a donation has no service
+  // period left to run out, so it was financially identical to stopping now while sounding
+  // like one more month of money. A masjid that wants one more payment and then a stop uses
+  // "When it ends → stop after 1 further payment", which really does take one.
+  app.post('/api/admin/plans/:id/cancel', { preHandler: requireAdmin }, async (req, reply) => {
+    if (!NoBody.safeParse(req.body).success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const seed = findSeed(planSeeds(), (req.params as { id: string }).id);
+    if (!seed) return reply.code(404).send({ error: 'Unknown plan.' });
+    const acct = await accountById(seed.stripeAccountId);
+    if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
+    if (!(await cancelPlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    return { data: { plan: await planNow(seed) } };
+  });
+
+  // Give the plan an end: none (open-ended), a calendar date, or "after N MORE payments"
+  // (N is further payments, not the total — the UI says so too).
+  const PlanScheduleBody = z.discriminatedUnion('mode', [
+    z.object({ mode: z.literal('open-ended') }),
+    z.object({ mode: z.literal('date'), endDate: z.string().min(1).max(10) }),
+    // Range-checked below rather than here, so each refusal gets its own plain sentence.
+    z.object({ mode: z.literal('count'), count: z.number() }),
+  ]);
+  app.post('/api/admin/plans/:id/schedule', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = PlanScheduleBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const body = parsed.data;
+    const seed = findSeed(planSeeds(), (req.params as { id: string }).id);
+    if (!seed) return reply.code(404).send({ error: 'Unknown plan.' });
+    const acct = await accountById(seed.stripeAccountId);
+    if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
+
+    // Every mode needs the plan's live state first: Stripe rejects an end date on a stopped
+    // subscription, and answering that with "we couldn't reach Stripe" would be a lie.
+    // FORCED, never the 60-second-cached copy: "stop after N more payments" counts forward
+    // from `current_period_end`, and if a renewal landed inside that window the cached value
+    // is the charge that ALREADY happened — we would set the end one whole interval early and
+    // take one fewer donation than the admin agreed to. Forcing also freshens the
+    // stopped/paused guards below, which is a bonus. `reconcile: false` because this read only
+    // needs the subscription: skipping the invoice list keeps the click to one Stripe round
+    // trip, and `planNow` below does the catch-up anyway.
+    const r = await syncPlan(seed, true, false);
+    const state = r.state;
+    if (!state) return reply.code(502).send({ error: r.outcome === 'no-keys' ? STRIPE_PLAN_NO_KEYS : STRIPE_PLAN_DOWN });
+    const st = friendlyStatus(state.status, state.paused);
+    if (st.status === 'canceled') return reply.code(400).send({ error: 'This plan has already stopped, so there’s nothing left to schedule.' });
+
+    let cancelAt: number | null = null;
+    if (body.mode === 'date') {
+      cancelAt = endOfDayUnix(body.endDate);
+      if (cancelAt === null) return reply.code(400).send({ error: 'Please choose a valid date.' });
+      // End of the chosen day, UTC — so "stop on the 30th" includes the 30th.
+      if (cancelAt * 1000 <= Date.now()) return reply.code(400).send({ error: 'Please choose a date in the future.' });
+    } else if (body.mode === 'count') {
+      if (!Number.isInteger(body.count) || body.count < 1) return reply.code(400).send({ error: 'Please choose at least one more payment.' });
+      if (body.count > MAX_FURTHER_PAYMENTS) {
+        return reply.code(400).send({ error: `Please choose ${MAX_FURTHER_PAYMENTS} or fewer further payments.` });
+      }
+      // Counting forward needs a real next-payment date to count from.
+      if (st.status === 'incomplete') {
+        return reply.code(400).send({ error: 'This plan hasn’t taken its first payment yet — please try again once it’s active.' });
+      }
+      if (st.status === 'paused') {
+        return reply.code(400).send({ error: 'This plan is paused. Resume it first, then choose when it should stop.' });
+      }
+      const next = nextPaymentUnix(state);
+      if (!next) return reply.code(400).send({ error: 'We don’t know when the next payment is due, so we can’t count from it yet.' });
+      cancelAt = cancelAtAfterCharges(next, state.interval, state.intervalCount, body.count);
+      if (cancelAt === null) return reply.code(400).send({ error: 'We couldn’t work out this plan’s schedule — please set an end date instead.' });
+    }
+
+    if (!(await setPlanEnd(acct.secretKey, seed.subscriptionId, cancelAt))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    return { data: { plan: await planNow(seed) } };
   });
 
   // ── Metrics dashboard ───────────────────────────────────────────────────────

@@ -928,28 +928,39 @@ export class Store {
       recurring?: boolean;
       subscriptionId?: string;
       receipt?: Donation['receipt'];
+      /** Normally omitted (the row is created as the payment starts, so "now" is right).
+       *  The Monthly-plans reconciliation passes it because it is catching up on a renewal
+       *  Stripe charged weeks ago: stamping it with today's date would put the money in the
+       *  wrong month in the donations log and in the 6-month trend chart. */
+      createdAt?: string;
+      /** Also normally omitted — card details are unknown until the payment confirms and are
+       *  filled in by markDonation. A reconciled renewal already knows them (copied from the
+       *  plan's first donation), so it can supply them up front. */
+      cardBrand?: string;
+      cardLast4?: string;
     },
   ): Donation {
-    // Card details are unknown until the payment confirms — start blank, filled in by markDonation.
+    // Defaults come AFTER the spread and read from `input`, so an explicitly-passed
+    // `undefined` still falls back instead of writing undefined into the row.
     const d: Donation = {
+      ...input,
       id: rid('don'),
       status: input.status ?? 'pending',
-      cardBrand: '',
-      cardLast4: '',
+      cardBrand: input.cardBrand ?? '',
+      cardLast4: input.cardLast4 ?? '',
       recurring: input.recurring ?? false,
       subscriptionId: input.subscriptionId ?? '',
       receipt: input.receipt ?? 'stripe',
-      createdAt: new Date().toISOString(),
-      ...input,
+      createdAt: input.createdAt ?? new Date().toISOString(),
     };
     this.db
       .prepare(
         `INSERT INTO donations
           (id, campaign_id, stripe_account_id, amount, currency, status, donor_name, donor_email, cover_fees, gift_aid,
-           payment_intent_id, recurring, subscription_id, receipt, created_at)
+           payment_intent_id, card_brand, card_last4, recurring, subscription_id, receipt, created_at)
          VALUES
           (@id, @campaignId, @stripeAccountId, @amount, @currency, @status, @donorName, @donorEmail, @coverFees, @giftAid,
-           @paymentIntentId, @recurring, @subscriptionId, @receipt, @createdAt)`,
+           @paymentIntentId, @cardBrand, @cardLast4, @recurring, @subscriptionId, @receipt, @createdAt)`,
       )
       .run({ ...d, coverFees: d.coverFees ? 1 : 0, giftAid: d.giftAid ? 1 : 0, recurring: d.recurring ? 1 : 0 });
     return d;
@@ -991,6 +1002,20 @@ export class Store {
         cardLast4: opts.cardLast4 || cur.cardLast4,
       });
     return this.getDonationByPaymentIntent(pi);
+  }
+
+  /** Every donation row that belongs to a monthly (subscription) plan, OLDEST FIRST so the
+   *  first row of each subscription is the plan's origin. This is the whole index behind the
+   *  admin "Monthly plans" tab — and the reason a subscription we did not create can never
+   *  appear there (it has no row here), and the reason tuition can never appear (a tuition
+   *  payment is written to `student_payments`, never to `donations`). */
+  listRecurringDonations(): Donation[] {
+    return (
+      this.db.prepare(`SELECT * FROM donations WHERE recurring = 1 AND subscription_id <> '' ORDER BY created_at ASC`).all() as Record<
+        string,
+        unknown
+      >[]
+    ).map((r) => this.rowToDonation(r));
   }
 
   listDonations(): Donation[] {

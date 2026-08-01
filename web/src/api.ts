@@ -325,6 +325,104 @@ export const checkSlug = (slug: string, exceptId?: string) =>
     `/api/admin/campaigns/slug-check?slug=${encodeURIComponent(slug)}${exceptId ? `&exceptId=${encodeURIComponent(exceptId)}` : ''}`,
   );
 
+// ── Monthly plans (recurring donations, admin) ──────────────────────────────
+// The INDEX of plans is local (our own recurring donation rows), but the state of each one
+// — status, next payment, card, when it ends — is read live from Stripe on request, because
+// a masjid box is usually LAN-only and inbound webhooks can't be relied on. So a response
+// carries `stripeReachable`: false means the rows below are still real, just showing what we
+// know locally (status 'unknown', no next payment) and `message` says so in plain words.
+
+/** One donor's recurring donation. Money figures are MAJOR units, dates ISO ('' = unknown). */
+export interface Plan {
+  /** The Stripe subscription id — also the key for every action route below. */
+  id: string;
+  /** Short display reference, from the plan's first donation (e.g. "0065A17F"). */
+  ref: string;
+  campaignId: string;
+  campaignTitle: string;
+  donorName: string;
+  donorEmail: string;
+  /** What is taken each time. */
+  amount: number;
+  currency: string;
+  /** 'day' | 'week' | 'month' | 'year', or '' when we couldn't read it from Stripe. */
+  interval: string;
+  intervalCount: number;
+  /** Ready-made words for the interval: 'Monthly', 'Every 3 months', … ('' when unknown). */
+  frequency: string;
+  status: 'active' | 'paused' | 'past_due' | 'unpaid' | 'incomplete' | 'trialing' | 'canceled' | 'unknown';
+  /** The status in plain warm words — show this, never `status`. */
+  statusLabel: string;
+  cardBrand: string;
+  cardLast4: string;
+  startedAt: string;
+  lastPaymentAt: string;
+  /** '' when paused, stopped, or unknown. */
+  nextPaymentAt: string;
+  /** Everything this plan has given so far (summed from our own records). */
+  collected: number;
+  payments: number;
+  /** When it stops, if an end is set; '' = it keeps going until stopped. */
+  endsAt: string;
+  /** True when this row was read from Stripe on this request (not local-only). */
+  live: boolean;
+}
+
+/** One attempted payment on a plan. */
+export interface PlanInvoice {
+  id: string;
+  number: string;
+  date: string;
+  amount: number;
+  paid: number;
+  currency: string;
+  status: 'paid' | 'open' | 'draft' | 'void' | 'uncollectible' | 'unknown';
+  statusLabel: string;
+  attempts: number;
+  /** '' or one friendly sentence explaining a failure. */
+  failureReason: string;
+  /** Stripe-hosted invoice page, or ''. */
+  hostedUrl: string;
+}
+
+export interface PlansResult {
+  plans: Plan[];
+  stats: { active: number; plans: number; monthlyTotal: number; collected: number; currency: string };
+  stripeReachable: boolean;
+  message?: string;
+}
+export interface PlanDetailResult {
+  plan: Plan;
+  invoices: PlanInvoice[];
+  /** True when the history couldn't be read at all — which is NOT the same as "no payments". */
+  historyUnavailable: boolean;
+  stripeReachable: boolean;
+  message?: string;
+}
+
+/** When a plan should stop: never (until stopped by hand), on a date, or after N FURTHER payments. */
+export type PlanSchedule =
+  | { mode: 'open-ended' }
+  | { mode: 'date'; endDate: string } // YYYY-MM-DD
+  | { mode: 'count'; count: number }; // further payments, 1..120
+
+/** `refresh` bypasses the server's short-lived cache (a deliberate, slower Stripe round-trip). */
+export const getPlans = (refresh?: boolean) =>
+  request<PlansResult>(`/api/admin/plans${refresh ? '?refresh=1' : ''}`);
+export const getPlan = (id: string) => request<PlanDetailResult>(`/api/admin/plans/${encodeURIComponent(id)}`);
+export const pausePlan = (id: string) =>
+  request<{ plan: Plan }>(`/api/admin/plans/${encodeURIComponent(id)}/pause`, { method: 'POST', body: JSON.stringify({}) });
+export const resumePlan = (id: string) =>
+  request<{ plan: Plan }>(`/api/admin/plans/${encodeURIComponent(id)}/resume`, { method: 'POST', body: JSON.stringify({}) });
+/** Stops the plan straight away. There is deliberately no "stop at the end of the period"
+ *  option: Stripe raises no further invoice for a period-end cancel, so it would take no
+ *  extra payment — it would only look as though it did. A masjid that genuinely wants one
+ *  more payment first uses `schedulePlanEnd` with `{ mode: 'count', count: 1 }`. */
+export const cancelPlan = (id: string) =>
+  request<{ plan: Plan }>(`/api/admin/plans/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: JSON.stringify({}) });
+export const schedulePlanEnd = (id: string, body: PlanSchedule) =>
+  request<{ plan: Plan }>(`/api/admin/plans/${encodeURIComponent(id)}/schedule`, { method: 'POST', body: JSON.stringify(body) });
+
 /** Global large-donation alternative (major units on the client). threshold 0 = off. */
 export interface LargeDonation {
   threshold: number;

@@ -23,6 +23,17 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.38.0',
+    date: '2026-08-01',
+    notes: [
+      'New “Monthly” tab: every donor who gives every month, with what their plan has collected so far, when they last paid and when the next payment is due',
+      'Open a plan to pause it, start it again, or stop it — a paused plan takes nothing from the donor’s card, and the missed months are never billed later',
+      'You can now set when a plan ends: on a day you choose, or after a set number of further payments — it tells you which payment will be the last one before you save',
+      'Each plan shows its payment history, so a card that was declined reads as a sentence you can act on rather than a code',
+      'After a donor’s first monthly payment, the ones that follow used to be recorded only if you had set up a Stripe webhook — now they are picked up on their own and added to your donations, so your totals and charts stay right',
+    ],
+  },
+  {
     version: '0.37.0',
     date: '2026-07-31',
     notes: [

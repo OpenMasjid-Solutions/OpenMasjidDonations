@@ -51,7 +51,9 @@ Raspberry Pi, on your masjid's own network.
 > (**one-time and monthly** card payments via Subscriptions, confirmed by server-side
 > retrieve, with an optional per-account webhook for ongoing months), a **full-page
 > donations ledger** (each transaction has a unique ID — click it for a window with full
-> details and that donor's other gifts) with **CSV export**, and an optional **Cloudflare
+> details and that donor's other gifts) with **CSV export**, a **Monthly plans** tab (every
+> recurring donation with what it has raised, its next payment and its card — pause, resume,
+> stop, or set an end date or "stop after N more payments"), and an optional **Cloudflare
 > Tunnel** for public access (paste a tunnel token + your public domain — secure HTTPS,
 > no port-forwarding). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 

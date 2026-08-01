@@ -569,3 +569,38 @@ select.input { appearance: auto; }
 .menu-item:hover { background: var(--color-surface-hover); }
 .menu-item svg { color: var(--color-ink-muted); flex-shrink: 0; }
 .menu-foot { padding: 0.55rem 0.7rem 0.25rem; margin-block-start: 0.3rem; border-block-start: 1px solid var(--color-border); font-size: 0.8rem; color: var(--color-ink-faint); }
+
+/* ── Monthly plans (recurring donations) ──────────────────────────────────── */
+/* Plan + invoice states, sharing the .don-status pill with the donations table. Green =
+   money is flowing, amber = it needs attention, red = a payment didn't go through,
+   faint = finished or unknown. */
+/* A plan or invoice label is a phrase ("Payment failed", "Not collected", "Not known"), and the
+   table's uppercase treatment shouts several words in a way it never does with one. Same size,
+   weight and colour — sentence case only. */
+.don-status--phrase { text-transform: none; letter-spacing: 0; }
+.don-status--active, .don-status--trialing, .don-status--paid { color: var(--color-success); }
+.don-status--paused, .don-status--incomplete, .don-status--open, .don-status--draft { color: var(--color-warning); }
+.don-status--past_due, .don-status--unpaid { color: var(--color-danger); }
+.don-status--canceled, .don-status--unknown, .don-status--void, .don-status--uncollectible { color: var(--color-ink-faint); }
+
+/* A calm line above the table when Stripe couldn't be reached (or a plan cap applied) — the
+   table still renders from our own records underneath it. */
+.plan-note { display: flex; align-items: flex-start; gap: 0.4rem; font-size: 0.88rem; margin-block-end: 0.7rem; }
+.plan-note svg { flex-shrink: 0; margin-block-start: 0.15rem; }
+
+/* The plan window carries a details grid AND a payment history, so it gets a little more
+   width than the transaction window. */
+.plan-modal { width: min(42rem, 100%); }
+/* A failure reason is a sentence, so this one cell opts out of the table's nowrap (which is
+   set on `.don-table td`, hence the matching specificity here). */
+.don-table td.plan-why { white-space: normal; min-width: 15rem; }
+.plan-end { margin-block-end: 0; }
+/* Spacing comes from the surrounding `.field`, so this only has to stop a date/number input
+   stretching the whole sub-form. */
+.plan-in { max-width: 12rem; }
+.plan-save { margin-block-start: 0.55rem; }
+.plan-ok { color: var(--color-success); }
+
+/* Stopping a plan can't be undone: colour the words rather than invent a new button shape. */
+.btn--danger { background: transparent; color: var(--color-danger); box-shadow: inset 0 0 0 1px var(--color-danger); }
+.btn--danger:hover { background: var(--color-surface-hover); }
