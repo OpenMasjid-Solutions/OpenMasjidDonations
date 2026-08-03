@@ -177,7 +177,7 @@ resources:
 ## 11. Tech stack (match Display)
 
 - **TypeScript everywhere.** `strict` on, no `any` without a justifying comment.
-- **`server/`** — Node 20+ + **Fastify** REST API (WebSocket only if you actually need live updates; donations probably don't). **better-sqlite3** for storage. **`stripe`** SDK. **argon2** for the fallback admin password. Validate input with **zod**.
+- **`server/`** — Node 20+ + **Fastify** REST API (WebSocket only if you actually need live updates; donations probably don't). **better-sqlite3** for storage. **`stripe`** SDK. **scrypt** (Node built-in, N=2^16) for the fallback admin password — no external crypto dependency. Validate input with **zod**.
 - **`web/`** — **React + Vite + TypeScript + Tailwind**, **shadcn/ui** components, **Motion** for animation, **lucide-react** icons, **@stripe/react-stripe-js** for the Payment Element. One app serving the public site and the `/admin` panel.
 - **One container** via a multi-stage **Dockerfile** (build web, build server, final runtime serves the web build + API), exactly like Display. `docker compose up -d` runs it.
 - Keep it **lean and Pi-friendly**; lazy-load the admin bundle so the donor page stays light.

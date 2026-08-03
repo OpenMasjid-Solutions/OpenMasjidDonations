@@ -2334,6 +2334,24 @@ async function main(): Promise<void> {
   // `check` first so we never double-record, then re-`record-payment`. Students' daily
   // reconciliation is the FINAL backstop (it scans succeeded students-billing PIs), so this is
   // an optimization — money is never lost even if this never runs. Embedded only.
+  /** Wrap a periodic pass so it can never overlap itself (DONATIONS-052).
+   *
+   *  Both outboxes below run every 60s and each item makes a network call with an 8s timeout, so a
+   *  slow provider makes a pass outlast its own interval. Without this, a second pass starts, reads
+   *  the SAME still-pending rows, and does the work again — a duplicate receipt in the donor's inbox
+   *  and, on the tuition side, a second `record-payment` attempt for one charge. Skipping the
+   *  overlapping tick loses nothing: the rows are still pending, so the next tick picks them up. */
+  const nonOverlapping = (pass: () => Promise<void>): (() => void) => {
+    let running = false;
+    return () => {
+      if (running) return;
+      running = true;
+      void pass().finally(() => {
+        running = false;
+      });
+    };
+  };
+
   if (billingConfigured()) {
     const outbox = async () => {
       try {
@@ -2348,7 +2366,7 @@ async function main(): Promise<void> {
         }
       } catch { /* fail soft — never let the outbox crash the app */ }
     };
-    const iv = setInterval(() => void outbox(), 60_000);
+    const iv = setInterval(nonOverlapping(outbox), 60_000);
     iv.unref?.();
   }
 
@@ -2367,7 +2385,7 @@ async function main(): Promise<void> {
         }
       } catch { /* fail soft — never let the receipt outbox crash the app */ }
     };
-    const iv = setInterval(() => void receiptOutbox(), 60_000);
+    const iv = setInterval(nonOverlapping(receiptOutbox), 60_000);
     iv.unref?.();
   }
 }
