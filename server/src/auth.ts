@@ -53,9 +53,27 @@ function hmac(secret: Buffer, payload: string): string {
 
 type Audience = 'admin';
 
-export function makeToken(secret: Buffer, maxAgeMs = MAX_AGE_MS, aud: Audience = 'admin'): string {
-  const payload = Buffer.from(JSON.stringify({ exp: Date.now() + maxAgeMs, aud })).toString('base64url');
+/** `usr` is carried so the audit log can name WHO did something (DONATIONS-011) without another
+ *  platform round-trip on every request. It is inside the HMAC, so it cannot be forged; it is the
+ *  admin's own OpenMasjidOS username, which they already see in the panel. Purely additive — a token
+ *  minted before this existed simply has no `usr` and still verifies. */
+export function makeToken(secret: Buffer, maxAgeMs = MAX_AGE_MS, aud: Audience = 'admin', usr?: string): string {
+  const claims: { exp: number; aud: Audience; usr?: string } = { exp: Date.now() + maxAgeMs, aud };
+  if (usr) claims.usr = usr.slice(0, 120);
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
   return `${payload}.${hmac(secret, payload)}`;
+}
+
+/** The username inside a VALID token, or '' (unsigned/expired/absent). Verifies before reading, so
+ *  a caller can never be handed an attacker-chosen name. */
+export function tokenUser(secret: Buffer, token: string | undefined, aud: Audience = 'admin'): string {
+  if (!verifyToken(secret, token, aud) || !token) return '';
+  try {
+    const obj = JSON.parse(Buffer.from(token.slice(0, token.lastIndexOf('.')), 'base64url').toString()) as { usr?: unknown };
+    return typeof obj.usr === 'string' ? obj.usr.slice(0, 120) : '';
+  } catch {
+    return '';
+  }
 }
 
 /** Verify signature, expiry AND audience (constant-time on the signature). */

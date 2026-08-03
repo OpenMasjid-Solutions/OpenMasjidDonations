@@ -226,6 +226,22 @@ export interface StudentPayment {
   occurredAt: string;
 }
 
+/** One line of the append-only admin audit log. See the `audit_log` DDL for what may go in it —
+ *  in particular, never a key, a token, a Student ID or a donor's details. */
+export interface AuditEntry {
+  id: string;
+  /** ISO timestamp. */
+  at: string;
+  /** Who did it, as the panel knows them: an OpenMasjidOS username, or 'local admin'. */
+  actor: string;
+  /** A stable machine-ish verb, e.g. 'donations.export' or 'plan.cancel'. */
+  action: string;
+  /** The id of the thing acted on ('' when not applicable). */
+  subject: string;
+  /** A short human phrase for the panel to show. */
+  detail: string;
+}
+
 /** Cloudflare Tunnel config. The token is a CREDENTIAL — server-side only, never
  *  returned to the browser or logged. `publicHostname` is the public address the admin
  *  set up in Cloudflare (e.g. give.masjid.org); it's not secret and is used to build
@@ -356,6 +372,24 @@ export class Store {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_student_payments_pi ON student_payments(payment_intent_id);
       CREATE INDEX IF NOT EXISTS idx_student_payments_outbox ON student_payments(pay_status, record_status);
+
+      -- Append-only record of every admin action that touches money or donor data (DONATIONS-011).
+      -- This app handles donations, so "who exported the donor list, who cancelled that plan, who
+      -- rotated the Stripe key, and when" must be answerable — CLAUDE.md §8 promises the masjid a
+      -- financial record, and a second volunteer with panel access is in the threat model.
+      -- Deliberately NOT a general request log: no donor rows, no amounts, no PII beyond the actor
+      -- label the admin already sees, and never a key, token or Student ID. "detail" is a short
+      -- human phrase; "subject" is the id of the thing acted on so a row can be traced.
+      -- Nothing in the app ever UPDATEs or DELETEs from this table.
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        at TEXT NOT NULL,
+        actor TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL,
+        subject TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
     `);
     // Tighten file perms where the OS supports it (secrets + admin hash live here).
     try {
@@ -1016,6 +1050,39 @@ export class Store {
         unknown
       >[]
     ).map((r) => this.rowToDonation(r));
+  }
+
+  // ── Audit log (append-only) ─────────────────────────────────────────────────
+  /** Record one admin action. Never throws: an audit write must not be able to fail the action it
+   *  is describing (a masjid losing the ability to cancel a plan because a log insert failed would
+   *  be a worse outcome than a missing log line — the failure is logged instead). */
+  recordAudit(action: string, opts: { actor?: string; subject?: string; detail?: string } = {}): void {
+    try {
+      this.db
+        .prepare('INSERT INTO audit_log (id, at, actor, action, subject, detail) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(rid('aud'), new Date().toISOString(), (opts.actor ?? '').slice(0, 120), action.slice(0, 60), (opts.subject ?? '').slice(0, 120), (opts.detail ?? '').slice(0, 300));
+    } catch (e) {
+      log.warn(`couldn’t write the audit log: ${e instanceof Error ? e.message : 'error'}`);
+    }
+  }
+
+  /** Most recent audit entries, newest first.
+   *
+   *  Ordered by `rowid`, i.e. INSERTION order, not by the `at` timestamp. Two actions in the same
+   *  millisecond share an `at`, and the id tie-break is random hex — so ordering on `at` returned
+   *  them in an arbitrary order (caught by store.test.ts). Insertion order is also immune to the
+   *  clock stepping backwards, which an unattended Pi syncing NTP after a long outage really does. */
+  listAudit(limit = 200): AuditEntry[] {
+    return (this.db.prepare('SELECT * FROM audit_log ORDER BY rowid DESC LIMIT ?').all(Math.max(1, Math.min(1000, limit))) as Record<string, unknown>[]).map(
+      (r) => ({
+        id: String(r.id),
+        at: String(r.at),
+        actor: String(r.actor ?? ''),
+        action: String(r.action),
+        subject: String(r.subject ?? ''),
+        detail: String(r.detail ?? ''),
+      }),
+    );
   }
 
   listDonations(): Donation[] {

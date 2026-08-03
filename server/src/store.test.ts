@@ -228,3 +228,80 @@ test('large-donation clamps the threshold, caps the message, and allowlists qrIm
   assert.equal(s.setLargeDonation({ threshold: 25000, qrImage: 'https://ex.org/qr.png' }).qrImage, 'https://ex.org/qr.png', 'https accepted');
   assert.equal(s.getLargeDonation().threshold, 25000);
 });
+
+// ── DONATIONS-011: the admin audit log ───────────────────────────────────────
+// A money app must be able to answer "who exported the donor list / cancelled that plan / rotated
+// the Stripe key, and when". These tests pin the shape and, more importantly, the things that must
+// NEVER end up in it.
+
+test('audit log: records an action and reads it back newest-first', () => {
+  const s = fresh();
+  s.recordAudit('donations.export', { actor: 'imam', detail: 'exported the donation ledger as CSV' });
+  s.recordAudit('plan.stop', { actor: 'imam', subject: 'sub_abc', detail: 'stopped a monthly donation plan for good' });
+  const rows = s.listAudit();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].action, 'plan.stop', 'newest first');
+  assert.equal(rows[0].subject, 'sub_abc');
+  assert.equal(rows[0].actor, 'imam');
+  assert.ok(rows[0].at.endsWith('Z'), 'timestamped in ISO/UTC');
+  assert.equal(rows[1].action, 'donations.export');
+});
+
+test('audit log: an empty log is an empty list, never a crash', () => {
+  assert.deepEqual(fresh().listAudit(), []);
+});
+
+test('audit log: fields are length-capped so one row cannot be used to bloat the volume', () => {
+  const s = fresh();
+  s.recordAudit('x'.repeat(500), { actor: 'a'.repeat(500), subject: 'b'.repeat(500), detail: 'c'.repeat(2000) });
+  const [row] = s.listAudit();
+  assert.equal(row.action.length, 60);
+  assert.equal(row.actor.length, 120);
+  assert.equal(row.subject.length, 120);
+  assert.equal(row.detail.length, 300);
+});
+
+test('audit log: the limit is bounded and sane', () => {
+  const s = fresh();
+  for (let i = 0; i < 20; i++) s.recordAudit('plan.pause', { subject: `sub_${i}` });
+  assert.equal(s.listAudit(5).length, 5);
+  assert.equal(s.listAudit(0).length, 1, 'a zero/negative limit is clamped to at least one');
+  assert.equal(s.listAudit(99_999).length, 20, 'an absurd limit is clamped, not passed to SQLite');
+});
+
+test('audit log: is append-only in practice — nothing in the app updates or deletes a row', () => {
+  // Guards the invariant by construction: the Store exposes no mutator for audit_log.
+  const s = fresh();
+  s.recordAudit('plan.stop', { subject: 'sub_1' });
+  const keys = Object.getOwnPropertyNames(Object.getPrototypeOf(s));
+  const mutators = keys.filter((k) => /audit/i.test(k) && !['recordAudit', 'listAudit'].includes(k));
+  assert.deepEqual(mutators, [], `no audit mutator may exist, found: ${mutators.join(', ')}`);
+});
+
+test('audit log: a Stripe key never reaches it — the update entry names FIELDS, not values', () => {
+  // The route logs Object.keys(patch), so this pins the contract the route relies on: whatever the
+  // admin submitted, only field NAMES are recorded. A regression that logged the patch itself would
+  // put a live secret key on disk in cleartext, outside the 0600 database's own columns.
+  const s = fresh();
+  const patch = { secretKey: 'sk_live_51ABCDEFghijklmnop', publishableKey: 'pk_live_51ABCDEF' };
+  s.recordAudit('stripe.account.update', { subject: 'acct_1', detail: `changed ${Object.keys(patch).join(', ')} on a Stripe account` });
+  const [row] = s.listAudit();
+  const blob = JSON.stringify(row);
+  assert.ok(!blob.includes('sk_live'), 'no secret key');
+  assert.ok(!blob.includes('pk_live_51ABCDEF'), 'no publishable key value either');
+  assert.ok(row.detail.includes('secretKey'), 'the field name is what is recorded');
+});
+
+test('audit log: ordering is insertion order, so same-millisecond actions still read in sequence', () => {
+  // Two actions inside one millisecond share an `at`, and the id is random hex — ordering on the
+  // timestamp returned them arbitrarily. This pins the rowid ordering that replaced it, and would
+  // also catch a regression to `ORDER BY at` if the clock ever stepped backwards.
+  const s = fresh();
+  for (let i = 0; i < 25; i++) s.recordAudit('plan.pause', { subject: `sub_${i}` });
+  const rows = s.listAudit();
+  assert.deepEqual(
+    rows.map((r) => r.subject),
+    Array.from({ length: 25 }, (_, i) => `sub_${24 - i}`),
+    'strict reverse insertion order',
+  );
+});

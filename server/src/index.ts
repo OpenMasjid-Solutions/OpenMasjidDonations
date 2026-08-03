@@ -19,7 +19,7 @@ import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
-import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
+import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
 import { renderReceipt, type ReceiptContext } from './email';
 import {
@@ -189,6 +189,13 @@ async function main(): Promise<void> {
     }
   };
 
+  /** Who is acting, for the audit log. The name comes out of the SIGNED session token, so it cannot
+   *  be spoofed; a local-password session has no platform username, hence the fallback. */
+  const actorOf = (req: import('fastify').FastifyRequest): string => tokenUser(store.secret, req.cookies[COOKIE]) || 'local admin';
+  /** Append one admin action to the audit log (never throws — see store.recordAudit). */
+  const audit = (req: import('fastify').FastifyRequest, action: string, subject = '', detail = ''): void =>
+    store.recordAudit(action, { actor: actorOf(req), subject, detail });
+
   /** A fixed-window per-peer limiter, in the shape the donation and tuition limiters already use.
    *  Keyed on the real TCP peer, never a spoofable X-Forwarded-For (trustProxy is off).
    *
@@ -302,7 +309,7 @@ async function main(): Promise<void> {
       const probe = await probePlatform(req.headers.cookie);
       reachable = probe.reachable;
       if (probe.username) {
-        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS), cookieOptions(SSO_SESSION_MS, secureForRequest(req)));
+        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username), cookieOptions(SSO_SESSION_MS, secureForRequest(req)));
         authed = true;
         username = probe.username;
       }
@@ -713,6 +720,7 @@ async function main(): Promise<void> {
     const err = checkKeys(parsed.data);
     if (err) return reply.code(400).send({ error: err });
     const acct = store.createStripeAccount({ label: parsed.data.label || 'Stripe account', ...parsed.data });
+    audit(req, 'stripe.account.create', acct.id, 'added a Stripe account (' + acct.label + ')');
     const verify = acct.secretKey ? await verifySecretKey(acct.secretKey) : undefined;
     return { data: { ...publicAccount(acct), verify } };
   });
@@ -723,12 +731,15 @@ async function main(): Promise<void> {
     if (err) return reply.code(400).send({ error: err });
     const acct = store.updateStripeAccount((req.params as { id: string }).id, parsed.data);
     if (!acct) return reply.code(404).send({ error: 'Account not found.' });
+    // Which FIELDS changed, never their values — a key must never reach the log.
+    audit(req, 'stripe.account.update', acct.id, 'changed ' + (Object.keys(parsed.data).join(', ') || 'nothing') + ' on a Stripe account');
     const verify = acct.secretKey ? await verifySecretKey(acct.secretKey) : undefined;
     return { data: { ...publicAccount(acct), verify } };
   });
   app.delete('/api/admin/stripe-accounts/:id', { preHandler: requireAdmin }, async (req, reply) => {
     const res = store.deleteStripeAccount((req.params as { id: string }).id);
     if (!res.ok) return reply.code(409).send({ error: 'A campaign uses this account. Reassign or delete those campaigns first.' });
+    audit(req, 'stripe.account.delete', (req.params as { id: string }).id, 'removed a Stripe account');
     return { data: { ok: true } };
   });
   app.post('/api/admin/stripe-accounts/:id/test', { preHandler: requireAdmin }, async (req) => {
@@ -871,6 +882,10 @@ async function main(): Promise<void> {
     return { data: adminCampaign(c) };
   });
   app.delete('/api/admin/campaigns/:id', { preHandler: requireAdmin }, async (req) => {
+    const doomed = store.getCampaign((req.params as { id: string }).id);
+    // Donations keep their campaign_id but the title is gone, so the ledger shows "Deleted
+    // campaign" for ever. Record the title while we still have it.
+    audit(req, 'campaign.delete', doomed?.id ?? '', doomed ? 'deleted the campaign "' + doomed.title + '"' : 'deleted a campaign that no longer existed');
     store.deleteCampaign((req.params as { id: string }).id);
     return { data: { ok: true } };
   });
@@ -908,7 +923,10 @@ async function main(): Promise<void> {
       },
     };
   });
-  app.get('/api/admin/donations.csv', { preHandler: requireAdmin }, async (_req, reply) => {
+  app.get('/api/admin/donations.csv', { preHandler: requireAdmin }, async (req, reply) => {
+    // The one action that takes every donor's name and email OFF the box. Logged first, so the
+    // record exists even if the response never finishes.
+    audit(req, 'donations.export', '', 'exported the donation ledger as CSV');
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
     const rows = [['Ref', 'Date', 'Campaign', 'Amount', 'Currency', 'Status', 'Donor', 'Email', 'Card', 'Covered fees', 'PaymentIntent']];
     for (const d of store.listDonations()) {
@@ -1317,6 +1335,7 @@ async function main(): Promise<void> {
     const acct = await accountById(seed.stripeAccountId);
     if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
     if (!(await pausePlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.pause', seed.subscriptionId, 'paused a monthly donation plan');
     return { data: { plan: await planNow(seed) } };
   });
 
@@ -1327,6 +1346,7 @@ async function main(): Promise<void> {
     const acct = await accountById(seed.stripeAccountId);
     if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
     if (!(await resumePlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.resume', seed.subscriptionId, 'resumed a monthly donation plan');
     return { data: { plan: await planNow(seed) } };
   });
 
@@ -1342,6 +1362,7 @@ async function main(): Promise<void> {
     const acct = await accountById(seed.stripeAccountId);
     if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
     if (!(await cancelPlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.stop', seed.subscriptionId, 'stopped a monthly donation plan for good');
     return { data: { plan: await planNow(seed) } };
   });
 
@@ -1402,6 +1423,7 @@ async function main(): Promise<void> {
     }
 
     if (!(await setPlanEnd(acct.secretKey, seed.subscriptionId, cancelAt))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.schedule', seed.subscriptionId, cancelAt ? 'set when a monthly plan ends' : 'removed a monthly plan end date');
     return { data: { plan: await planNow(seed) } };
   });
 
