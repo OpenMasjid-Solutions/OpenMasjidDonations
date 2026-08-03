@@ -139,6 +139,12 @@ token; the OpenMasjidOS per-app secret; the admin password hash.
 Severity is rated by **actual impact in this system**, not by category name. `T` = fix tier
 (1 = shippable unreviewed, 2 = shippable but flagged, 3 = never autonomous).
 
+**52 findings: 0 Critical · 4 High · 23 Medium · 19 Low · 6 Info.** One auditor rated
+DONATIONS-002 Critical; the adversarial verifier downgraded it to High because it needs a failed
+callback rather than an attacker, and I agreed. Nothing here is rated Critical, and I would rather
+say that plainly than inflate the top of the table. Machine-readable copy in
+[`findings.json`](findings.json).
+
 | ID | Title | Sev | Conf | T | File:line | Status |
 |---|---|---|---|---|---|---|
 | DONATIONS-001 | Three-decimal currencies charged at 1/10 of the displayed amount | High | Confirmed | 3 | `server/src/stripe.ts:80` | **PR (money)** |
@@ -161,7 +167,7 @@ Severity is rated by **actual impact in this system**, not by category name. `T`
 | DONATIONS-018 | `?refresh=1` bypasses the same-origin guard on the plans sync | Med | Confirmed | 1 | `server/src/index.ts:1080` | **Fixed** |
 | DONATIONS-019 | No rate limit on the two unauthenticated routes that call the platform outbound | Med | Confirmed | 1 | `server/src/index.ts:228` | **Fixed** |
 | DONATIONS-020 | Stripe webhook route is unauthenticated with no rate limit (§9 requires one) | Low | Confirmed | 1 | `server/src/index.ts:2035` | **Fixed** |
-| DONATIONS-021 | No `requestTimeout` / `connectionTimeout` — slowloris holds sockets open | Med | Confirmed | 1 | `server/src/index.ts:117` | **Fixed** |
+| DONATIONS-021 | No `requestTimeout` bound on how long a request holds a socket | Low | Confirmed | 1 | `server/src/index.ts:117` | **Fixed** |
 | DONATIONS-022 | Donations log and CSV materialise the whole table with no pagination | Med | Confirmed | 2 | `server/src/store.ts:1022` | Deferred |
 | DONATIONS-023 | Donor name reaches the receipt Subject with CR/LF intact | Low | Confirmed | 1 | `server/src/email.ts:83` | **Fixed** |
 | DONATIONS-024 | Anonymous donations are de-anonymised by the Stripe billing-name backfill | Med | Likely | 2 | `server/src/index.ts:1639` | Deferred — ask |
