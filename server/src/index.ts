@@ -182,6 +182,48 @@ async function main(): Promise<void> {
     }
   };
 
+  /** A fixed-window per-peer limiter, in the shape the donation and tuition limiters already use.
+   *  Keyed on the real TCP peer, never a spoofable X-Forwarded-For (trustProxy is off).
+   *
+   *  NOTE the known limitation, recorded as DONATIONS-009: behind the OpenMasjidOS path-ingress or
+   *  the Cloudflare tunnel the peer is the PROXY, so every remote visitor shares one bucket. That
+   *  is a deliberate open question (trusting a forwarded header would make the login limiter
+   *  bypassable), so these caps are set generously enough that a shared bucket does not deny
+   *  service to honest traffic. The two existing limiters keep their own inline copies rather than
+   *  being refactored onto this — they work, and rewriting a live rate limiter to save six lines is
+   *  not a trade worth making. */
+  const makeRateLimiter = (perMinute: number) => {
+    const hits = new Map<string, { c: number; reset: number }>();
+    return (ip: string): boolean => {
+      const now = Date.now();
+      if (hits.size > 5000) for (const [k, w] of hits) if (w.reset <= now) hits.delete(k);
+      const w = hits.get(ip);
+      if (!w || w.reset <= now) {
+        hits.set(ip, { c: 1, reset: now + 60_000 });
+        return true;
+      }
+      if (w.c >= perMinute) return false;
+      w.c += 1;
+      return true;
+    };
+  };
+  const peerOf = (req: import('fastify').FastifyRequest): string => req.socket.remoteAddress ?? 'unknown';
+
+  // Both of these are unauthenticated AND make an outbound call to the OpenMasjidOS core on every
+  // request (a session probe / an appearance fetch). Without a cap, anyone who can reach this box
+  // can use it as an unmetered amplifier against the platform — and each call also occupies one of
+  // the Pi's sockets for up to 4–8s. 120/min is far above any real page load.
+  const platformCallRateOk = makeRateLimiter(120);
+  // The webhook is unauthenticated by necessity (Stripe calls it). Signature verification is cheap,
+  // but resolving the account can hit the Fabric vault, so an unsigned flood still costs outbound
+  // calls. CLAUDE.md §9 asks for this limit explicitly. 300/min is ~10× Stripe's real burst rate,
+  // so a genuine event is never dropped (and Stripe retries a 429 anyway).
+  const webhookRateOk = makeRateLimiter(300);
+  // A MONTHLY intent creates a Stripe Customer + Price + Subscription + Invoice + PaymentIntent —
+  // five persistent objects, against the one a card payment creates. A donor sets up one plan, so
+  // 5/min is generous, while a burst can no longer bloat the masjid's Stripe account (DONATIONS-010).
+  const monthlyIntentRateOk = makeRateLimiter(5);
+
   // ── Health check ────────────────────────────────────────────────────────────
   app.get('/healthz', async () => ({ ok: true }));
 
@@ -215,8 +257,9 @@ async function main(): Promise<void> {
   // plain HTTP, so a direct browser fetch would be blocked as mixed content. The web
   // polls us (same origin) and we fetch the platform server-to-server. Returns the
   // platform's { v, theme, wallpaper, wallpaperImage, accent, lang } or {} (no secrets).
-  app.get('/api/public/appearance', async (_req, reply) => {
+  app.get('/api/public/appearance', async (req, reply) => {
     reply.header('cache-control', 'no-store');
+    if (!platformCallRateOk(peerOf(req))) return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
     const base = config.omosBaseUrl;
     if (!base) return {};
     try {
@@ -243,6 +286,11 @@ async function main(): Promise<void> {
     // "open it from the dashboard" apart from "OpenMasjidOS is unreachable" (a
     // migrated/down platform must offer the local-password way in, not a dead loop).
     let reachable = true;
+    // Only the SSO upgrade costs an outbound platform call, so the limit guards that branch only —
+    // an already-signed-in admin (or a standalone install) is never rate-limited out of the panel.
+    if (!authed && ssoConfigured() && !platformCallRateOk(peerOf(req))) {
+      return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
+    }
     if (!authed && ssoConfigured()) {
       const probe = await probePlatform(req.headers.cookie);
       reachable = probe.reachable;
@@ -1578,6 +1626,12 @@ async function main(): Promise<void> {
     if (monthly && (!donorName.trim() || !donorEmail.trim())) {
       return reply.code(400).send({ error: 'Please add your name and email — both are required for a monthly donation.' });
     }
+    // A monthly intent is five persistent Stripe objects, not one. Checked here — after the campaign
+    // and amount are known but BEFORE anything is created at Stripe — so a burst can't bloat the
+    // masjid's account (DONATIONS-010). The general 30/min intent limit above still applies too.
+    if (monthly && !monthlyIntentRateOk(peerOf(req))) {
+      return reply.code(429).send({ error: 'Too many monthly sign-ups from here just now. Please try again in a minute.' });
+    }
     const metadata = {
       app: 'donations', campaignId: c.id, campaign: c.title.slice(0, 120),
       coverFees: String(coverFees), giftAid: String(giftAid), recurring: String(monthly),
@@ -2064,6 +2118,7 @@ async function main(): Promise<void> {
   // charges (invoice.paid on renewal) and resiliently confirms one-time payments.
   // The signature is verified with the account's own webhook secret.
   app.post('/api/stripe/webhook/:accountId', async (req, reply) => {
+    if (!webhookRateOk(peerOf(req))) return reply.code(429).send({ error: 'Too many requests.' });
     const acct = await accountById((req.params as { accountId: string }).accountId);
     if (!acct || !acct.webhookSecret) return reply.code(400).send({ error: 'Webhook not configured.' });
     const sig = req.headers['stripe-signature'];
