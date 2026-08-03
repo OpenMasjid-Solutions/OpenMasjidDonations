@@ -76,20 +76,46 @@ export function verifyToken(secret: Buffer, token: string | undefined, aud: Audi
   }
 }
 
-// Set COOKIE_SECURE=1 (or true) for HTTPS deployments (e.g. behind the OpenMasjidOS
-// per-app TLS proxy or any reverse proxy terminating TLS) so the session cookie is
-// only sent over HTTPS. Default OFF: a masjid LAN is usually plain HTTP, and a Secure
-// cookie would silently break sign-in there.
+// Force `Secure` on every session cookie regardless of the request scheme. Rarely needed now that
+// the flag follows the actual scheme (see `secureForRequest`), but kept as an override for an
+// operator who knows their deployment is HTTPS-only and wants no scheme sniffing at all.
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1' || (process.env.COOKIE_SECURE ?? '').toLowerCase() === 'true';
 
-/** Cookie options for @fastify/cookie's setCookie. HTTP-only + SameSite=Lax + Path=/,
- *  and `Secure` when COOKIE_SECURE is set (HTTPS deployments). */
-export function cookieOptions(maxAgeMs = MAX_AGE_MS) {
+/** Did this request arrive over TLS?
+ *
+ *  Nothing in the shipped configuration ever set COOKIE_SECURE, so before this the admin session
+ *  cookie was issued WITHOUT `Secure` even in the normal deployment — where `manifest.yaml` declares
+ *  `https: true` (the platform fronts the app with TLS, required for Stripe) and `domain: true` (it
+ *  can be published on a public hostname). A 30-day admin token with no transport restriction is
+ *  then attached to any plaintext request to the same host (DONATIONS-012).
+ *
+ *  Always setting `Secure` was not an option: a masjid LAN is usually plain HTTP, and the flag would
+ *  silently lock every standalone admin out of their own panel. So it follows the scheme the request
+ *  actually arrived on.
+ *
+ *  On trusting `x-forwarded-proto` while `trustProxy` is off: reading it here is safe in a way that
+ *  reading it for a rate-limit key would not be. The header can only ever ADD `Secure` to the
+ *  cookie in the response to THAT SAME request — i.e. it can only restrict where the sender's own
+ *  cookie will be sent. There is no cross-user effect and no privilege gained, and a cross-site
+ *  attacker cannot set headers on the admin's own request in the first place. */
+export function secureForRequest(req: { protocol?: string; headers: Record<string, unknown> }): boolean {
+  if (COOKIE_SECURE) return true;
+  if (req.protocol === 'https') return true;
+  const xfp = req.headers['x-forwarded-proto'];
+  // May be a comma-separated list from a proxy chain; the client-facing hop is the first entry.
+  const first = (Array.isArray(xfp) ? xfp[0] : typeof xfp === 'string' ? xfp : '').split(',')[0].trim().toLowerCase();
+  return first === 'https';
+}
+
+/** Cookie options for @fastify/cookie's setCookie. HTTP-only + SameSite=Lax + Path=/, and `Secure`
+ *  when the request came over TLS. Pass the request; omitting it falls back to the env override
+ *  only, which is the pre-existing behaviour. */
+export function cookieOptions(maxAgeMs = MAX_AGE_MS, secure = COOKIE_SECURE) {
   return {
     httpOnly: true,
     sameSite: 'lax' as const,
     path: '/',
-    secure: COOKIE_SECURE,
+    secure,
     maxAge: Math.floor(maxAgeMs / 1000),
   };
 }

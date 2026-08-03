@@ -19,7 +19,7 @@ import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
-import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
+import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
 import { renderReceipt, type ReceiptContext } from './email';
 import {
@@ -302,7 +302,7 @@ async function main(): Promise<void> {
       const probe = await probePlatform(req.headers.cookie);
       reachable = probe.reachable;
       if (probe.username) {
-        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS), cookieOptions(SSO_SESSION_MS));
+        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS), cookieOptions(SSO_SESSION_MS, secureForRequest(req)));
         authed = true;
         username = probe.username;
       }
@@ -338,7 +338,7 @@ async function main(): Promise<void> {
     const parsed = SetupBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose a password of at least 8 characters.' });
     store.setAdmin(hashPassword(parsed.data.password), parsed.data.name?.trim());
-    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions());
+    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
     return { data: { ok: true } };
   });
 
@@ -356,7 +356,7 @@ async function main(): Promise<void> {
     const parsed = LoginBody.safeParse(req.body);
     if (parsed.success && verifyPassword(parsed.data.password, admin)) {
       loginLimiter.succeed(peer);
-      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions());
+      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
       return { data: { ok: true } };
     }
     loginLimiter.fail(peer);
