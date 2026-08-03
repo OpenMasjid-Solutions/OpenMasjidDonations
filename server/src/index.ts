@@ -812,7 +812,18 @@ async function main(): Promise<void> {
   // A short, human-friendly transaction reference derived from the donation id
   // (stable + unique enough for display; the full id stays the real key).
   const donationRef = (id: string) => id.replace(/^don_/, '').slice(0, 8).toUpperCase();
-  app.get('/api/admin/donations', { preHandler: requireAdmin }, async () => {
+  /** Donor records must never be cached — not by a browser, not by a shared proxy, and above all
+   *  not by the Cloudflare edge when the admin has turned on public access. `.csv` is one of the
+   *  extensions Cloudflare caches by default, and a response with no cache directives at a static
+   *  extension is a candidate for the edge cache — after which the cached donor list can be served
+   *  to a request carrying no session cookie at all. `vary: cookie` is belt-and-braces for any
+   *  proxy that does key on it. Applies to the JSON log as well as the export: same data. */
+  const noStoreDonorData = (reply: import('fastify').FastifyReply) => {
+    reply.header('cache-control', 'no-store, private, max-age=0').header('pragma', 'no-cache').header('vary', 'cookie');
+  };
+
+  app.get('/api/admin/donations', { preHandler: requireAdmin }, async (_req, reply) => {
+    noStoreDonorData(reply);
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
     const list = store.listDonations();
     const succeeded = list.filter((d) => d.status === 'succeeded');
@@ -833,6 +844,7 @@ async function main(): Promise<void> {
         d.donorName, d.donorEmail, card, d.coverFees ? 'yes' : 'no', d.paymentIntentId,
       ]);
     }
+    noStoreDonorData(reply);
     reply.header('content-type', 'text/csv; charset=utf-8').header('content-disposition', 'attachment; filename="donations.csv"');
     return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
   });
