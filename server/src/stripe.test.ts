@@ -49,14 +49,38 @@ test('currencyDecimals: case-insensitive, and an unknown code falls back to two'
   assert.equal(currencyDecimals(''), 2);
 });
 
-test('currencyDecimals: DONATIONS-001 — three-decimal currencies are WRONG today (charges 1/10)', () => {
-  // Stripe defines BHD/JOD/KWD/OMR/TND with THREE decimals (fils/millimes) and requires the amount
-  // to be a multiple of 10. This app returns 2, so toMinor(10, 'KWD') = 1000, which Stripe reads as
-  // 1.000 KWD — a tenth of what the donor was shown. Asserting the WRONG value on purpose: when the
-  // fix lands, this test fails and points whoever changed it at ACTION_REQUIRED.md.
-  for (const c of ['BHD', 'JOD', 'KWD', 'OMR', 'TND']) {
-    assert.equal(currencyDecimals(c), 2, `${c}: currently 2 — SHOULD be 3 (DONATIONS-001)`);
-    assert.equal(toMinor(10, c), 1000, `${c}: currently charges 1.000, donor was shown 10.000`);
+test('currencyDecimals: DONATIONS-001 — the five three-decimal currencies', () => {
+  // Stripe quotes BHD/JOD/KWD/OMR/TND in thousandths (fils/millimes). Before the fix this returned
+  // 2, so a 10.000 KWD donation was sent as 1000 minor units — 1.000 KWD, a tenth of the amount the
+  // donor was shown, with the ledger recording the full figure.
+  const three = ['BHD', 'JOD', 'KWD', 'OMR', 'TND'];
+  assert.equal(three.length, 5);
+  for (const c of three) {
+    assert.equal(currencyDecimals(c), 3, c);
+    assert.equal(toMinor(10, c), 10_000, `${c}: 10.000 must charge 10.000, not 1.000`);
+    assert.equal(toMajor(10_000, c), 10, `${c}: and read back as 10.000`);
+  }
+});
+
+test('toMinor: DONATIONS-001 — a three-decimal amount is rounded to Stripe’s multiple of 10', () => {
+  // Stripe rejects a three-decimal amount that is not a multiple of ten, so this must round rather
+  // than let the charge fail in front of the donor. Nearest-10: rounding down would quietly shave
+  // the gift, rounding up would take more than was agreed.
+  assert.equal(toMinor(10.123, 'KWD'), 10_120, 'nearest 10 (down)');
+  assert.equal(toMinor(10.126, 'KWD'), 10_130, 'nearest 10 (up)');
+  assert.equal(toMinor(10.125, 'KWD') % 10, 0, 'the boundary is still a legal amount');
+  for (const major of [1, 2.5, 7.777, 100, 1234.567]) {
+    assert.equal(toMinor(major, 'BHD') % 10, 0, `BHD ${major} must be a multiple of 10`);
+  }
+});
+
+test('withCoveredFees: DONATIONS-001 — the gross-up stays a legal three-decimal amount', () => {
+  // A gross-up that lands on a non-multiple-of-10 would be rejected by Stripe, and the donor would
+  // see a failure for an amount they never chose.
+  for (const net of [10_000, 25_000, 1_000, 999_990]) {
+    const gross = withCoveredFees(net, 'KWD');
+    assert.equal(gross % 10, 0, `KWD gross-up of ${net} → ${gross} must be a multiple of 10`);
+    assert.ok(gross > net, 'and must still be an increase');
   }
 });
 
@@ -127,15 +151,17 @@ test('withCoveredFees: is always an increase, and monotonic', () => {
   }
 });
 
-test('withCoveredFees: DONATIONS-008 — the fixed fee VANISHES for zero-decimal currencies', () => {
-  // toMinor(0.30, 'JPY') is Math.round(0.3 * 1) = 0, so the "+30c" half of the fee model silently
-  // disappears and the gross-up under-recovers by ~¥45 on every covered-fee donation. Asserting the
-  // current (wrong) behaviour so the fix is visible when it lands.
+test('withCoveredFees: DONATIONS-008 — the fixed fee no longer vanishes for zero-decimal currencies', () => {
+  // toMinor(0.30, 'JPY') is Math.round(0.3 * 1) = 0, so the "+30c" half of the model used to
+  // disappear entirely and the gross-up under-recovered on every covered-fee donation. It is now
+  // floored at one minor unit — deliberately an approximation, not an FX conversion (see the comment
+  // on fixedFeeMinor); the point is that it is no longer zero.
   const jpy = withCoveredFees(1000, 'JPY');
-  assert.equal(jpy, Math.round(1000 / (1 - 0.029)), 'currently only the percentage is applied');
-  assert.equal(jpy, 1030, 'the fixed component is 0 for JPY (DONATIONS-008)');
-  // The same net in a two-decimal currency does include the fixed part:
-  assert.equal(withCoveredFees(1000, 'GBP'), 1061);
+  assert.equal(jpy, Math.round((1000 + 1) / (1 - 0.029)), 'the fixed component is present');
+  assert.ok(jpy > Math.round(1000 / (1 - 0.029)), 'and strictly more than percentage-only');
+  // Two-decimal currencies are unchanged by the fix — this is the regression guard on the common path.
+  assert.equal(withCoveredFees(1000, 'GBP'), 1061); // (1000 + 30) / 0.971 = 1060.76 → 1061
+  assert.equal(withCoveredFees(2500, 'USD'), 2606); // (2500 + 30) / 0.971 = 2605.56 → 2606
 });
 
 // ── Key shape + mode detection ───────────────────────────────────────────────
