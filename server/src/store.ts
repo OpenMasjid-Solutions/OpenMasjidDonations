@@ -392,10 +392,23 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
     `);
     // Tighten file perms where the OS supports it (secrets + admin hash live here).
-    try {
-      fs.chmodSync(dbPath, 0o600);
-    } catch {
-      /* best-effort (e.g. Windows dev) */
+    //
+    // The DIRECTORY is locked down too, and that is the part that matters: SQLite creates
+    // `donations.db-wal` and `-shm` sidecars itself, lazily, at default permissions — and in WAL
+    // mode the most recent committed data (including a freshly saved Stripe secret key) lives in
+    // the -wal file, not the 0600 database. chmod'ing the sidecars here would be a race, since they
+    // are recreated on demand; 0700 on the directory covers every current and future file in it
+    // (DONATIONS-028). Best-effort: a no-op on Windows dev boxes and on a volume the container does
+    // not own, hence the swallowed error and the info-level note rather than a hard failure.
+    for (const [target, mode] of [
+      [path.dirname(dbPath), 0o700],
+      [dbPath, 0o600],
+    ] as const) {
+      try {
+        fs.chmodSync(target, mode);
+      } catch {
+        /* best-effort (e.g. Windows dev, or a volume we don't own) */
+      }
     }
     // Add columns introduced after first release (CREATE TABLE IF NOT EXISTS won't).
     this.ensureColumn('campaigns', 'background_image', "TEXT NOT NULL DEFAULT ''");

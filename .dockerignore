@@ -6,3 +6,13 @@
 docs
 screenshots
 *.md
+# Never let a developer's local secrets into the build context. `COPY server/ ./` and
+# `COPY web/ ./` would otherwise bake a local .env — with real Stripe keys in it — into an
+# image layer, where it survives even if a later step deletes the file (DONATIONS-027).
+.env
+**/.env
+**/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
