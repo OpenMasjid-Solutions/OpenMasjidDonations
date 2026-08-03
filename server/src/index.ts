@@ -115,6 +115,13 @@ async function main(): Promise<void> {
     // the real TCP peer below. (A future reverse-proxy deployment would set this to
     // the specific trusted proxy CIDR, not `true`.)
     bodyLimit: 1_048_576, // 1 MiB JSON cap (uploads get their own limit later)
+    // Bound how long one request may hold a socket. Node already defends the classic slowloris via
+    // `headersTimeout` (60s) and `requestTimeout` (300s), so this is a tightening rather than a hole
+    // being closed: 120s is still ample for the 5 MiB image upload over bad masjid wifi (~43 KB/s)
+    // but a quarter of the default grip on a Pi's socket table. `connectionTimeout` is deliberately
+    // NOT set — it maps to Node's socket-INACTIVITY timeout, which would also reap idle keep-alive
+    // sockets that Fastify holds for 72s by design, buying TCP churn for no security (DONATIONS-021).
+    requestTimeout: 120_000,
     // Base-path awareness (manifest `domain: true`): when OpenMasjidOS exposes us behind
     // its Cloudflare tunnel it forwards the FULL admin-chosen path prefix (e.g. /donate)
     // WITHOUT stripping it, so requests arrive as /donate/api/x, /donate/assets/y, etc.
@@ -1156,8 +1163,11 @@ async function main(): Promise<void> {
   };
 
   app.get('/api/admin/plans', { preHandler: requireAdmin }, async (req) => {
-    const force = (req.query as { refresh?: string }).refresh === '1';
     const ownPage = ownPageFetch(req);
+    // `refresh=1` must ALSO be gated on the same-origin check, not just the write side: forcing the
+    // cache open is what turns one cross-site navigation into up to 200 outbound Stripe calls, so
+    // gating only the writes left the amplification the guard exists to stop (DONATIONS-018).
+    const force = (req.query as { refresh?: string }).refresh === '1' && ownPage;
     const seeds = planSeeds(); // newest first
     // Which plans get a live refresh, in which order. Plans that have taken money go FIRST:
     // a recurring donation row is written at /intent, BEFORE the card is entered, so every
@@ -1248,8 +1258,8 @@ async function main(): Promise<void> {
     const id = (req.params as { id: string }).id;
     const seed = findSeed(planSeeds(), id);
     if (!seed) return reply.code(404).send({ error: 'Unknown plan.' });
-    const force = (req.query as { refresh?: string }).refresh === '1';
     const ownPage = ownPageFetch(req);
+    const force = (req.query as { refresh?: string }).refresh === '1' && ownPage; // see DONATIONS-018
     const r = await syncPlan(seed, force, ownPage);
     // The sync only lists invoices when new money can have landed; the detail window always
     // wants them, so fetch them here when it didn't (but only if Stripe answered at all).
