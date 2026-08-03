@@ -9,7 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/auth.test.ts src/csv.test.ts src/rateLimit.test.ts src/store.test.ts src/students.test.ts src/studentsFabric.test.ts src/email.test.ts src/plans.test.ts"
+    "test": "node --import tsx --test src/auth.test.ts src/csv.test.ts src/rateLimit.test.ts src/store.test.ts src/stripe.test.ts src/students.test.ts src/studentsFabric.test.ts src/email.test.ts src/plans.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
