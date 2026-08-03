@@ -63,6 +63,22 @@ export function fillVars(tpl: string, v: { name: string; amount: string; campaig
   return out.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+([!?.,])/g, '$1').trim();
 }
 
+/** Collapse anything that could break out of a single header line into a space.
+ *
+ *  The subject is built from the admin's template with the DONOR's own name substituted in, and the
+ *  donor is an unauthenticated stranger (`donorName` comes straight off the public intent body).
+ *  We hand the finished subject to the OpenMasjidOS Fabric as JSON, and the platform is what turns
+ *  it into a real SMTP header — so a name containing CR/LF is a header-injection attempt aimed at
+ *  the platform's mailer (`Bcc:`, a forged `From:`, an injected body). Sanitising at the sender is
+ *  cheap, harmless to every legitimate name, and does not depend on the platform getting it right;
+ *  the platform-side counterpart is recorded in docs/audit/ACTION_REQUIRED.md (DONATIONS-023). */
+function oneLine(s: string): string {
+  // Escapes, NEVER literal characters: U+2028/U+2029 are line terminators in JavaScript SOURCE,
+  // so pasting them into a regex silently ends the expression. U+0085 (NEL) and NUL are treated
+  // as line breaks or string terminators by some mail libraries, so they go too.
+  return s.replace(/[\r\n\u2028\u2029\u0085\v\f\0]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
 /** Only an http(s) absolute URL with no quotes/whitespace is allowed (img src / link href). */
 function safeUrl(url: string): string {
   const u = (url ?? '').trim();
@@ -80,7 +96,8 @@ function row(label: string, value: string, opts: { bold?: boolean; first?: boole
 export function renderReceipt(tpl: ReceiptTemplate, ctx: ReceiptContext): RenderedEmail {
   const accent = /^#[0-9a-fA-F]{3,8}$/.test((tpl.accent || '').trim()) ? tpl.accent.trim() : ACCENT_DEFAULT;
   const vars = { name: ctx.name, amount: ctx.amountText, campaign: ctx.campaignTitle, masjid: ctx.masjidName };
-  const subject = (fillVars(tpl.subject || 'Your donation receipt', vars) || 'Your donation receipt').slice(0, 200);
+  // oneLine BEFORE the length cap, so a 200-char slice can never end mid-escape or leave a CR.
+  const subject = (oneLine(fillVars(tpl.subject || 'Your donation receipt', vars)) || 'Your donation receipt').slice(0, 200);
   const heading = fillVars(tpl.heading || 'JazākAllāhu khayran!', vars) || 'JazākAllāhu khayran!';
   const paragraph = fillVars(tpl.body || 'Your donation was received. May Allah accept it from you and reward you abundantly.', vars);
   const logo = safeUrl(ctx.masjidLogo);
