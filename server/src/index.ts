@@ -146,6 +146,25 @@ async function main(): Promise<void> {
     }
   });
 
+  // ── Baseline security response headers (every route, including static) ──────
+  // Deliberately a SHORT list. Two are unambiguous wins here:
+  //   • nosniff — an upload's content type is taken from the client-declared multipart header, so
+  //     a file claiming image/png can hold anything. It is written with a server-chosen name and
+  //     extension and served from OUR origin, so without this a content-sniffing browser is the
+  //     one thing between that file and same-origin script execution.
+  //   • no-referrer — a campaign's unlisted link carries its token in the path
+  //     (/api/public/campaign/:slug/:token). Any outbound click from a donation or admin page
+  //     would otherwise hand that URL to the destination site in the Referer header.
+  // X-Frame-Options / frame-ancestors is deliberately NOT set: OpenMasjidOS embeds this app in a
+  // frame, and the widget route sets `frame-ancestors *` on purpose. A CSP is deliberately NOT set
+  // either — Stripe's Payment Element loads js.stripe.com and its own frames, and a CSP that is
+  // even slightly wrong stops donors paying. That belongs in a change someone can test against a
+  // real Stripe Element, not in a headers sweep (see docs/audit/ACTION_REQUIRED.md).
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'no-referrer');
+  });
+
   // Uploaded images live on the data volume and are served read-only at /uploads/*.
   const uploadsDir = path.join(config.dataDir, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
