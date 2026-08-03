@@ -305,3 +305,94 @@ test('audit log: ordering is insertion order, so same-millisecond actions still 
     'strict reverse insertion order',
   );
 });
+
+// ── DONATIONS-002: the lost-donation sweep's query ───────────────────────────
+// The sweep asks Stripe about pending one-time donations. Which rows it selects IS the safety
+// property: too eager and it races the donor's own /confirm and double-sends a receipt; too narrow
+// and the money stays lost.
+
+const donation = (s: Store, over: Record<string, unknown> = {}) =>
+  s.createDonation({
+    campaignId: 'cmp_1',
+    stripeAccountId: 'acct_1',
+    amount: 1000,
+    currency: 'GBP',
+    status: 'pending',
+    donorName: '',
+    donorEmail: '',
+    coverFees: false,
+    giftAid: false,
+    paymentIntentId: 'pi_' + Math.random().toString(16).slice(2),
+    ...over,
+  } as Parameters<Store['createDonation']>[0]);
+
+const MIN = 5 * 60_000;
+const MAX = 30 * 24 * 3600_000;
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+test('sweep query: picks up a pending one-time donation old enough to be abandoned', () => {
+  const s = fresh();
+  donation(s, { paymentIntentId: 'pi_lost', createdAt: ago(60 * 60_000) });
+  const found = s.listUnconfirmedDonations(MIN, MAX);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].paymentIntentId, 'pi_lost');
+});
+
+test('sweep query: will NOT race the donor — a row younger than the floor is left alone', () => {
+  // The donor may still be on the Stripe redirect. Touching this row could send two receipts.
+  const s = fresh();
+  donation(s, { paymentIntentId: 'pi_inflight', createdAt: ago(30_000) });
+  assert.deepEqual(s.listUnconfirmedDonations(MIN, MAX), []);
+});
+
+test('sweep query: ignores rows past the ceiling — an ancient PI will not settle now', () => {
+  const s = fresh();
+  donation(s, { paymentIntentId: 'pi_ancient', createdAt: ago(120 * 24 * 3600_000) });
+  assert.deepEqual(s.listUnconfirmedDonations(MIN, MAX), []);
+});
+
+test('sweep query: never touches a settled, failed, monthly or PI-less row', () => {
+  const s = fresh();
+  const old = ago(60 * 60_000);
+  donation(s, { paymentIntentId: 'pi_done', status: 'succeeded', createdAt: old });
+  donation(s, { paymentIntentId: 'pi_failed', status: 'failed', createdAt: old });
+  // Monthly plans have their own reconciliation; sweeping them here would duplicate that work.
+  donation(s, { paymentIntentId: 'pi_monthly', recurring: true, subscriptionId: 'sub_1', createdAt: old });
+  donation(s, { paymentIntentId: '', createdAt: old });
+  assert.deepEqual(s.listUnconfirmedDonations(MIN, MAX), [], 'nothing in this set is sweepable');
+});
+
+test('sweep query: tuition can never appear — it is not in the donations table at all', () => {
+  // Structural, not filtered: a tuition payment is written to student_payments (§13 route
+  // isolation), so there is no donations row for the sweep to find. Asserted against a real DB.
+  const s = fresh();
+  s.createStudentPayment({
+    campaignId: 'cmp_tuition',
+    stripeAccountId: 'acct_1',
+    paymentIntentId: 'pi_tuition',
+    familyId: 'fam_1',
+    studentId: 'stu_1',
+    familyLabel: 'The Yusuf family',
+    amount: 35_000,
+    currency: 'GBP',
+    allocations: '',
+    studentsSplit: '',
+    paymentLines: '',
+  } as Parameters<Store['createStudentPayment']>[0]);
+  donation(s, { paymentIntentId: 'pi_real', createdAt: ago(60 * 60_000) });
+  const found = s.listUnconfirmedDonations(MIN, MAX);
+  assert.deepEqual(found.map((d) => d.paymentIntentId), ['pi_real']);
+  assert.ok(!JSON.stringify(found).includes('pi_tuition'));
+  assert.ok(!JSON.stringify(found).includes('fam_1'));
+});
+
+test('sweep query: oldest first and bounded, so a backlog drains in arrival order', () => {
+  const s = fresh();
+  for (let i = 0; i < 40; i++) donation(s, { paymentIntentId: `pi_${i}`, createdAt: ago((40 - i) * 3600_000) });
+  const found = s.listUnconfirmedDonations(MIN, MAX, 25);
+  assert.equal(found.length, 25, 'bounded');
+  assert.equal(found[0].paymentIntentId, 'pi_0', 'oldest first');
+  for (let i = 1; i < found.length; i++) {
+    assert.ok(found[i - 1].createdAt <= found[i].createdAt, 'ascending by date');
+  }
+});

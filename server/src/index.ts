@@ -2370,6 +2370,67 @@ async function main(): Promise<void> {
     iv.unref?.();
   }
 
+  // ── Lost-donation sweep (DONATIONS-002) ─────────────────────────────────────
+  // A one-time card payment is marked succeeded ONLY by the donor's own /confirm callback. Close the
+  // tab, lose signal, or have the box briefly unreachable in the window between Stripe confirming
+  // and that call, and the money is taken while our row stays 'pending' for ever: absent from the
+  // ledger, the CSV, metrics(), the goal bar and any Gift Aid claim, with no receipt sent, and
+  // indistinguishable from an abandoned checkout so nobody ever looks. The optional webhook covers
+  // this only for masjids that configured one, which needs public ingress.
+  //
+  // So we ask Stripe, on the same retrieve-on-demand doctrine the monthly plans already use
+  // (CLAUDE.md §5). Deliberately conservative:
+  //   • only ever promotes pending → succeeded. A PI that Stripe says failed or was abandoned is
+  //     LEFT pending rather than marked failed — "we don't know" is honest, and writing 'failed'
+  //     from a transient read would be a lie in the ledger.
+  //   • a floor on age (5 min) so we never race the donor's own confirm and double-send a receipt.
+  //   • a ceiling (30 days) because a PI that old will not suddenly settle, and Stripe's own
+  //     retention makes the read pointless.
+  //   • the receipt goes out through the SAME 'pending' → sendDonationReceipt path as a normal
+  //     confirm, so the "Stripe's receipt or ours, never both" decision made at intent still holds.
+  //   • one alert per recovered donation, because it IS news — the masjid was never told.
+  //   • the whole pass is wrapped, bounded to 25 rows, and stops on the first unreachable account.
+  const SWEEP_MIN_AGE_MS = 5 * 60_000;
+  const SWEEP_MAX_AGE_MS = 30 * 24 * 3600_000;
+  const lostDonationSweep = async () => {
+    try {
+      for (const don of store.listUnconfirmedDonations(SWEEP_MIN_AGE_MS, SWEEP_MAX_AGE_MS)) {
+        const acct = await accountById(don.stripeAccountId);
+        if (!acct?.secretKey) continue; // keys gone for this account — nothing we can do, keep the row
+        const pi = await retrievePaymentIntent(acct, don.paymentIntentId);
+        if (!pi) break; // Stripe unreachable — stop the pass, try again next tick
+        if (pi.status !== 'succeeded') continue; // not paid (or not yet) — leave it pending
+        const updated = store.markDonation(don.paymentIntentId, 'succeeded', {
+          donorName: pi.billingName || don.donorName,
+          donorEmail: pi.receiptEmail || don.donorEmail,
+          cardBrand: pi.cardBrand,
+          cardLast4: pi.cardLast4,
+        });
+        const camp = store.getCampaign(don.campaignId);
+        log.warn(`recovered a donation Stripe took but we never recorded (${don.paymentIntentId})`);
+        void notify({
+          title: 'Donation recovered',
+          text: `A donation of ${formatMoney(pi.amount, pi.currency)} to “${camp?.title ?? 'your masjid'}” had been paid but not recorded — it is now in your donations.`,
+          level: 'success',
+        }).catch(() => {});
+        if (don.receipt === 'pending') {
+          void sendDonationReceipt(updated ?? don)
+            .then((r) => {
+              if (r.sent) store.setDonationReceipt(don.paymentIntentId, 'sent');
+              else if (!r.retry) store.setDonationReceipt(don.paymentIntentId, 'skipped');
+            })
+            .catch(() => {});
+        }
+      }
+    } catch { /* fail soft — a sweep must never crash the app */ }
+  };
+  {
+    // Every 10 minutes: frequent enough that a donor's receipt is only minutes late, rare enough
+    // that an idle masjid makes almost no outbound calls.
+    const iv = setInterval(nonOverlapping(lostDonationSweep), 10 * 60_000);
+    iv.unref?.();
+  }
+
   // Branded-receipt retry outbox: any succeeded donation still owing a receipt (a transient
   // email failure at confirm) is retried until it lands. Bounded to recent donations so we don't
   // chase ancient ones; stops the pass on a system failure (email down) and resumes next tick.

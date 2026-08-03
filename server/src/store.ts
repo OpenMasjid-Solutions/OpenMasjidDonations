@@ -1120,6 +1120,32 @@ export class Store {
     ).map((r) => this.rowToDonation(r));
   }
 
+  /** One-time donations still sitting at 'pending', old enough that the donor's browser is never
+   *  coming back, and young enough to be worth asking Stripe about (DONATIONS-002).
+   *
+   *  A one-time payment is only marked succeeded by the donor's own `/confirm` callback, so a closed
+   *  tab, a lost signal or a momentarily unreachable box leaves money taken at Stripe and NOTHING
+   *  recorded here — missing from the ledger, the CSV, the totals and the goal bar, with no receipt,
+   *  for ever. This feeds the sweep that asks Stripe about each one.
+   *
+   *  `recurring = 0` because monthly plans have their own reconciliation (reconcileRenewals), which
+   *  is both cheaper and more complete for them. Oldest first, so a backlog drains in the order the
+   *  money arrived. The window has a floor as well as a ceiling: a row younger than `minAgeMs` may
+   *  still be mid-confirmation, and racing the donor's own callback would double-send the receipt. */
+  listUnconfirmedDonations(minAgeMs: number, maxAgeMs: number, limit = 25): Donation[] {
+    const now = Date.now();
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM donations
+            WHERE status = 'pending' AND recurring = 0 AND payment_intent_id <> ''
+              AND created_at <= ? AND created_at >= ?
+            ORDER BY created_at LIMIT ?`,
+        )
+        .all(new Date(now - minAgeMs).toISOString(), new Date(now - maxAgeMs).toISOString(), limit) as Record<string, unknown>[]
+    ).map((r) => this.rowToDonation(r));
+  }
+
   /** Total raised (succeeded) for a campaign, in minor units. */
   raisedForCampaign(campaignId: string): number {
     return (
