@@ -2372,6 +2372,29 @@ async function main(): Promise<void> {
   }
 }
 
+// ── Process-level fault handling (DONATIONS-029) ──────────────────────────────
+// This runs unattended on a Raspberry Pi for months, and the codebase deliberately uses
+// fire-and-forget `void fn().catch(...)` in a lot of places. Node's default for an unhandled
+// rejection is to KILL THE PROCESS — so one missed `.catch()` in a non-critical background path
+// (an alert, a receipt, a plan sync) would take the donation page down with it.
+//
+// The two cases are treated differently on purpose:
+//   • unhandledRejection — log it loudly and KEEP SERVING. A stray rejection here means a
+//     background promise nobody awaited; the donor-facing routes are unaffected, and staying up is
+//     strictly better for the masjid than a restart loop. It is logged at error level, with the
+//     message only, so it still gets found.
+//   • uncaughtException — log and EXIT. A synchronous throw that escaped every handler means the
+//     process is in an unknown state, and `restart: unless-stopped` in compose will bring back a
+//     clean one within seconds. Continuing in an unknown state around money is the worse option.
+// Both log the MESSAGE only, never the error object, so a thrown Stripe error can't spill a key.
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandled promise rejection (still serving)', reason instanceof Error ? reason.message : String(reason));
+});
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception — exiting so the container restarts clean', err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});
+
 main().catch((err) => {
   // Log the message only (not the whole error object) so a future thrown error
   // can't spill a key or connection string into the logs.
