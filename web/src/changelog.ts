@@ -23,6 +23,17 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.39.0',
+    date: '2026-08-04',
+    notes: [
+      'Donations that were paid but never landed in your records are now found and added by themselves — if a donor’s card went through but their page didn’t finish loading, the money was taken and nothing here ever knew',
+      'So your totals may go up the first time this runs, and a donor may receive the receipt they never got. Both are money that already reached your bank',
+      'Your donation records are now kept out of every cache, so an export can’t be left behind anywhere it shouldn’t be',
+      'The app now keeps a record of the things that matter — who exported the donor list, who paused or stopped a monthly plan, who changed the Stripe keys, and when',
+      'A safety review went through the whole app: sign-in is protected over HTTPS, the pages that talk to OpenMasjidOS can no longer be flooded, and a donor’s name can no longer interfere with a receipt email',
+    ],
+  },
+  {
     version: '0.38.0',
     date: '2026-08-01',
     notes: [
