@@ -81,19 +81,42 @@ export async function verifySecretKey(secretKey: string): Promise<{ ok: boolean;
 }
 
 // ── Currency minor units ──────────────────────────────────────────────────────
-// Stripe charges in the smallest currency unit. Most currencies have 2 decimals,
-// but several are zero-decimal (the amount is already the smallest unit).
+// Stripe charges in the smallest currency unit, and there are THREE exponents, not two.
 const ZERO_DECIMAL = new Set([
   'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
 ]);
 
+/** Stripe's three-decimal currencies (DONATIONS-001).
+ *
+ *  These are quoted in thousandths — fils for the Gulf dinars, millimes for the Tunisian dinar —
+ *  and Stripe additionally requires the minor amount to be a MULTIPLE OF TEN, because the smallest
+ *  coin in circulation is 5–10 thousandths. Treating them as two-decimal (which this file did until
+ *  the 2026-08-03 audit) sent one tenth of the amount the donor was shown: a 10.000 KWD donation
+ *  became 1000 minor units, i.e. 1.000 KWD. Both directions were wrong by the same factor, so the
+ *  app's own ledger agreed with itself and only Stripe's dashboard told the truth. */
+const THREE_DECIMAL = new Set(['BHD', 'JOD', 'KWD', 'OMR', 'TND']);
+
 export function currencyDecimals(currency: string): number {
-  return ZERO_DECIMAL.has(currency.toUpperCase()) ? 0 : 2;
+  const c = currency.toUpperCase();
+  if (ZERO_DECIMAL.has(c)) return 0;
+  if (THREE_DECIMAL.has(c)) return 3;
+  return 2;
 }
 
-/** Major units (e.g. 10.50) → minor units (1050), respecting zero-decimal currencies. */
+/** True when Stripe requires the minor amount to be a multiple of 10 (the three-decimal set). */
+export function requiresMultipleOfTen(currency: string): boolean {
+  return THREE_DECIMAL.has(currency.toUpperCase());
+}
+
+/** Major units (e.g. 10.50) → minor units (1050), respecting zero- and three-decimal currencies.
+ *
+ *  For a three-decimal currency the result is rounded to the nearest 10, as Stripe requires — so a
+ *  donor typing 10.123 KWD is charged 10.120. Rounding DOWN at the boundary would silently shave
+ *  the donation, and rounding up would charge more than they agreed, so nearest-10 it is; the donor
+ *  page shows the amount it will actually charge (see the `presetAmounts`/`minAmount` round-trip). */
 export function toMinor(major: number, currency: string): number {
-  return Math.round(major * 10 ** currencyDecimals(currency));
+  const minor = Math.round(major * 10 ** currencyDecimals(currency));
+  return requiresMultipleOfTen(currency) ? Math.round(minor / 10) * 10 : minor;
 }
 
 /** Minor units → major (for display). */
@@ -106,9 +129,27 @@ export function toMajor(minor: number, currency: string): number {
  *  (Stripe's real fee varies by card/country) shown transparently to the donor. */
 const FEE_PCT = 0.029; // 2.9%
 const FEE_FIXED_MAJOR = 0.3; // + 30¢/30p
-export function withCoveredFees(netMinor: number, currency: string): number {
+
+/** The fixed half of the fee, in minor units, with a floor of ONE minor unit for a zero-decimal
+ *  currency (DONATIONS-008).
+ *
+ *  `toMinor(0.30, 'JPY')` is `Math.round(0.3 * 1)` = **0**, so the "+30c" half of the fee model
+ *  silently vanished for all sixteen zero-decimal currencies and the gross-up under-recovered on
+ *  every covered-fee donation. There is no honest conversion of "30 US cents" into yen without an
+ *  exchange rate we do not have and will not invent, so this is deliberately an approximation with
+ *  a floor rather than a real conversion — the number was already an approximation (Stripe's true
+ *  fee varies by card and country), and one minor unit is closer to the truth than zero. The real
+ *  answer is a per-account, admin-visible fee model; see docs/audit/ACTION_REQUIRED.md. */
+function fixedFeeMinor(currency: string): number {
   const fixed = toMinor(FEE_FIXED_MAJOR, currency);
-  return Math.round((netMinor + fixed) / (1 - FEE_PCT));
+  return currencyDecimals(currency) === 0 ? Math.max(1, fixed) : fixed;
+}
+
+export function withCoveredFees(netMinor: number, currency: string): number {
+  const gross = Math.round((netMinor + fixedFeeMinor(currency)) / (1 - FEE_PCT));
+  // Keep the three-decimal multiple-of-10 rule intact after the gross-up, or Stripe rejects the
+  // charge outright and the donor sees a failure for an amount they never chose.
+  return requiresMultipleOfTen(currency) ? Math.round(gross / 10) * 10 : gross;
 }
 
 // ── Payments ──────────────────────────────────────────────────────────────────
