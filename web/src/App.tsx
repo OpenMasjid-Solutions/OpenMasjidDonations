@@ -103,7 +103,7 @@ export function App() {
         <Brand />
         <div className="spacer" />
         <Clock />
-        <ProfileMenu info={info} />
+        <ProfileMenu info={info} admin={isAdmin} />
       </header>
       {goToSetup ? (
         <main className="auth-wrap"><span className="spinner" aria-label="Opening setup" /></main>

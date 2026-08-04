@@ -459,18 +459,39 @@ select.input { appearance: auto; }
 .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.6rem; margin-block-end: 1rem; }
 .modal-title { font-family: var(--font-display); font-size: 1.25rem; font-weight: 700; letter-spacing: -0.01em; }
 
-/* What's new (release notes). A reading list, so it gets a little more width than a form modal
-   and each version is a small block rather than a wall of bullets. */
-.whatsnew { width: min(38rem, 100%); }
-.whatsnew-list { display: grid; gap: 1.1rem; }
-.whatsnew-ver {
-  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
-  font-family: var(--font-display); font-size: 1rem; font-weight: 700; color: var(--color-ink);
-  margin-block-end: 0.35rem;
+/* A modal whose body scrolls inside a fixed frame, rather than the whole dialog growing and
+   scrolling as one (the default .modal above). Used by "What's new". */
+.modal-body { overflow-y: auto; min-height: 0; }
+
+/* What's new (release notes) — a real window over the page, matching OpenMasjid Kiosk's so a masjid
+   reads the same thing in the same shape in both apps: traffic-light chrome, the running version
+   named in the subtitle, one bordered block per release, and the list scrolling inside the frame. */
+.whatsnew {
+  width: min(52rem, 94vw); height: min(78vh, 46rem); max-height: none;
+  display: flex; flex-direction: column; overflow: hidden;
 }
-.whatsnew-date { margin-inline-start: auto; font-size: 0.78rem; font-weight: 500; }
-.whatsnew-notes { display: grid; gap: 0.3rem; margin: 0; padding-inline-start: 1.1rem; }
-.whatsnew-notes li { font-size: 0.9rem; line-height: 1.5; color: var(--color-ink-muted); }
+.whatsnew .modal-head { margin-block-end: 0.8rem; }
+.wn-release { padding-block: 0.7rem; border-block-end: 1px solid var(--color-border); }
+.wn-release:last-child { border-block-end: 0; }
+.wn-version {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  /* h4 isn't in the margin reset above, so zero its block-start explicitly. */
+  margin-block: 0 0.4rem;
+  font-family: var(--font-display); font-size: 1.05rem; font-weight: 700; color: var(--color-ink);
+}
+/* Beside a heading this pill reads as a label, not a table cell, so it takes Kiosk's roomier
+   metrics rather than the compact ones the donations table uses. */
+.wn-version .status-pill { font-size: 0.78rem; padding: 0.2rem 0.6rem; }
+/* When it came out, pushed to the far end of the heading: worth having, not worth leading with. */
+.wn-date { margin-inline-start: auto; font-size: 0.78rem; font-weight: 500; }
+.wn-list { margin: 0; padding-inline-start: 1.1rem; display: flex; flex-direction: column; gap: 0.45rem; }
+.wn-list li { font-size: 0.92rem; line-height: 1.6; color: var(--color-ink-muted); }
+/* The bold lead-in of a note reads as its headline, so it takes the full-contrast ink. */
+.wn-list strong { color: var(--color-ink); font-weight: 650; }
+.wn-list code {
+  font-size: 0.86em; padding: 0.05rem 0.3rem; border-radius: 5px;
+  background: var(--glass-bg-inset); color: var(--color-ink);
+}
 
 .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
 @media (max-width: 480px) { .detail-grid { grid-template-columns: 1fr; } }
@@ -547,9 +568,21 @@ select.input { appearance: auto; }
 /* ── Profile / account menu (top-right, like OpenMasjidOS) ────────────────── */
 .profile { position: relative; }
 .profile-btn {
+  position: relative; /* for the unread-notes dot */
   width: 2.5rem; height: 2.5rem; border-radius: 50%; display: grid; place-items: center; border: 0;
   background: var(--glass-bg-inset); color: var(--color-primary); box-shadow: inset 0 0 0 1.5px var(--color-primary);
   transition: transform var(--dur-micro) var(--ease-settle), background-color var(--dur-micro) ease;
+}
+/* "What's new" — a quiet dot on the account button when OpenMasjidOS has updated the app since the
+   notes were last opened. Gold, not red: it's news, not a problem. */
+.profile-dot {
+  position: absolute; inset-block-start: 0.1rem; inset-inline-end: 0.1rem;
+  width: 0.55rem; height: 0.55rem; border-radius: 50%;
+  background: var(--color-gold); box-shadow: 0 0 0 2px var(--color-surface-raised);
+}
+.menu-dot {
+  margin-inline-start: auto; width: 0.45rem; height: 0.45rem; border-radius: 50%;
+  background: var(--color-gold); flex-shrink: 0;
 }
 .profile-btn:hover { background: var(--color-surface-hover); }
 .profile-btn:active { transform: scale(0.94); }
