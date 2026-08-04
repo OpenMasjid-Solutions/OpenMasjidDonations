@@ -97,3 +97,22 @@ test('accent: valid hex used; invalid falls back to default (no CSS injection)',
 test('fillVars preserves newlines but collapses runs of spaces', () => {
   assert.equal(fillVars('a\n\nb    c', { name: 'x', amount: 'y', campaign: 'z', masjid: 'm' }), 'a\n\nb c');
 });
+
+// ── DONATIONS-023 ────────────────────────────────────────────────────────────
+// The subject is built from the admin's template with the DONOR's own name substituted in, and the
+// donor is an unauthenticated stranger. The finished subject becomes an SMTP header at the platform,
+// so a CR/LF in a name is a header-injection attempt. Fails before the fix: the raw name went
+// through with its newlines intact.
+test('receipt subject: a donor name cannot inject an email header (CR/LF collapsed)', () => {
+  const evil = 'Ahmed\r\nBcc: attacker@evil.example\r\n\r\nInjected body';
+  const { subject } = renderReceipt({ ...TPL, subject: 'Receipt for {name}' }, { ...CTX, name: evil });
+  assert.ok(!/[\r\n]/.test(subject), `subject must be one line, got ${JSON.stringify(subject)}`);
+  assert.ok(!/\u2028|\u2029|\v|\f|\0/.test(subject), 'and no exotic line separators either');
+  assert.ok(subject.startsWith('Receipt for Ahmed'), 'the legitimate part of the name survives');
+  assert.ok(subject.includes('Bcc:'), 'the text is neutralised by flattening, not silently dropped');
+});
+
+test('receipt subject: ordinary names and unicode are untouched', () => {
+  const ok = renderReceipt({ ...TPL, subject: 'Receipt for {name}' }, { ...CTX, name: 'Yūsuf Al-Ḥasan' }).subject;
+  assert.equal(ok, 'Receipt for Yūsuf Al-Ḥasan');
+});

@@ -19,7 +19,7 @@ import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
-import { COOKIE, cookieOptions, hashPassword, makeToken, verifyPassword, verifyToken, SSO_SESSION_MS } from './auth';
+import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
 import { renderReceipt, type ReceiptContext } from './email';
 import {
@@ -115,6 +115,13 @@ async function main(): Promise<void> {
     // the real TCP peer below. (A future reverse-proxy deployment would set this to
     // the specific trusted proxy CIDR, not `true`.)
     bodyLimit: 1_048_576, // 1 MiB JSON cap (uploads get their own limit later)
+    // Bound how long one request may hold a socket. Node already defends the classic slowloris via
+    // `headersTimeout` (60s) and `requestTimeout` (300s), so this is a tightening rather than a hole
+    // being closed: 120s is still ample for the 5 MiB image upload over bad masjid wifi (~43 KB/s)
+    // but a quarter of the default grip on a Pi's socket table. `connectionTimeout` is deliberately
+    // NOT set — it maps to Node's socket-INACTIVITY timeout, which would also reap idle keep-alive
+    // sockets that Fastify holds for 72s by design, buying TCP churn for no security (DONATIONS-021).
+    requestTimeout: 120_000,
     // Base-path awareness (manifest `domain: true`): when OpenMasjidOS exposes us behind
     // its Cloudflare tunnel it forwards the FULL admin-chosen path prefix (e.g. /donate)
     // WITHOUT stripping it, so requests arrive as /donate/api/x, /donate/assets/y, etc.
@@ -146,6 +153,25 @@ async function main(): Promise<void> {
     }
   });
 
+  // ── Baseline security response headers (every route, including static) ──────
+  // Deliberately a SHORT list. Two are unambiguous wins here:
+  //   • nosniff — an upload's content type is taken from the client-declared multipart header, so
+  //     a file claiming image/png can hold anything. It is written with a server-chosen name and
+  //     extension and served from OUR origin, so without this a content-sniffing browser is the
+  //     one thing between that file and same-origin script execution.
+  //   • no-referrer — a campaign's unlisted link carries its token in the path
+  //     (/api/public/campaign/:slug/:token). Any outbound click from a donation or admin page
+  //     would otherwise hand that URL to the destination site in the Referer header.
+  // X-Frame-Options / frame-ancestors is deliberately NOT set: OpenMasjidOS embeds this app in a
+  // frame, and the widget route sets `frame-ancestors *` on purpose. A CSP is deliberately NOT set
+  // either — Stripe's Payment Element loads js.stripe.com and its own frames, and a CSP that is
+  // even slightly wrong stops donors paying. That belongs in a change someone can test against a
+  // real Stripe Element, not in a headers sweep (see docs/audit/ACTION_REQUIRED.md).
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'no-referrer');
+  });
+
   // Uploaded images live on the data volume and are served read-only at /uploads/*.
   const uploadsDir = path.join(config.dataDir, 'uploads');
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -162,6 +188,55 @@ async function main(): Promise<void> {
       return reply.code(401).send({ error: 'Please sign in.' });
     }
   };
+
+  /** Who is acting, for the audit log. The name comes out of the SIGNED session token, so it cannot
+   *  be spoofed; a local-password session has no platform username, hence the fallback. */
+  const actorOf = (req: import('fastify').FastifyRequest): string => tokenUser(store.secret, req.cookies[COOKIE]) || 'local admin';
+  /** Append one admin action to the audit log (never throws — see store.recordAudit). */
+  const audit = (req: import('fastify').FastifyRequest, action: string, subject = '', detail = ''): void =>
+    store.recordAudit(action, { actor: actorOf(req), subject, detail });
+
+  /** A fixed-window per-peer limiter, in the shape the donation and tuition limiters already use.
+   *  Keyed on the real TCP peer, never a spoofable X-Forwarded-For (trustProxy is off).
+   *
+   *  NOTE the known limitation, recorded as DONATIONS-009: behind the OpenMasjidOS path-ingress or
+   *  the Cloudflare tunnel the peer is the PROXY, so every remote visitor shares one bucket. That
+   *  is a deliberate open question (trusting a forwarded header would make the login limiter
+   *  bypassable), so these caps are set generously enough that a shared bucket does not deny
+   *  service to honest traffic. The two existing limiters keep their own inline copies rather than
+   *  being refactored onto this — they work, and rewriting a live rate limiter to save six lines is
+   *  not a trade worth making. */
+  const makeRateLimiter = (perMinute: number) => {
+    const hits = new Map<string, { c: number; reset: number }>();
+    return (ip: string): boolean => {
+      const now = Date.now();
+      if (hits.size > 5000) for (const [k, w] of hits) if (w.reset <= now) hits.delete(k);
+      const w = hits.get(ip);
+      if (!w || w.reset <= now) {
+        hits.set(ip, { c: 1, reset: now + 60_000 });
+        return true;
+      }
+      if (w.c >= perMinute) return false;
+      w.c += 1;
+      return true;
+    };
+  };
+  const peerOf = (req: import('fastify').FastifyRequest): string => req.socket.remoteAddress ?? 'unknown';
+
+  // Both of these are unauthenticated AND make an outbound call to the OpenMasjidOS core on every
+  // request (a session probe / an appearance fetch). Without a cap, anyone who can reach this box
+  // can use it as an unmetered amplifier against the platform — and each call also occupies one of
+  // the Pi's sockets for up to 4–8s. 120/min is far above any real page load.
+  const platformCallRateOk = makeRateLimiter(120);
+  // The webhook is unauthenticated by necessity (Stripe calls it). Signature verification is cheap,
+  // but resolving the account can hit the Fabric vault, so an unsigned flood still costs outbound
+  // calls. CLAUDE.md §9 asks for this limit explicitly. 300/min is ~10× Stripe's real burst rate,
+  // so a genuine event is never dropped (and Stripe retries a 429 anyway).
+  const webhookRateOk = makeRateLimiter(300);
+  // A MONTHLY intent creates a Stripe Customer + Price + Subscription + Invoice + PaymentIntent —
+  // five persistent objects, against the one a card payment creates. A donor sets up one plan, so
+  // 5/min is generous, while a burst can no longer bloat the masjid's Stripe account (DONATIONS-010).
+  const monthlyIntentRateOk = makeRateLimiter(5);
 
   // ── Health check ────────────────────────────────────────────────────────────
   app.get('/healthz', async () => ({ ok: true }));
@@ -196,8 +271,9 @@ async function main(): Promise<void> {
   // plain HTTP, so a direct browser fetch would be blocked as mixed content. The web
   // polls us (same origin) and we fetch the platform server-to-server. Returns the
   // platform's { v, theme, wallpaper, wallpaperImage, accent, lang } or {} (no secrets).
-  app.get('/api/public/appearance', async (_req, reply) => {
+  app.get('/api/public/appearance', async (req, reply) => {
     reply.header('cache-control', 'no-store');
+    if (!platformCallRateOk(peerOf(req))) return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
     const base = config.omosBaseUrl;
     if (!base) return {};
     try {
@@ -224,11 +300,16 @@ async function main(): Promise<void> {
     // "open it from the dashboard" apart from "OpenMasjidOS is unreachable" (a
     // migrated/down platform must offer the local-password way in, not a dead loop).
     let reachable = true;
+    // Only the SSO upgrade costs an outbound platform call, so the limit guards that branch only —
+    // an already-signed-in admin (or a standalone install) is never rate-limited out of the panel.
+    if (!authed && ssoConfigured() && !platformCallRateOk(peerOf(req))) {
+      return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
+    }
     if (!authed && ssoConfigured()) {
       const probe = await probePlatform(req.headers.cookie);
       reachable = probe.reachable;
       if (probe.username) {
-        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS), cookieOptions(SSO_SESSION_MS));
+        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username), cookieOptions(SSO_SESSION_MS, secureForRequest(req)));
         authed = true;
         username = probe.username;
       }
@@ -264,7 +345,7 @@ async function main(): Promise<void> {
     const parsed = SetupBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose a password of at least 8 characters.' });
     store.setAdmin(hashPassword(parsed.data.password), parsed.data.name?.trim());
-    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions());
+    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
     return { data: { ok: true } };
   });
 
@@ -282,7 +363,7 @@ async function main(): Promise<void> {
     const parsed = LoginBody.safeParse(req.body);
     if (parsed.success && verifyPassword(parsed.data.password, admin)) {
       loginLimiter.succeed(peer);
-      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions());
+      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
       return { data: { ok: true } };
     }
     loginLimiter.fail(peer);
@@ -639,6 +720,7 @@ async function main(): Promise<void> {
     const err = checkKeys(parsed.data);
     if (err) return reply.code(400).send({ error: err });
     const acct = store.createStripeAccount({ label: parsed.data.label || 'Stripe account', ...parsed.data });
+    audit(req, 'stripe.account.create', acct.id, 'added a Stripe account (' + acct.label + ')');
     const verify = acct.secretKey ? await verifySecretKey(acct.secretKey) : undefined;
     return { data: { ...publicAccount(acct), verify } };
   });
@@ -649,12 +731,15 @@ async function main(): Promise<void> {
     if (err) return reply.code(400).send({ error: err });
     const acct = store.updateStripeAccount((req.params as { id: string }).id, parsed.data);
     if (!acct) return reply.code(404).send({ error: 'Account not found.' });
+    // Which FIELDS changed, never their values — a key must never reach the log.
+    audit(req, 'stripe.account.update', acct.id, 'changed ' + (Object.keys(parsed.data).join(', ') || 'nothing') + ' on a Stripe account');
     const verify = acct.secretKey ? await verifySecretKey(acct.secretKey) : undefined;
     return { data: { ...publicAccount(acct), verify } };
   });
   app.delete('/api/admin/stripe-accounts/:id', { preHandler: requireAdmin }, async (req, reply) => {
     const res = store.deleteStripeAccount((req.params as { id: string }).id);
     if (!res.ok) return reply.code(409).send({ error: 'A campaign uses this account. Reassign or delete those campaigns first.' });
+    audit(req, 'stripe.account.delete', (req.params as { id: string }).id, 'removed a Stripe account');
     return { data: { ok: true } };
   });
   app.post('/api/admin/stripe-accounts/:id/test', { preHandler: requireAdmin }, async (req) => {
@@ -797,6 +882,10 @@ async function main(): Promise<void> {
     return { data: adminCampaign(c) };
   });
   app.delete('/api/admin/campaigns/:id', { preHandler: requireAdmin }, async (req) => {
+    const doomed = store.getCampaign((req.params as { id: string }).id);
+    // Donations keep their campaign_id but the title is gone, so the ledger shows "Deleted
+    // campaign" for ever. Record the title while we still have it.
+    audit(req, 'campaign.delete', doomed?.id ?? '', doomed ? 'deleted the campaign "' + doomed.title + '"' : 'deleted a campaign that no longer existed');
     store.deleteCampaign((req.params as { id: string }).id);
     return { data: { ok: true } };
   });
@@ -812,7 +901,18 @@ async function main(): Promise<void> {
   // A short, human-friendly transaction reference derived from the donation id
   // (stable + unique enough for display; the full id stays the real key).
   const donationRef = (id: string) => id.replace(/^don_/, '').slice(0, 8).toUpperCase();
-  app.get('/api/admin/donations', { preHandler: requireAdmin }, async () => {
+  /** Donor records must never be cached — not by a browser, not by a shared proxy, and above all
+   *  not by the Cloudflare edge when the admin has turned on public access. `.csv` is one of the
+   *  extensions Cloudflare caches by default, and a response with no cache directives at a static
+   *  extension is a candidate for the edge cache — after which the cached donor list can be served
+   *  to a request carrying no session cookie at all. `vary: cookie` is belt-and-braces for any
+   *  proxy that does key on it. Applies to the JSON log as well as the export: same data. */
+  const noStoreDonorData = (reply: import('fastify').FastifyReply) => {
+    reply.header('cache-control', 'no-store, private, max-age=0').header('pragma', 'no-cache').header('vary', 'cookie');
+  };
+
+  app.get('/api/admin/donations', { preHandler: requireAdmin }, async (_req, reply) => {
+    noStoreDonorData(reply);
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
     const list = store.listDonations();
     const succeeded = list.filter((d) => d.status === 'succeeded');
@@ -823,7 +923,10 @@ async function main(): Promise<void> {
       },
     };
   });
-  app.get('/api/admin/donations.csv', { preHandler: requireAdmin }, async (_req, reply) => {
+  app.get('/api/admin/donations.csv', { preHandler: requireAdmin }, async (req, reply) => {
+    // The one action that takes every donor's name and email OFF the box. Logged first, so the
+    // record exists even if the response never finishes.
+    audit(req, 'donations.export', '', 'exported the donation ledger as CSV');
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
     const rows = [['Ref', 'Date', 'Campaign', 'Amount', 'Currency', 'Status', 'Donor', 'Email', 'Card', 'Covered fees', 'PaymentIntent']];
     for (const d of store.listDonations()) {
@@ -833,6 +936,7 @@ async function main(): Promise<void> {
         d.donorName, d.donorEmail, card, d.coverFees ? 'yes' : 'no', d.paymentIntentId,
       ]);
     }
+    noStoreDonorData(reply);
     reply.header('content-type', 'text/csv; charset=utf-8').header('content-disposition', 'attachment; filename="donations.csv"');
     return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
   });
@@ -1077,8 +1181,11 @@ async function main(): Promise<void> {
   };
 
   app.get('/api/admin/plans', { preHandler: requireAdmin }, async (req) => {
-    const force = (req.query as { refresh?: string }).refresh === '1';
     const ownPage = ownPageFetch(req);
+    // `refresh=1` must ALSO be gated on the same-origin check, not just the write side: forcing the
+    // cache open is what turns one cross-site navigation into up to 200 outbound Stripe calls, so
+    // gating only the writes left the amplification the guard exists to stop (DONATIONS-018).
+    const force = (req.query as { refresh?: string }).refresh === '1' && ownPage;
     const seeds = planSeeds(); // newest first
     // Which plans get a live refresh, in which order. Plans that have taken money go FIRST:
     // a recurring donation row is written at /intent, BEFORE the card is entered, so every
@@ -1169,8 +1276,8 @@ async function main(): Promise<void> {
     const id = (req.params as { id: string }).id;
     const seed = findSeed(planSeeds(), id);
     if (!seed) return reply.code(404).send({ error: 'Unknown plan.' });
-    const force = (req.query as { refresh?: string }).refresh === '1';
     const ownPage = ownPageFetch(req);
+    const force = (req.query as { refresh?: string }).refresh === '1' && ownPage; // see DONATIONS-018
     const r = await syncPlan(seed, force, ownPage);
     // The sync only lists invoices when new money can have landed; the detail window always
     // wants them, so fetch them here when it didn't (but only if Stripe answered at all).
@@ -1228,6 +1335,7 @@ async function main(): Promise<void> {
     const acct = await accountById(seed.stripeAccountId);
     if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
     if (!(await pausePlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.pause', seed.subscriptionId, 'paused a monthly donation plan');
     return { data: { plan: await planNow(seed) } };
   });
 
@@ -1238,6 +1346,7 @@ async function main(): Promise<void> {
     const acct = await accountById(seed.stripeAccountId);
     if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
     if (!(await resumePlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.resume', seed.subscriptionId, 'resumed a monthly donation plan');
     return { data: { plan: await planNow(seed) } };
   });
 
@@ -1253,6 +1362,7 @@ async function main(): Promise<void> {
     const acct = await accountById(seed.stripeAccountId);
     if (!acct?.secretKey) return reply.code(502).send({ error: STRIPE_PLAN_NO_KEYS });
     if (!(await cancelPlan(acct.secretKey, seed.subscriptionId))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.stop', seed.subscriptionId, 'stopped a monthly donation plan for good');
     return { data: { plan: await planNow(seed) } };
   });
 
@@ -1313,6 +1423,7 @@ async function main(): Promise<void> {
     }
 
     if (!(await setPlanEnd(acct.secretKey, seed.subscriptionId, cancelAt))) return reply.code(502).send({ error: STRIPE_PLAN_DOWN });
+    audit(req, 'plan.schedule', seed.subscriptionId, cancelAt ? 'set when a monthly plan ends' : 'removed a monthly plan end date');
     return { data: { plan: await planNow(seed) } };
   });
 
@@ -1546,6 +1657,12 @@ async function main(): Promise<void> {
     // Monthly donations need a name + email (Stripe attaches the subscription to a customer).
     if (monthly && (!donorName.trim() || !donorEmail.trim())) {
       return reply.code(400).send({ error: 'Please add your name and email — both are required for a monthly donation.' });
+    }
+    // A monthly intent is five persistent Stripe objects, not one. Checked here — after the campaign
+    // and amount are known but BEFORE anything is created at Stripe — so a burst can't bloat the
+    // masjid's account (DONATIONS-010). The general 30/min intent limit above still applies too.
+    if (monthly && !monthlyIntentRateOk(peerOf(req))) {
+      return reply.code(429).send({ error: 'Too many monthly sign-ups from here just now. Please try again in a minute.' });
     }
     const metadata = {
       app: 'donations', campaignId: c.id, campaign: c.title.slice(0, 120),
@@ -2033,6 +2150,7 @@ async function main(): Promise<void> {
   // charges (invoice.paid on renewal) and resiliently confirms one-time payments.
   // The signature is verified with the account's own webhook secret.
   app.post('/api/stripe/webhook/:accountId', async (req, reply) => {
+    if (!webhookRateOk(peerOf(req))) return reply.code(429).send({ error: 'Too many requests.' });
     const acct = await accountById((req.params as { accountId: string }).accountId);
     if (!acct || !acct.webhookSecret) return reply.code(400).send({ error: 'Webhook not configured.' });
     const sig = req.headers['stripe-signature'];
@@ -2216,6 +2334,24 @@ async function main(): Promise<void> {
   // `check` first so we never double-record, then re-`record-payment`. Students' daily
   // reconciliation is the FINAL backstop (it scans succeeded students-billing PIs), so this is
   // an optimization — money is never lost even if this never runs. Embedded only.
+  /** Wrap a periodic pass so it can never overlap itself (DONATIONS-052).
+   *
+   *  Both outboxes below run every 60s and each item makes a network call with an 8s timeout, so a
+   *  slow provider makes a pass outlast its own interval. Without this, a second pass starts, reads
+   *  the SAME still-pending rows, and does the work again — a duplicate receipt in the donor's inbox
+   *  and, on the tuition side, a second `record-payment` attempt for one charge. Skipping the
+   *  overlapping tick loses nothing: the rows are still pending, so the next tick picks them up. */
+  const nonOverlapping = (pass: () => Promise<void>): (() => void) => {
+    let running = false;
+    return () => {
+      if (running) return;
+      running = true;
+      void pass().finally(() => {
+        running = false;
+      });
+    };
+  };
+
   if (billingConfigured()) {
     const outbox = async () => {
       try {
@@ -2230,7 +2366,7 @@ async function main(): Promise<void> {
         }
       } catch { /* fail soft — never let the outbox crash the app */ }
     };
-    const iv = setInterval(() => void outbox(), 60_000);
+    const iv = setInterval(nonOverlapping(outbox), 60_000);
     iv.unref?.();
   }
 
@@ -2249,10 +2385,33 @@ async function main(): Promise<void> {
         }
       } catch { /* fail soft — never let the receipt outbox crash the app */ }
     };
-    const iv = setInterval(() => void receiptOutbox(), 60_000);
+    const iv = setInterval(nonOverlapping(receiptOutbox), 60_000);
     iv.unref?.();
   }
 }
+
+// ── Process-level fault handling (DONATIONS-029) ──────────────────────────────
+// This runs unattended on a Raspberry Pi for months, and the codebase deliberately uses
+// fire-and-forget `void fn().catch(...)` in a lot of places. Node's default for an unhandled
+// rejection is to KILL THE PROCESS — so one missed `.catch()` in a non-critical background path
+// (an alert, a receipt, a plan sync) would take the donation page down with it.
+//
+// The two cases are treated differently on purpose:
+//   • unhandledRejection — log it loudly and KEEP SERVING. A stray rejection here means a
+//     background promise nobody awaited; the donor-facing routes are unaffected, and staying up is
+//     strictly better for the masjid than a restart loop. It is logged at error level, with the
+//     message only, so it still gets found.
+//   • uncaughtException — log and EXIT. A synchronous throw that escaped every handler means the
+//     process is in an unknown state, and `restart: unless-stopped` in compose will bring back a
+//     clean one within seconds. Continuing in an unknown state around money is the worse option.
+// Both log the MESSAGE only, never the error object, so a thrown Stripe error can't spill a key.
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandled promise rejection (still serving)', reason instanceof Error ? reason.message : String(reason));
+});
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception — exiting so the container restarts clean', err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});
 
 main().catch((err) => {
   // Log the message only (not the whole error object) so a future thrown error
