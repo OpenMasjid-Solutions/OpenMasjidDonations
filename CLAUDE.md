@@ -287,6 +287,7 @@ For local dev: run the server, run `cd web && npm run dev` (Vite proxies `/api` 
 ---
 
 ## 16. CI & versioning
+- **Check `README.md` still describes the app when you ship a user-visible feature.** It is the first thing anyone sees, and nothing else in this runbook forces it to be touched — which is exactly how it once drifted to describing v0.13.0 while the app was at v0.40.0. Deliberately it carries **no** version number or test count (the release badge and the changelog cover that), so only a real feature change should require an edit: a new admin tab, a new donor-facing capability, a new platform integration.
 - **Add a `web/src/changelog.ts` entry with every release** — it's what the "What's new" item in the account menu shows. Plain, non-technical, what changed *for the masjid*; same voice as the App Store note in OpenMasjidAPPS `registry.yaml`, since they see both. It is loaded on demand, so never import it eagerly (that would put admin-only text in the donation page's bundle).
 - **`VERSION`** file at the root is the single source of truth; stamp it into the build.
 - **Semver, `0.x` = pre-release.** Start at `0.1.0`. Tag releases `vX.Y.Z`.
