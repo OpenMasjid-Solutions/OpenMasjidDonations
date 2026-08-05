@@ -21,16 +21,30 @@ If it prints anything else, `git checkout dev` first. If you are on `main`, you 
 | Branch | What it is | Who moves it |
 |---|---|---|
 | `dev` | Where **all** development happens. Every feature, fix, experiment, docs edit and dependency bump. | You, freely. |
-| `main` | The stable channel. Its tip is always the last release. | **Only Hasan, by saying "merge to main".** |
+| `main` | The stable channel. Its tip is always the last release. | **Only Hasan, by saying "push to main" / "merge to main".** |
 
 ### Rules
 
-1. **All development happens on `dev`** — this session and every future one. Commit and push to `dev` as normal work.
+1. **All development happens on `dev`** — this session and every future one. Commit and push to `dev` as normal work. This is the default and needs no permission: finish the work, commit it, push it to `dev`.
 2. **Never commit to `main`.** Not for a hotfix, not for a typo, not for a one-line docs fix, not because something is urgent. There is no exception that does not start with Hasan saying so.
 3. **Never merge, rebase onto, cherry-pick into, or fast-forward `main` autonomously.** Not even when `dev` is green and `main` is behind. Being obviously-correct is not authorisation.
-4. **`main` moves only on the explicit words "merge to main"** from Hasan. Nothing else counts — not "ship it", not "release", not approving a diff, not merging a PR into `dev`. If you think a release is due, *say so and wait*.
-5. **That merge is a release.** When told, do the full runbook in §16: bump `manifest.yaml` + both `package.json` files, add the `web/src/changelog.ts` entry, merge to `main`, tag `vX.Y.Z`, let CI publish the stable image, digest-pin `docker-compose.yml`, then update the OpenMasjidAPPS `registry.yaml` entry.
+4. **`main` moves only on the explicit words "push to main"** (or "merge to main") from Hasan. Nothing else counts — not "ship it", not "release it", not approving a diff, not merging a PR into `dev`. If you think a release is due, *say so and wait*.
+5. **That push is a release.** When told, do the full runbook in §16: bump `manifest.yaml` + both `package.json` files, add the `web/src/changelog.ts` entry, merge `dev` into `main`, tag `vX.Y.Z`, let CI publish the stable image, digest-pin `docker-compose.yml`, then update the OpenMasjidAPPS `registry.yaml` entry.
 6. **Restore the pinned image line when merging to `main`.** On `dev`, `docker-compose.yml` points at the moving `:dev` tag with no digest. `main` must always carry `:<version>@sha256:<digest>`. A merge that carries the `:dev` line into `main` would point every stable install at a development build — check this line explicitly, every time.
+
+### After every push to `dev`, ask (required)
+
+Whenever a turn ends with a change committed and pushed to `dev`, **close the reply by asking whether it should go to `main`** — the last line, so it is never buried:
+
+> **Do you want me to push this to `main`?** Until you say so, I'll keep pushing to `dev`.
+
+Rules for the ask:
+
+- It is a **question, not a step you then take**. Ask, stop, and wait. Never read your own suggestion, silence, a thumbs-up, or the next unrelated instruction as a yes.
+- Ask **once per turn that pushed**, at the end. Not mid-reply, not several times.
+- **Don't ask when nothing was pushed** — a question you answered, an investigation, a review, a turn whose work is still uncommitted. The ask exists to offer a *release*, so there must be something on `dev` to release.
+- A "no", a changed subject, or no answer at all means **carry on pushing to `dev`**. Work simply accumulates there until Hasan says the words; several pushes then release together, which is normal and fine.
+- When he does say it, follow rule 5 in full — and re-read rule 6 before merging.
 
 ### Update channels (how the two branches reach a masjid)
 
