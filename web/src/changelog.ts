@@ -34,6 +34,15 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.40.1',
+    date: '2026-08-05',
+    notes: [
+      '**Nothing about the app itself changes in this release** — no new features, nothing to set up again, and your donations, appeals and monthly plans are all exactly as they were.',
+      '**There is now a development channel, if you ever want it.** OpenMasjidOS → Update channel can follow changes as they are made, which is useful for trying something before it reaches everyone. **Stable** is the default and is the one to stay on for taking real donations.',
+      'Behind the scenes: the project’s own documentation was brought up to date.',
+    ],
+  },
+  {
     version: '0.40.0',
     date: '2026-08-04',
     notes: [
