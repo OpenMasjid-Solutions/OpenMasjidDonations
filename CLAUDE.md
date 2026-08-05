@@ -4,6 +4,63 @@
 
 ---
 
+## Branching policy
+
+**This section comes before everything else in this file, and overrides anything below it that assumes work lands on `main`.**
+
+### Session-start check (do this before making any change)
+
+```bash
+git branch --show-current    # MUST print: dev
+```
+
+If it prints anything else, `git checkout dev` first. If you are on `main`, you are in the wrong place — stop and switch. Do not "just make this one small change" here.
+
+### The two branches
+
+| Branch | What it is | Who moves it |
+|---|---|---|
+| `dev` | Where **all** development happens. Every feature, fix, experiment, docs edit and dependency bump. | You, freely. |
+| `main` | The stable channel. Its tip is always the last release. | **Only Hasan, by saying "push to main" / "merge to main".** |
+
+### Rules
+
+1. **All development happens on `dev`** — this session and every future one. Commit and push to `dev` as normal work. This is the default and needs no permission: finish the work, commit it, push it to `dev`.
+2. **Never commit to `main`.** Not for a hotfix, not for a typo, not for a one-line docs fix, not because something is urgent. There is no exception that does not start with Hasan saying so.
+3. **Never merge, rebase onto, cherry-pick into, or fast-forward `main` autonomously.** Not even when `dev` is green and `main` is behind. Being obviously-correct is not authorisation.
+4. **`main` moves only on the explicit words "push to main"** (or "merge to main") from Hasan. Nothing else counts — not "ship it", not "release it", not approving a diff, not merging a PR into `dev`. If you think a release is due, *say so and wait*.
+5. **That push is a release.** When told, do the full runbook in §16: bump `manifest.yaml` + both `package.json` files, add the `web/src/changelog.ts` entry, merge `dev` into `main`, tag `vX.Y.Z`, let CI publish the stable image, digest-pin `docker-compose.yml`, then update the OpenMasjidAPPS `registry.yaml` entry.
+6. **Restore the pinned image line when merging to `main`.** On `dev`, `docker-compose.yml` points at the moving `:dev` tag with no digest. `main` must always carry `:<version>@sha256:<digest>`. A merge that carries the `:dev` line into `main` would point every stable install at a development build — check this line explicitly, every time.
+
+### After every push to `dev`, ask (required)
+
+Whenever a turn ends with a change committed and pushed to `dev`, **close the reply by asking whether it should go to `main`** — the last line, so it is never buried:
+
+> **Do you want me to push this to `main`?** Until you say so, I'll keep pushing to `dev`.
+
+Rules for the ask:
+
+- It is a **question, not a step you then take**. Ask, stop, and wait. Never read your own suggestion, silence, a thumbs-up, or the next unrelated instruction as a yes.
+- Ask **once per turn that pushed**, at the end. Not mid-reply, not several times.
+- **Don't ask when nothing was pushed** — a question you answered, an investigation, a review, a turn whose work is still uncommitted. The ask exists to offer a *release*, so there must be something on `dev` to release.
+- A "no", a changed subject, or no answer at all means **carry on pushing to `dev`**. Work simply accumulates there until Hasan says the words; several pushes then release together, which is normal and fine.
+- When he does say it, follow rule 5 in full — and re-read rule 6 before merging.
+
+### Update channels (how the two branches reach a masjid)
+
+OpenMasjidOS has an Update Channel toggle. The OpenMasjidAPPS catalog resolves this app per channel:
+
+| Channel | Git ref | Image tag | Digest-pinned? |
+|---|---|---|---|
+| stable | the `vX.Y.Z` tag (registry `ref:` + immutable `commit:`) | `:<version>` | **yes** — `@sha256:…` in compose |
+| dev | the `dev` branch (registry `dev_ref: dev`) | `:dev` | **no, deliberately** |
+
+`.github/workflows/build-image.yml` decides the channel from the git ref, not the event, so a manual run on `dev` can never publish `:latest`. Every dev build also gets an immutable `:dev-<12-char sha>` tag — `:dev` means "newest", `:dev-<sha>` identifies exactly which commit a box is running, which is what makes a bad dev build diagnosable and rollback-able despite the moving tag.
+
+The catalog build's digest-pin check is a **warning, not a failure** (`scripts/build-catalog.mjs`), so the dev entry builds fine and warns. **That warning is expected on `dev` — do not silence it by pinning a digest there**, which would freeze the channel and defeat its purpose.
+
+---
+
 ## 1. What we are building (one paragraph)
 
 **OpenMasjidDonations** is an app for [OpenMasjidOS](https://github.com/OpenMasjid-Solutions/OpenMasjidOS) that gives a masjid a beautiful, self-hosted **donation website** powered by **Stripe**. A donor opens the page (on the masjid's network via a kiosk/QR code, or publicly if the masjid chooses to expose it), picks a cause, chooses a **preset or custom amount** (one-time or monthly), and pays by card. An admin manages everything from a polished, login-protected panel: create multiple **donation pages/appeals**, write rich content, upload images, set preset amounts, theme the site, enter Stripe keys, and review donations. On startup the app **receives the masjid's details** (name, address, contact, currency) from the platform and is configured for Stripe. It runs as **one Docker container**, is **AGPL-3.0**, and looks and feels like the rest of the OpenMasjid family.
@@ -244,10 +301,13 @@ For local dev: run the server, run `cd web && npm run dev` (Vite proxies `/api` 
 ---
 
 ## 16. CI & versioning
+- **Check `README.md` still describes the app when you ship a user-visible feature.** It is the first thing anyone sees, and nothing else in this runbook forces it to be touched — which is exactly how it once drifted to describing v0.13.0 while the app was at v0.40.0. Deliberately it carries **no** version number or test count (the release badge and the changelog cover that), so only a real feature change should require an edit: a new admin tab, a new donor-facing capability, a new platform integration.
 - **Add a `web/src/changelog.ts` entry with every release** — it's what the "What's new" item in the account menu shows. Plain, non-technical, what changed *for the masjid*; same voice as the App Store note in OpenMasjidAPPS `registry.yaml`, since they see both. It is loaded on demand, so never import it eagerly (that would put admin-only text in the donation page's bundle).
 - **`VERSION`** file at the root is the single source of truth; stamp it into the build.
 - **Semver, `0.x` = pre-release.** Start at `0.1.0`. Tag releases `vX.Y.Z`.
 - **GitHub Actions:** on a `v*` tag, build the multi-arch (amd64 + arm64) image and **push to GHCR** with the version tag (mirror Display's workflow). Then the app is added/updated in OpenMasjidAPPS `registry.yaml` with the new `ref`.
+- **Two channels.** The same workflow also publishes the moving `:dev` (+ immutable `:dev-<sha>`) pair from the `dev` branch. Stable tags come only from `main`/`v*`. See **Branching policy** at the top of this file — a release is the *only* thing that moves `main`, and only on Hasan's explicit "merge to main".
+- **On `dev`, the manifest `version:` is the last release, not the dev build.** It is bumped at release time, so a dev box reports the previous version while running newer code. Deliberate: bumping it on `dev` would make every `dev` → `main` merge conflict on that line, and a version number is meaningless on a moving channel. Use the `:dev-<sha>` tag to identify a dev build.
 
 ---
 
