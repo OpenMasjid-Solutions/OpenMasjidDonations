@@ -9,12 +9,24 @@ name: Build image
 #   ghcr.io/openmasjid-solutions/openmasjiddonations
 # which is what docker-compose.yml references.
 #
+# TWO CHANNELS (the org's Update Channel toggle in OpenMasjidOS):
+#
+#   main / v* tags  ->  :<manifest version>  +  :latest     the stable channel
+#   dev             ->  :dev  +  :dev-<12-char sha>         the development channel
+#
+# `:dev` is a MOVING tag — that is the point of it, and it is the one place in this
+# repo where we knowingly give up the digest pin that §13 otherwise requires. The
+# stable channel keeps it (docker-compose.yml on `main` pins @sha256). To keep dev
+# auditable anyway, every dev build ALSO gets an immutable `:dev-<sha>` tag: `:dev`
+# says "newest", `:dev-<sha>` says exactly which commit a masjid is running, so a bad
+# dev build can be identified and rolled back to a specific one.
+#
 # After the first run, make the GHCR package Public (owner -> Packages -> package
 # settings) so masjid hosts can pull it without authentication.
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ['v*']
     # Changes that don't affect the image — skip the (slow) multi-arch build.
     # docker-compose.yml is NOT part of the image build context (the Dockerfile only
@@ -45,14 +57,38 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Resolve image name + version
+      - name: Resolve image name, version + channel tags
         id: meta
         run: |
           ver=$(grep -E '^version:' manifest.yaml | head -1 | sed -E 's/^version:[[:space:]]*//' | tr -d "\"' \r")
           [ -n "$ver" ] || ver=latest
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          name=$(echo "${GITHUB_REPOSITORY##*/}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/$owner/$name"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-          echo "name=$(echo "${GITHUB_REPOSITORY##*/}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          # Which channel to publish is decided by the REF, not by the event, so a manual
+          # workflow_dispatch run on `dev` can never publish `:latest` from dev code.
+          if [ "$GITHUB_REF" = 'refs/heads/dev' ]; then channel=dev; else channel=stable; fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          # Multi-line output. Nothing else may write to $GITHUB_OUTPUT between the
+          # delimiters, or it would be swallowed into the value — so `channel` is
+          # written above, and the tags are echoed straight into the block below
+          # (no shell variable, so no YAML indentation can leak into a tag).
+          {
+            echo 'tags<<TAGS_EOF'
+            if [ "$channel" = dev ]; then
+              echo "$image:dev"
+              echo "$image:dev-${GITHUB_SHA::12}"
+            else
+              echo "$image:$ver"
+              echo "$image:latest"
+            fi
+            echo 'TAGS_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing the $channel channel"
 
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -65,17 +101,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Publishes the version-pinned (+ latest) image on main and on v* tags, like the
-      # OpenMasjidDisplay template. Bump manifest.yaml `version:` for each meaningful
-      # change so a pinned install stays stable (the catalog pins a git tag + version).
+      # OpenMasjidDisplay template, or the moving :dev pair on the dev branch. Bump
+      # manifest.yaml `version:` for each meaningful change so a pinned install stays
+      # stable (the catalog pins a git tag + version). Both arches always: a masjid box
+      # is usually a Raspberry Pi, so an amd64-only dev image would be untestable where
+      # it actually runs.
       - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.name }}:${{ steps.meta.outputs.version }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/${{ steps.meta.outputs.name }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

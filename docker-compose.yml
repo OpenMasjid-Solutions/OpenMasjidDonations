@@ -11,9 +11,25 @@
 # inside the app (saved to /data).
 services:
   app:
-    # Tag for humans + @sha256 digest for integrity (the digest is the real pin — a
-    # moved tag can't repoint it to a different image). Bump both on every release.
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.40.0@sha256:8d4e0672ab6c3ded96251dc1302728bfca37040e8065b84df071a962dc2f41d3
+    # ── DEV BRANCH: the development channel ──────────────────────────────────
+    # This is the `dev` branch, so this points at the MOVING :dev tag, which CI
+    # republishes on every push to dev. A masjid on the Update Channel = dev sees
+    # the newest dev build; that is the whole point of the channel.
+    #
+    # There is deliberately NO @sha256 pin here, and it must not be added: pinning a
+    # digest would freeze the dev channel at one build and stop it tracking dev. This
+    # is the one place this repo gives up the pin that §13 otherwise requires, and the
+    # trade is accepted only because the dev channel is opt-in and not what a masjid
+    # runs in production. The catalog build warns about it (build-catalog.mjs's
+    # digest-pin check is a warning, not a failure) — that warning is EXPECTED here.
+    #
+    # On `main` this line keeps its release tag + @sha256 digest. Never carry this dev
+    # line into main: a "merge to main" must restore the pinned form (see CLAUDE.md
+    # → Branching policy).
+    #
+    # To identify what a dev box is actually running, use the immutable companion tag
+    # CI also publishes: ghcr.io/…/openmasjiddonations:dev-<12-char commit sha>.
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:dev
     restart: unless-stopped
     environment:
       PORT: "8080"
