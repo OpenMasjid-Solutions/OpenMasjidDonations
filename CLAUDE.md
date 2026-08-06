@@ -63,12 +63,16 @@ OpenMasjidOS has an Update Channel toggle. The OpenMasjidAPPS catalog resolves t
 - When that work ships to stable the version becomes `X.Y.Z` (drop the suffix), and `dev` then starts the next one at `X.(Y+1).0-dev.1`.
 - CI enforces both directions and fails the build rather than publishing something undetectable: a **dev** build without a `-dev.N` is refused, and a **stable** build *with* one is refused.
 
-**Publish in two steps, image first.** The catalog pins the exact versioned tag, so if the compose names a tag that does not exist yet, a masjid on Development gets a pull failure:
+**Bump the version and the image reference together, in ONE commit:**
 
-1. Bump `manifest.yaml` + `server/package.json` + `web/package.json` to `X.Y.Z-dev.N`. Commit and push `dev` — CI publishes `:X.Y.Z-dev.N` and moves `:dev`.
-2. **Wait for that build to go green.** Then point `docker-compose.yml`'s `image:` at the exact tag — **every service, if this app ever grows a second one** — and push. Compose is in the workflow's `paths-ignore`, so this second push doesn't rebuild anything.
+1. Set `manifest.yaml` + `server/package.json` + `web/package.json` to `X.Y.Z-dev.N`, **and** point `docker-compose.yml`'s `image:` at `…:X.Y.Z-dev.N` — **every service**, if this app ever grows a second one. Never a bare `:dev` here.
+2. Commit and push `dev`. CI publishes `:X.Y.Z-dev.N`, moves the `:dev` alias, and then — only after that push succeeds — signals the catalog to rebuild (`repository_dispatch` → `rebuild-catalog`).
 
-Then the dev catalog picks it up from the tip of `dev`.
+This used to be two steps, compose second, so that the compose could never name a tag that did not exist yet. **The catalog dispatch is what made one commit correct**, and two commits wrong: the dispatch fires *after* the image is published, so a single commit gets the catalog rebuilt at a moment when the version, the compose and the published image all agree. Splitting it would fire the dispatch while the compose still named the *previous* tag, publishing a catalog entry whose version and image disagree — and the follow-up compose push does not rebuild (it is in `paths-ignore`), so nothing would correct it until the next cron. A wrong version pointing at a real image is worse than a brief gap, because nothing about it looks broken.
+
+The remaining gap is small and self-healing: between the push and the build going green (~10 min) the tip of `dev` names a tag that does not exist yet, so a catalog rebuild landing in that window (the hourly cron) would offer an image that cannot be pulled. That fails visibly, and the dispatch at the end of the build corrects it.
+
+**Every push to `dev` that touches anything outside `paths-ignore` needs a fresh `-dev.N`** — including a workflow-only change. The build republishes whatever version the manifest says, so reusing `N` would quietly replace the contents of an already-published tag and leave every masjid on that version with no update to find.
 
 No `changelog.ts` entry for a dev build — that file is the "What's new" list of *releases*, and the entry is written when the work ships to stable.
 

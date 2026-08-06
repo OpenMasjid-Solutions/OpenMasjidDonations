@@ -23,13 +23,15 @@ services:
     #   2. An exact tag is immutable, so a masjid on Development gets the build we
     #      published rather than whatever `:dev` happens to point at by then.
     #
-    # Bump this in lockstep with manifest.yaml's `version:` — and only AFTER the build
-    # publishing that tag is green, or an install here meets a pull failure (CLAUDE.md
-    # → Publishing a dev build).
+    # Bump this in the SAME commit as manifest.yaml's `version:`. CI signals the catalog
+    # to rebuild only after the image push succeeds, so by the time the catalog reads
+    # this file the tag exists — whereas bumping it in a later commit would have the
+    # catalog rebuilt while this still named the previous tag (CLAUDE.md → Publishing a
+    # dev build).
     #
     # On `main` this line is the release tag + @sha256 digest. Never carry this dev
     # line into main: a merge must restore the pinned form (Branching policy, rule 6).
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.41.0-dev.1
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.41.0-dev.2
     restart: unless-stopped
     environment:
       PORT: "8080"
