@@ -12,24 +12,24 @@
 services:
   app:
     # ── DEV BRANCH: the development channel ──────────────────────────────────
-    # This is the `dev` branch, so this points at the MOVING :dev tag, which CI
-    # republishes on every push to dev. A masjid on the Update Channel = dev sees
-    # the newest dev build; that is the whole point of the channel.
+    # The EXACT prerelease version CI published for this build — never the moving
+    # `:dev` alias. Two reasons, and both are the difference between a working dev
+    # channel and a silent one:
     #
-    # There is deliberately NO @sha256 pin here, and it must not be added: pinning a
-    # digest would freeze the dev channel at one build and stop it tracking dev. This
-    # is the one place this repo gives up the pin that §13 otherwise requires, and the
-    # trade is accepted only because the dev channel is opt-in and not what a masjid
-    # runs in production. The catalog build warns about it (build-catalog.mjs's
-    # digest-pin check is a warning, not a failure) — that warning is EXPECTED here.
+    #   1. OpenMasjidOS spots an update by comparing the catalog's `version` with the
+    #      installed one. The version here has to change per build, and the image
+    #      reference has to change with it, or there is nothing to notify and nothing
+    #      to update to.
+    #   2. An exact tag is immutable, so a masjid on Development gets the build we
+    #      published rather than whatever `:dev` happens to point at by then.
     #
-    # On `main` this line keeps its release tag + @sha256 digest. Never carry this dev
-    # line into main: a "merge to main" must restore the pinned form (see CLAUDE.md
-    # → Branching policy).
+    # Bump this in lockstep with manifest.yaml's `version:` — and only AFTER the build
+    # publishing that tag is green, or an install here meets a pull failure (CLAUDE.md
+    # → Publishing a dev build).
     #
-    # To identify what a dev box is actually running, use the immutable companion tag
-    # CI also publishes: ghcr.io/…/openmasjiddonations:dev-<12-char commit sha>.
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:dev
+    # On `main` this line is the release tag + @sha256 digest. Never carry this dev
+    # line into main: a merge must restore the pinned form (Branching policy, rule 6).
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.41.0-dev.1
     restart: unless-stopped
     environment:
       PORT: "8080"
