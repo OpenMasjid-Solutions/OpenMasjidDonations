@@ -50,10 +50,27 @@ Rules for the ask:
 
 OpenMasjidOS has an Update Channel toggle. The OpenMasjidAPPS catalog resolves this app per channel:
 
-| Channel | Git ref | Image tag | Digest-pinned? |
-|---|---|---|---|
-| stable | the `vX.Y.Z` tag (registry `ref:` + immutable `commit:`) | `:<version>` | **yes** — `@sha256:…` in compose |
-| dev | the `dev` branch (registry `dev_ref: dev`) | `:dev` | **no, deliberately** |
+| Channel | Git ref | `manifest.yaml` version | Image tag the compose pins | Moving alias |
+|---|---|---|---|---|
+| stable | the `vX.Y.Z` tag (registry `ref:` + immutable `commit:`) | `X.Y.Z` | `:X.Y.Z@sha256:…` | `:latest` |
+| dev | the `dev` branch (registry `dev_ref: dev`) | `X.Y.Z-dev.N` | `:X.Y.Z-dev.N` | `:dev` |
+
+### Publishing a dev build
+
+**The version is the whole mechanism.** OpenMasjidOS spots an update by comparing the catalog's `version` with the installed one. A dev build that reuses the stable version is *invisible* to the platform however many times it is published — nothing to notify, nothing to update to. So:
+
+- **Dev versions are semver prereleases: `X.Y.Z-dev.N`.** `X.Y.Z` is the release being worked toward; `N` increments on **every published dev build**. It must never equal the stable version. Ordering is `0.40.1 < 0.41.0-dev.1 < 0.41.0` — ahead of the last release, behind the next.
+- When that work ships to stable the version becomes `X.Y.Z` (drop the suffix), and `dev` then starts the next one at `X.(Y+1).0-dev.1`.
+- CI enforces both directions and fails the build rather than publishing something undetectable: a **dev** build without a `-dev.N` is refused, and a **stable** build *with* one is refused.
+
+**Publish in two steps, image first.** The catalog pins the exact versioned tag, so if the compose names a tag that does not exist yet, a masjid on Development gets a pull failure:
+
+1. Bump `manifest.yaml` + `server/package.json` + `web/package.json` to `X.Y.Z-dev.N`. Commit and push `dev` — CI publishes `:X.Y.Z-dev.N` and moves `:dev`.
+2. **Wait for that build to go green.** Then point `docker-compose.yml`'s `image:` at the exact tag — **every service, if this app ever grows a second one** — and push. Compose is in the workflow's `paths-ignore`, so this second push doesn't rebuild anything.
+
+Then the dev catalog picks it up from the tip of `dev`.
+
+No `changelog.ts` entry for a dev build — that file is the "What's new" list of *releases*, and the entry is written when the work ships to stable.
 
 `.github/workflows/build-image.yml` decides the channel from the git ref, not the event, so a manual run on `dev` can never publish `:latest`. Every dev build also gets an immutable `:dev-<12-char sha>` tag — `:dev` means "newest", `:dev-<sha>` identifies exactly which commit a box is running, which is what makes a bad dev build diagnosable and rollback-able despite the moving tag.
 
