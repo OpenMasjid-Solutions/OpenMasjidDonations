@@ -20,7 +20,7 @@ services:
     # main would point every stable install at a development build. Git will normally
     # conflict on this line — that conflict is a feature, so resolve it by keeping the
     # pinned form below (CLAUDE.md → Branching policy, rule 6).
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.41.0
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.41.0@sha256:9cc3ef125f09f6a0f7df2cc2715354a5e5d87b639c6ca9bdbf13cb3ccd61d819
     restart: unless-stopped
     environment:
       PORT: "8080"
