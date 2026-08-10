@@ -34,6 +34,15 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.41.0',
+    date: '2026-08-10',
+    notes: [
+      '**The app has a new logo.** The crescent and dome now carry the word “Donations” curved around them, with the card tucked in at the front. It is a square badge, so the tile in the App Store, the icon in your browser tab and the mark in the top corner of this panel are all the same picture — where before a wide one had to be squeezed into each of those places.',
+      'It is sharper as well, at every size: the lettering and the card are drawn rather than photographed, so they stay clean whether they end up as a tiny tab icon or a full-size tile.',
+      'Nothing else about the app changes, and nothing you have set up needs redoing — your donations, appeals and monthly plans are all exactly as they were.',
+    ],
+  },
+  {
     version: '0.40.1',
     date: '2026-08-05',
     notes: [
