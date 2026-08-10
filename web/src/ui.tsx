@@ -10,7 +10,7 @@ import { getSession, logout, type AppInfo, type Session } from './api';
 import type { Release } from './changelog';
 import { markReleaseSeen, useUnreadRelease } from './whatsnew';
 import { withBase } from './base';
-import brandMark from './assets/brand-mark.png';
+import brandMark from './assets/brand-mark.svg';
 
 /** Ambient background. A custom wallpaper image (inherited from the dashboard or set
  *  in the app) fully replaces the preset gradient; otherwise we show the preset scene
