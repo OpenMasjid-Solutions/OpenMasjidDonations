@@ -112,9 +112,12 @@ export function groupPlanSeeds(donations: Donation[]): PlanSeed[] {
       };
       bySub.set(d.subscriptionId, seed);
     }
-    // Only money that actually landed counts — a pending or failed row is not income.
+    // Only money that actually landed counts — a pending or failed row is not income. And only
+    // the part of it the masjid KEPT: a refunded payment is money that came and went, so it comes
+    // off "collected so far" (as it comes off every other total) while still counting as one of
+    // the plan's payments — it did happen, and the donations list still shows it.
     if (d.status === 'succeeded') {
-      seed.collectedMinor += d.amount;
+      seed.collectedMinor += Math.max(0, d.amount - d.refundedAmount);
       seed.payments += 1;
       if (d.createdAt > seed.lastPaymentAt) seed.lastPaymentAt = d.createdAt;
     }

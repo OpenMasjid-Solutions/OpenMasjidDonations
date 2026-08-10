@@ -7,7 +7,7 @@
 // images/links are emitted.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderReceipt, fillVars, type ReceiptTemplate, type ReceiptContext } from './email';
+import { renderReceipt, renderRefundNotice, fillVars, type ReceiptTemplate, type ReceiptContext, type RefundContext } from './email';
 
 const TPL: ReceiptTemplate = {
   subject: 'Your donation receipt — {masjid}',
@@ -115,4 +115,89 @@ test('receipt subject: a donor name cannot inject an email header (CR/LF collaps
 test('receipt subject: ordinary names and unicode are untouched', () => {
   const ok = renderReceipt({ ...TPL, subject: 'Receipt for {name}' }, { ...CTX, name: 'Yūsuf Al-Ḥasan' }).subject;
   assert.equal(ok, 'Receipt for Yūsuf Al-Ḥasan');
+});
+
+// ── Refund notice ─────────────────────────────────────────────────────────────
+// The refund email is NOT admin-editable, so there is no template to inject through — but every
+// value in it still comes from somewhere: the donor's own name (unauthenticated), the masjid's
+// contact fields, and the accent. The same three properties are locked as for the receipt: nothing
+// can inject markup, only http(s) images/links are emitted, and the subject stays one line.
+const RCTX: RefundContext = {
+  name: 'Yusuf',
+  amountText: '£50.00',
+  refundAmountText: '£20.00',
+  full: false,
+  campaignTitle: 'General Fund',
+  masjidName: 'An-Noor',
+  masjidLogo: '',
+  dateRefunded: 'Aug 10, 2026, 6:03 PM UTC',
+  paymentMethod: 'Visa •••• 4242',
+  reference: '0065A17F',
+  contactEmail: 'info@annoor.org',
+  contactPhone: '718-555-5839',
+  contactWebsite: 'https://annoor.org',
+};
+
+test('refund notice: a PART refund names both figures, so nobody thinks it was all of it', () => {
+  const r = renderRefundNotice('', RCTX);
+  assert.equal(r.subject, 'Your donation to An-Noor has been refunded');
+  assert.ok(r.html.includes('Part of your donation has been refunded'));
+  for (const s of ['Refunded', '£20.00', 'Original donation', '£50.00', 'Date refunded', 'Visa •••• 4242', 'General Fund']) {
+    assert.ok(r.html.includes(s), `html should contain "${s}"`);
+  }
+  assert.ok(r.text.includes('£20.00') && r.text.includes('£50.00'));
+});
+
+test('refund notice: a FULL refund says so, and does not repeat the amount as an "original"', () => {
+  const r = renderRefundNotice('', { ...RCTX, full: true, refundAmountText: '£50.00' });
+  assert.ok(r.html.includes('Your donation has been refunded'));
+  assert.ok(!r.html.includes('Part of your donation'));
+  assert.ok(!r.html.includes('Original donation'), 'a full refund has nothing to compare against');
+  assert.ok(r.html.includes('refunded in full'));
+});
+
+test('refund notice: it tells the donor how long to wait and who to ask', () => {
+  const r = renderRefundNotice('', RCTX);
+  assert.ok(r.html.includes('5–10 days'), 'a donor watching their bank must be told to wait');
+  assert.ok(r.html.includes('mailto:info@annoor.org'));
+  assert.ok(r.text.includes('718-555-5839'));
+});
+
+test('refund notice: an empty {name} is tidied, exactly as in the receipt', () => {
+  const r = renderRefundNotice('', { ...RCTX, name: '' });
+  assert.ok(!r.html.includes('{name}'));
+  assert.ok(!r.html.includes(' ,'));
+});
+
+test('SECURITY: a donor name with HTML is escaped in the refund notice too', () => {
+  const r = renderRefundNotice('', { ...RCTX, name: '<img src=x onerror=alert(1)>' });
+  assert.ok(!r.html.includes('<img src=x onerror'));
+  assert.ok(r.html.includes('&lt;img src=x onerror=alert(1)&gt;'));
+});
+
+test('SECURITY: the refund subject cannot carry an injected email header (DONATIONS-023)', () => {
+  const evil = 'Ahmed\r\nBcc: attacker@evil.example\r\n\r\nInjected body';
+  const { subject } = renderRefundNotice('', { ...RCTX, name: evil, masjidName: evil });
+  assert.ok(!/[\r\n]/.test(subject), `subject must be one line, got ${JSON.stringify(subject)}`);
+  assert.ok(!/\u2028|\u2029|\v|\f|\0/.test(subject));
+});
+
+test('SECURITY: the refund notice accent takes a hex colour or the default, never CSS', () => {
+  assert.ok(renderRefundNotice('#D4AF37', RCTX).html.includes('#D4AF37'));
+  const bad = renderRefundNotice('red;}body{display:none', RCTX).html;
+  assert.ok(bad.includes('#1FA37A'));
+  assert.ok(!bad.includes('display:none'));
+});
+
+test('SECURITY: the refund notice logo takes http(s) only', () => {
+  assert.ok(renderRefundNotice('', { ...RCTX, masjidLogo: 'https://ex.org/l.png' }).html.includes('<img src="https://ex.org/l.png"'));
+  assert.ok(!renderRefundNotice('', { ...RCTX, masjidLogo: 'javascript:alert(1)' }).html.includes('<img'));
+});
+
+test('receipt and refund notice share one layout, so a donor reads the same letter twice', () => {
+  const a = renderReceipt(TPL, CTX).html;
+  const b = renderRefundNotice('', RCTX).html;
+  for (const marker of ['max-width:540px', 'border-radius:14px', 'Sent by OpenMasjid Donations · Secured by Stripe']) {
+    assert.ok(a.includes(marker) && b.includes(marker), `both must use "${marker}"`);
+  }
 });

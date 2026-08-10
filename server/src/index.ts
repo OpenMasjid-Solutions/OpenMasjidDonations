@@ -21,7 +21,16 @@ import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
-import { renderReceipt, type ReceiptContext } from './email';
+import { renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
+import {
+  REFUND_REASONS,
+  createRefund,
+  fetchChargeRefundState,
+  refundState,
+  refundableMinor,
+  resolveRefundAmount,
+  type RefundReason,
+} from './refunds';
 import {
   billingConfigured,
   MIN_TUITION_CENTS,
@@ -911,6 +920,34 @@ async function main(): Promise<void> {
     reply.header('cache-control', 'no-store, private, max-age=0').header('pragma', 'no-cache').header('vary', 'cookie');
   };
 
+  /** One row of the donations log, as the panel reads it. Amounts cross the API in MAJOR units.
+   *
+   *  `refundState` is derived here rather than in the browser so the list, the detail window, the
+   *  CSV and every alert all describe a refund the same way. `refundable` is what is left to give
+   *  back ACCORDING TO OUR RECORDS — the refund route re-checks it against Stripe before acting,
+   *  because a refund made in the Stripe dashboard may not have reached us yet. It is here only
+   *  so the panel can pre-fill the amount field and hide the button when there is nothing left. */
+  const donationView = (d: Donation, titles: Map<string, string>) => {
+    // The row's OWN currency, not the masjid's current one. They are the same for every donation a
+    // masjid has ever taken (the intent charges in `cur()`), but if the admin ever switches
+    // currency the old rows keep theirs — and the row is rendered with `d.currency` beside the
+    // figure, so converting with today's decimals would print a number that contradicts its own
+    // label. That matters most for refunds: the browser sends back a major-unit amount which the
+    // refund route converts using the DONATION's currency, so both ends must agree on the scale or
+    // a ¥5000 donation would offer a "50.00" refund and give back ¥50.
+    const ccy = d.currency || cur();
+    const major = (minor: number) => toMajor(minor, ccy);
+    return {
+      ...d,
+      ref: donationRef(d.id),
+      amount: major(d.amount),
+      refundedAmount: major(d.refundedAmount),
+      refundState: refundState(d.amount, d.refundedAmount),
+      refundable: major(Math.max(0, d.amount - d.refundedAmount)),
+      campaignTitle: titles.get(d.campaignId) ?? '—',
+    };
+  };
+
   app.get('/api/admin/donations', { preHandler: requireAdmin }, async (_req, reply) => {
     noStoreDonorData(reply);
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
@@ -918,8 +955,15 @@ async function main(): Promise<void> {
     const succeeded = list.filter((d) => d.status === 'succeeded');
     return {
       data: {
-        donations: list.map((d) => ({ ...d, ref: donationRef(d.id), amount: toMajorCur(d.amount), campaignTitle: titles.get(d.campaignId) ?? '—' })),
-        stats: { totalRaised: toMajorCur(succeeded.reduce((s, d) => s + d.amount, 0)), count: succeeded.length, currency: cur() },
+        donations: list.map((d) => donationView(d, titles)),
+        stats: {
+          // Net of refunds, exactly as the dashboard totals and the campaign goal bars are: money
+          // that went back to the donor is not money the masjid raised.
+          totalRaised: toMajorCur(succeeded.reduce((s, d) => s + Math.max(0, d.amount - d.refundedAmount), 0)),
+          count: succeeded.length,
+          totalRefunded: toMajorCur(succeeded.reduce((s, d) => s + d.refundedAmount, 0)),
+          currency: cur(),
+        },
       },
     };
   });
@@ -928,17 +972,160 @@ async function main(): Promise<void> {
     // record exists even if the response never finishes.
     audit(req, 'donations.export', '', 'exported the donation ledger as CSV');
     const titles = new Map(store.listCampaigns().map((c) => [c.id, c.title]));
-    const rows = [['Ref', 'Date', 'Campaign', 'Amount', 'Currency', 'Status', 'Donor', 'Email', 'Card', 'Covered fees', 'PaymentIntent']];
+    // 'Amount' stays what the donor was charged and 'Refunded' is what came back, with 'Net' as
+    // the figure that reconciles with the totals in the panel — so whoever opens this in a
+    // spreadsheet can add up any of the three columns and get an answer that means something.
+    const rows = [
+      ['Ref', 'Date', 'Campaign', 'Amount', 'Refunded', 'Net', 'Currency', 'Status', 'Refund status', 'Refunded at', 'Donor', 'Email', 'Card', 'Covered fees', 'PaymentIntent'],
+    ];
     for (const d of store.listDonations()) {
       const card = d.cardBrand ? `${d.cardBrand} ${d.cardLast4}`.trim() : '';
+      const state = refundState(d.amount, d.refundedAmount);
+      // Each row's own currency, for the same reason donationView uses it: the Currency column
+      // sits right there, so the figures must be on that currency's scale.
+      const major = (minor: number) => toMajor(minor, d.currency || cur());
       rows.push([
-        donationRef(d.id), d.createdAt, titles.get(d.campaignId) ?? '', String(toMajorCur(d.amount)), d.currency, d.status,
+        donationRef(d.id), d.createdAt, titles.get(d.campaignId) ?? '',
+        String(major(d.amount)), String(major(d.refundedAmount)), String(major(Math.max(0, d.amount - d.refundedAmount))),
+        d.currency, d.status, state === 'none' ? '' : state === 'full' ? 'refunded' : 'part refunded', d.refundedAt,
         d.donorName, d.donorEmail, card, d.coverFees ? 'yes' : 'no', d.paymentIntentId,
       ]);
     }
     noStoreDonorData(reply);
     reply.header('content-type', 'text/csv; charset=utf-8').header('content-disposition', 'attachment; filename="donations.csv"');
     return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+  });
+
+  // ── Refund a donation ───────────────────────────────────────────────────────
+  // Giving money back is the one destructive thing this panel can do with a donation, so the
+  // route is deliberately paranoid about two facts it does not own:
+  //
+  //   • HOW MUCH IS LEFT TO REFUND is a fact about the Stripe charge, not about our row. A masjid
+  //     can refund from Stripe's own dashboard, and a LAN-only box may never see the webhook that
+  //     would have told us — so we read the charge first, bring our row into line with it (which
+  //     is also the repair path for exactly that case), and only then work out what can go back.
+  //   • WHETHER THE REFUND HAPPENED is Stripe's answer, not our optimism. Nothing is written to
+  //     the ledger until Stripe confirms, and a refund it reports as failed or cancelled is
+  //     reported to the admin as a failure rather than quietly recorded.
+  //
+  // The idempotency key is derived from (payment, amount already refunded, amount now) rather
+  // than being random, so a double-clicked button sends the money back ONCE. A genuine second
+  // part refund of the same size has a different "already refunded" figure, so it is a different
+  // key and is allowed through.
+  const RefundBody = z.object({
+    /** MAJOR units. Omitted = refund everything that is left (the common case). */
+    amount: z.number().positive().optional(),
+    reason: z.enum(REFUND_REASONS).optional(),
+    /** Email the donor about it. Only possible when they gave an address and OS email is set up. */
+    notifyDonor: z.boolean().optional(),
+  });
+  const REFUND_NO_KEYS =
+    'This donation’s Stripe account isn’t set up on this device any more, so we can’t refund it here — check Payments, or OpenMasjidOS → Settings → Payments.';
+
+  /** Tell the donor their money is on its way back. Best-effort and reported honestly: one
+   *  attempt, no retry outbox, and the admin is told plainly if it didn't go so they can pick up
+   *  the phone instead. (A receipt gets an outbox because the donor is waiting for it at that
+   *  moment; a refund notice that silently arrives three days late is worse than none.) */
+  const sendRefundNotice = async (don: Donation, refundedNowMinor: number, full: boolean): Promise<{ sent: boolean; reason: string }> => {
+    const addr = (don.donorEmail || '').trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) return { sent: false, reason: 'no-email' };
+    if (!ssoConfigured()) return { sent: false, reason: 'no-fabric' };
+    try {
+      const base = receiptContext(don);
+      const rendered = renderRefundNotice(store.getEmailReceipt().accent, {
+        ...base,
+        refundAmountText: formatMoney(refundedNowMinor, don.currency),
+        dateRefunded: fmtReceiptDate(new Date().toISOString()),
+        full,
+      });
+      const res = await fabricEmail({ to: addr, subject: rendered.subject, text: rendered.text, html: rendered.html });
+      return { sent: res.sent, reason: res.reason ?? '' };
+    } catch {
+      return { sent: false, reason: 'error' };
+    }
+  };
+
+  app.post('/api/admin/donations/:id/refund', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = RefundBody.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'Please check the amount and try again.' });
+    const body = parsed.data;
+    const don = store.getDonation((req.params as { id: string }).id);
+    if (!don) return reply.code(404).send({ error: 'We couldn’t find that donation.' });
+    if (don.status !== 'succeeded') {
+      return reply.code(400).send({ error: 'Only a donation that went through can be refunded — nothing was taken for this one.' });
+    }
+    if (!don.paymentIntentId) return reply.code(400).send({ error: 'This donation has no payment reference, so it can’t be refunded here.' });
+    // Defence in depth (§13 route isolation): a tuition payment is written to `student_payments`
+    // and never to `donations`, so there should be no such row here at all — but if one ever
+    // appeared, refunding it from this side would leave the school's ledger claiming it was paid.
+    const camp = store.getCampaign(don.campaignId);
+    if (camp?.type === 'tuition') {
+      return reply.code(400).send({ error: 'This is a school payment, not a donation — refund it in OpenMasjid Students.' });
+    }
+    const acct = await accountById(don.stripeAccountId);
+    if (!acct?.secretKey) return reply.code(502).send({ error: REFUND_NO_KEYS });
+
+    const pos = await fetchChargeRefundState(acct.secretKey, don.paymentIntentId);
+    if (!pos) {
+      return reply.code(502).send({ error: 'We couldn’t reach Stripe to check this payment. Please try again in a moment.' });
+    }
+    // Stripe is ahead of us (a dashboard refund, or a webhook we never received) — record what it
+    // says BEFORE deciding anything, so the figures the admin is about to be shown are the truth.
+    const synced = pos.refundedMinor > don.refundedAmount ? store.setDonationRefund(don.paymentIntentId, pos.refundedMinor, new Date().toISOString()) : don;
+    const current = synced ?? don;
+    const currency = pos.currency || current.currency;
+    const refundable = refundableMinor(pos.capturedMinor, pos.refundedMinor);
+    const requested = body.amount != null ? toMinor(body.amount, currency) : undefined;
+    const resolved = resolveRefundAmount(requested, refundable, currency);
+    // 409 rather than 400 for "nothing left to refund": the request was well formed, the world had
+    // moved on (we just synced a refund made elsewhere). The panel reloads the list on any failure,
+    // so the admin sees the new state next to the explanation.
+    if (!resolved.ok) return reply.code(409).send({ error: resolved.error });
+    const amount = resolved.amount;
+    const key = `refund:${don.paymentIntentId}:${pos.refundedMinor}:${amount}`;
+    const res = await createRefund(acct, don.paymentIntentId, amount, body.reason as RefundReason | undefined, pos.refundedMinor, key);
+    if (!res.ok) return reply.code(res.retry ? 502 : 400).send({ error: res.error });
+
+    const updated = store.setDonationRefund(don.paymentIntentId, res.refundedTotalMinor, new Date().toISOString()) ?? current;
+    const state = refundState(updated.amount, updated.refundedAmount);
+    const full = state === 'full';
+    // No amount in the audit detail, by the rule the audit_log DDL sets out — `subject` is the
+    // donation id, and the row it names carries the figures.
+    audit(req, 'donation.refund', don.id, `refunded ${full ? 'a donation in full' : 'part of a donation'}${body.reason ? ` (${body.reason.replace(/_/g, ' ')})` : ''}`);
+
+    // Tell the donor, if the admin asked us to and we have somewhere to send it.
+    const notice = body.notifyDonor ? await sendRefundNotice(updated, res.amountMinor, full) : { sent: false, reason: 'not-asked' };
+
+    // Tell the masjid. This goes out as a declared ALERT rather than through notify(), and both
+    // halves of that are deliberate: an alert is the only channel that can reach the admin's own
+    // EMAIL (the platform owns the address — this app never learns it), and OpenMasjidOS → Settings
+    // → Alerts lets them route it to email, to their webhook, to both, or off. notify() would post
+    // to the same webhook a second time and offers no email and no off switch.
+    //
+    // It is sent even though an admin is standing right in front of the screen, on purpose: a
+    // masjid's panel is shared, and "money left the account, and who sent it back" is precisely
+    // the thing a treasurer should hear about without having to be the one who did it.
+    void fabricAlert(
+      'donation-refunded',
+      full ? 'A donation was refunded' : 'Part of a donation was refunded',
+      `${formatMoney(res.amountMinor, currency)} from the donation to “${camp?.title ?? 'your masjid'}” has been refunded to the donor by ${actorOf(req)}` +
+        `${body.reason ? ` (${body.reason.replace(/_/g, ' ')})` : ''}. Reference ${donationRef(don.id)}.`,
+      'warning',
+    ).catch(() => {});
+
+    return {
+      data: {
+        donation: donationView(updated, campaignTitles()),
+        /** What went back on THIS refund (major units) — not the running total. */
+        refunded: toMajor(res.amountMinor, currency),
+        currency,
+        /** Stripe accepted it but hasn't settled it yet: normal, and worth saying out loud. */
+        pending: res.pending,
+        donorEmailed: notice.sent,
+        /** Why the donor wasn't emailed, so the panel can say something useful rather than sulk. */
+        donorEmailReason: notice.sent ? '' : notice.reason,
+      },
+    };
   });
 
   // ── Monthly plans (recurring donations) ─────────────────────────────────────
@@ -1483,6 +1670,11 @@ async function main(): Promise<void> {
         currency,
         totalRaised: toMajorCur(m.totalRaised),
         count: m.count,
+        // Refunds are already subtracted from every `raised` figure above; these two exist so the
+        // difference is never a mystery. A masjid whose total went down deserves to see why on the
+        // same screen, rather than having to reconcile the ledger by hand.
+        totalRefunded: toMajorCur(m.totalRefunded),
+        refundedCount: m.refundedCount,
         average: m.count > 0 ? toMajorCur(Math.round(m.totalRaised / m.count)) : 0,
         thisMonthRaised: thisMonth.raised,
         thisMonthCount: thisMonth.count,
@@ -2147,8 +2339,10 @@ async function main(): Promise<void> {
 
   // ── Stripe webhook (optional, per-account secret) ───────────────────────────
   // Only needed when the app is publicly reachable. It records ongoing monthly
-  // charges (invoice.paid on renewal) and resiliently confirms one-time payments.
-  // The signature is verified with the account's own webhook secret.
+  // charges (invoice.paid on renewal), resiliently confirms one-time payments, and
+  // picks up refunds made outside this app (charge.refunded — e.g. straight from the
+  // masjid's Stripe dashboard). The signature is verified with the account's own
+  // webhook secret.
   app.post('/api/stripe/webhook/:accountId', async (req, reply) => {
     if (!webhookRateOk(peerOf(req))) return reply.code(429).send({ error: 'Too many requests.' });
     const acct = await accountById((req.params as { accountId: string }).accountId);
@@ -2171,6 +2365,37 @@ async function main(): Promise<void> {
           // a rejected promise the surrounding try/catch can't see — .catch() it so a DB fault
           // never becomes an unhandled rejection that crashes the whole process (fail soft).
           if (sp.recordStatus === 'pending') void tryRecordStudentPayment(pi.id).catch(() => {});
+        }
+      } else if (event.type === 'charge.refunded') {
+        // A refund happened somewhere. Usually that is a refund WE just made from the panel (in
+        // which case our row already says so and there is nothing to do), but it is also how a
+        // refund made in the masjid's own Stripe dashboard gets into this app's records — which
+        // matters, because otherwise the ledger, the totals and the campaign goal bars would go on
+        // counting money that had already gone back.
+        //
+        // `amount_refunded` is the charge's RUNNING TOTAL, which is exactly what the store wants,
+        // and setDonationRefund only ever moves it forward — so a replayed or out-of-order event
+        // is harmless. The alert is fired only when the figure actually MOVED, which is what stops
+        // a panel refund being announced twice (once by the route, once by this event).
+        //
+        // Note we deliberately do NOT email the donor from here: Stripe sends its own refund
+        // notification for a dashboard refund, and a second letter from us would confuse them.
+        const ch = event.data.object as { payment_intent?: string | { id?: string }; amount_refunded?: number; currency?: string };
+        const piId = typeof ch.payment_intent === 'string' ? ch.payment_intent : (ch.payment_intent?.id ?? '');
+        const refunded = Math.max(0, Math.round(ch.amount_refunded ?? 0));
+        const before = piId ? store.getDonationByPaymentIntent(piId) : null;
+        if (before && refunded > before.refundedAmount) {
+          const after = store.setDonationRefund(piId, refunded, new Date().toISOString()) ?? before;
+          const ccy = (ch.currency ?? after.currency).toUpperCase();
+          const camp = store.getCampaign(after.campaignId);
+          const full = refundState(after.amount, after.refundedAmount) === 'full';
+          log.info(`recorded a refund made outside this app (${piId})`);
+          void fabricAlert(
+            'donation-refunded',
+            full ? 'A donation was refunded' : 'Part of a donation was refunded',
+            `${formatMoney(after.refundedAmount - before.refundedAmount, ccy)} from the donation to “${camp?.title ?? 'your masjid'}” has been refunded in Stripe, so it has come off your donation totals. Reference ${donationRef(after.id)}.`,
+            'warning',
+          ).catch(() => {});
         }
       } else if (event.type === 'invoice.paid' || event.type === 'invoice.payment_succeeded') {
         const inv = event.data.object as { billing_reason?: string; subscription?: string; payment_intent?: string; amount_paid?: number; currency?: string };

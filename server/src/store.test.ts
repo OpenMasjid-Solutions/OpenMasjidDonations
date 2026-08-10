@@ -396,3 +396,92 @@ test('sweep query: oldest first and bounded, so a backlog drains in arrival orde
     assert.ok(found[i - 1].createdAt <= found[i].createdAt, 'ascending by date');
   }
 });
+
+// ── Refunds ───────────────────────────────────────────────────────────────────
+// A refund is recorded as an AMOUNT on the donation, not as a status, so that a part refund can
+// be expressed at all and so the fact that money DID arrive is never lost. Three properties are
+// worth guarding, and nothing else in the repo guards them:
+//
+//  1. Every money figure the masjid (or a donor, via a campaign goal bar) is shown must be NET of
+//     refunds. A refund that left the totals alone would keep counting money that had gone back.
+//  2. setDonationRefund is MONOTONIC and CLAMPED. Two things write to it — an admin's refund and a
+//     `charge.refunded` webhook — and Stripe gives no ordering guarantee, so a replayed event for
+//     the FIRST of two refunds must not put money back into the totals.
+//  3. The COUNTS stay gross. A refunded donation was still a donation that arrived, and the ledger
+//     still lists its row, so deducting it from the count would make the headline disagree.
+
+test('refunds: a donation starts un-refunded', () => {
+  const s = fresh();
+  const d = donation(s, { status: 'succeeded' });
+  assert.equal(d.refundedAmount, 0);
+  assert.equal(d.refundedAt, '');
+  assert.equal(s.getDonation(d.id)!.refundedAmount, 0, 'and survives a DB round-trip');
+});
+
+test('refunds: getDonation finds a row by its own id (the key the panel holds)', () => {
+  const s = fresh();
+  const d = donation(s, { status: 'succeeded' });
+  assert.equal(s.getDonation(d.id)!.paymentIntentId, d.paymentIntentId);
+  assert.equal(s.getDonation('don_nope'), null);
+});
+
+test('refunds: every money figure is net — totals, per-campaign, per-month and the goal bar', () => {
+  const s = fresh();
+  const a = donation(s, { campaignId: 'cmp_1', amount: 5000, status: 'succeeded' });
+  donation(s, { campaignId: 'cmp_1', amount: 3000, status: 'succeeded' });
+  s.setDonationRefund(a.paymentIntentId, 2000, '2026-08-10T00:00:00.000Z');
+
+  assert.equal(s.raisedForCampaign('cmp_1'), 6000, 'the goal bar donors see must not count money that went back');
+  const m = s.metrics();
+  assert.equal(m.totalRaised, 6000);
+  assert.equal(m.totalRefunded, 2000, 'and the difference is reported, never left a mystery');
+  assert.equal(m.refundedCount, 1);
+  assert.equal(m.count, 2, 'both donations still happened');
+  assert.equal(m.byCampaign[0].raised, 6000);
+  assert.equal(m.byCampaign[0].count, 2);
+  assert.equal(m.monthly.reduce((t, r) => t + r.raised, 0), 6000, 'the trend chart is net too');
+});
+
+test('refunds: a fully refunded donation contributes nothing but is still counted and listed', () => {
+  const s = fresh();
+  const d = donation(s, { campaignId: 'cmp_1', amount: 5000, status: 'succeeded' });
+  s.setDonationRefund(d.paymentIntentId, 5000, '2026-08-10T00:00:00.000Z');
+  assert.equal(s.raisedForCampaign('cmp_1'), 0);
+  const m = s.metrics();
+  assert.equal(m.totalRaised, 0);
+  assert.equal(m.count, 1, 'the donation is not erased');
+  assert.equal(s.listDonations().length, 1, 'and the ledger still shows the row');
+});
+
+test('refunds: a pending or failed donation never affects the totals, refunded or not', () => {
+  const s = fresh();
+  const p = donation(s, { amount: 5000, status: 'pending' });
+  s.setDonationRefund(p.paymentIntentId, 5000, '2026-08-10T00:00:00.000Z');
+  assert.equal(s.metrics().totalRaised, 0);
+  assert.equal(s.metrics().totalRefunded, 0, 'money that never arrived cannot be reported as refunded');
+});
+
+test('refunds: the running total only ever RISES — a replayed webhook cannot restore money', () => {
+  const s = fresh();
+  const d = donation(s, { amount: 5000, status: 'succeeded' });
+  s.setDonationRefund(d.paymentIntentId, 1000, '2026-08-01T00:00:00.000Z');
+  s.setDonationRefund(d.paymentIntentId, 4000, '2026-08-02T00:00:00.000Z');
+  // Stripe re-delivers the FIRST refund's event after the second: a smaller running total.
+  const after = s.setDonationRefund(d.paymentIntentId, 1000, '2026-08-03T00:00:00.000Z')!;
+  assert.equal(after.refundedAmount, 4000, 'the lower figure must be ignored');
+  assert.equal(after.refundedAt, '2026-08-02T00:00:00.000Z', 'and a duplicate must not restamp the date');
+  assert.equal(s.metrics().totalRaised, 1000);
+});
+
+test('refunds: the running total is clamped to the amount charged (never negative money raised)', () => {
+  const s = fresh();
+  const d = donation(s, { amount: 5000, status: 'succeeded' });
+  const after = s.setDonationRefund(d.paymentIntentId, 999_999, '2026-08-10T00:00:00.000Z')!;
+  assert.equal(after.refundedAmount, 5000);
+  assert.equal(s.metrics().totalRaised, 0);
+  assert.equal(s.raisedForCampaign(d.campaignId), 0);
+});
+
+test('refunds: an unknown PaymentIntent is a no-op, not a crash', () => {
+  assert.equal(fresh().setDonationRefund('pi_never_existed', 100, '2026-08-10T00:00:00.000Z'), null);
+});

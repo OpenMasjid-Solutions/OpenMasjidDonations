@@ -202,11 +202,43 @@ export interface Donation {
   cardLast4: string;
   recurring: boolean;
   createdAt: string;
+  /** How much of this donation has been given back (major units). 0 = none. */
+  refundedAmount: number;
+  /** ISO timestamp of the most recent refund, '' when none. */
+  refundedAt: string;
+  /** How the row should read: nothing refunded, part of it, or all of it. Derived on the
+   *  server so the list, the detail window, the CSV and the alerts all agree. */
+  refundState: RefundState;
+  /** What is left to refund by OUR records (major units) — pre-fills the amount field and
+   *  hides the button at zero. The server re-checks against Stripe before refunding, since a
+   *  refund made in the Stripe dashboard may not have reached us yet. */
+  refundable: number;
 }
 export interface DonationsResult {
   donations: Donation[];
-  stats: { totalRaised: number; count: number; currency: string };
+  stats: { totalRaised: number; count: number; totalRefunded: number; currency: string };
 }
+
+// ── Refunds ─────────────────────────────────────────────────────────────────
+export type RefundState = 'none' | 'partial' | 'full';
+/** Stripe's three reasons, the only ones its API accepts. 'fraudulent' also marks the charge as
+ *  fraud in Stripe (it feeds Radar), so it is never the default. */
+export type RefundReason = 'requested_by_customer' | 'duplicate' | 'fraudulent';
+export interface RefundResult {
+  donation: Donation;
+  /** What went back on THIS refund (major units) — not the running total. */
+  refunded: number;
+  currency: string;
+  /** Stripe accepted it but hasn't settled it yet — normal for some payment methods. */
+  pending: boolean;
+  donorEmailed: boolean;
+  /** Why the donor wasn't emailed: 'not-asked' | 'no-email' | 'no-fabric' | a provider reason. */
+  donorEmailReason: string;
+}
+/** Refund a donation. `amount` omitted = everything left on it. `notifyDonor` emails the donor a
+ *  branded refund notice (only possible when they gave an address and OS email is set up). */
+export const refundDonation = (id: string, body: { amount?: number; reason?: RefundReason; notifyDonor?: boolean }) =>
+  request<RefundResult>(`/api/admin/donations/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify(body) });
 
 export interface CampaignMetric {
   id: string;
@@ -225,8 +257,13 @@ export interface MonthMetric {
 }
 export interface Metrics {
   currency: string;
+  /** Net of refunds, like every `raised` figure. */
   totalRaised: number;
   count: number;
+  /** How much has gone back to donors, and on how many donations. Reported alongside the totals
+   *  so a figure that dropped is explained on the same screen. */
+  totalRefunded: number;
+  refundedCount: number;
   average: number;
   thisMonthRaised: number;
   thisMonthCount: number;

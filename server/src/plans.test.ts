@@ -63,6 +63,8 @@ function don(over: Partial<Donation> = {}): Donation {
     cardLast4: '4242',
     recurring: true,
     subscriptionId: 'sub_A',
+    refundedAmount: 0,
+    refundedAt: '',
     receipt: 'stripe',
     createdAt: '2026-01-01T00:00:00.000Z',
     ...over,
@@ -173,6 +175,27 @@ test('groupPlanSeeds: only SUCCEEDED rows are money, and lastPaymentAt is the ne
   assert.equal(s.collectedMinor, 4000);
   assert.equal(s.payments, 2);
   assert.equal(s.lastPaymentAt, '2026-02-01T00:00:00.000Z', 'a failed/pending row never becomes the last payment');
+});
+
+test('groupPlanSeeds: a refunded payment comes off "collected", but still counts as a payment', () => {
+  // A refund is money that came and went. "Collected so far" is what the masjid KEPT, so it must
+  // match the donation totals (which are net) rather than contradicting them on the next tab —
+  // while the payment itself stays counted, because it happened and the ledger still lists it.
+  const [s] = groupPlanSeeds([
+    don({ id: 'don_1', createdAt: '2026-01-01T00:00:00.000Z', paymentIntentId: 'pi_1', amount: 2000, status: 'succeeded' }),
+    // Part refunded…
+    don({ id: 'don_2', createdAt: '2026-02-01T00:00:00.000Z', paymentIntentId: 'pi_2', amount: 2000, status: 'succeeded', refundedAmount: 500 }),
+    // …and one given back in full.
+    don({ id: 'don_3', createdAt: '2026-03-01T00:00:00.000Z', paymentIntentId: 'pi_3', amount: 2000, status: 'succeeded', refundedAmount: 2000 }),
+  ]);
+  assert.equal(s.collectedMinor, 3500, '2000 + (2000-500) + (2000-2000)');
+  assert.equal(s.payments, 3, 'three payments really were taken');
+  assert.equal(s.lastPaymentAt, '2026-03-01T00:00:00.000Z', 'a refund does not un-happen the payment');
+});
+
+test('groupPlanSeeds: an over-refunded row can never make "collected" go negative', () => {
+  const [s] = groupPlanSeeds([don({ amount: 1000, status: 'succeeded', refundedAmount: 1500 })]);
+  assert.equal(s.collectedMinor, 0);
 });
 
 test('groupPlanSeeds: a plan whose FIRST payment failed still appears, with nothing collected', () => {

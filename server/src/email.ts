@@ -2,7 +2,10 @@
 // Copyright (C) 2026 OpenMasjid-Solutions
 
 /**
- * Renders a branded donation-receipt email — a clean, Stripe-style receipt: the masjid logo,
+ * Renders the branded emails this app sends a donor: a donation RECEIPT and a REFUND notice. Both
+ * share one layout (see `shell`) so a donor who receives both reads the same letter twice.
+ *
+ * The receipt is a clean, Stripe-style receipt: the masjid logo,
  * a short thank-you paragraph (admin-editable), then a details table (amount paid, date/time,
  * payment method + last 4, fund) kept SEPARATE from the paragraph, and a contact line. PURE +
  * unit-tested. The actual send goes through the OpenMasjidOS Fabric (fabric.ts `fabricEmail`).
@@ -92,17 +95,87 @@ function row(label: string, value: string, opts: { bold?: boolean; first?: boole
   return `<tr><td style="padding:11px 0;color:#7a8892;${border}">${escapeHtml(label)}</td><td style="${val}">${escapeHtml(value)}</td></tr>`;
 }
 
+/** The one email layout this app sends: logo, reference, heading, a paragraph, a details table,
+ *  then contact details. Shared by the receipt and the refund notice so a donor who gets both
+ *  reads the same letter twice, and so a change to the design can only be made in one place.
+ *  Every caller passes ALREADY-ESCAPED html for the parts that came from a person. */
+function shell(parts: { accent: string; header: string; refLine: string; heading: string; bodyHtml: string; details: string; contactLine: string; websiteLine: string }): string {
+  return `<!doctype html><html><body style="margin:0;padding:0;background:#f4f6f9">
+  <div style="max-width:540px;margin:0 auto;padding:24px 16px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#16242b">
+    <div style="background:#ffffff;border:1px solid #e6eaed;border-radius:14px">
+      <div style="padding:30px 30px 6px;text-align:center">
+        ${parts.header}
+        ${parts.refLine}
+      </div>
+      <div style="padding:14px 30px 4px;text-align:center">
+        <h1 style="margin:0 0 12px;font-size:21px;line-height:1.25;color:${escapeHtml(parts.accent)}">${escapeHtml(parts.heading)}</h1>
+        <p style="margin:0;font-size:15px;line-height:1.6;color:#42535c">${parts.bodyHtml}</p>
+      </div>
+      <div style="padding:14px 30px 4px">
+        <table role="presentation" width="100%" style="border-collapse:collapse;font-size:14px">${parts.details}</table>
+      </div>
+      <div style="padding:16px 30px 28px;margin-top:8px;border-top:1px solid #eef1f3;text-align:center">
+        ${parts.contactLine}
+        ${parts.websiteLine}
+      </div>
+    </div>
+    <p style="text-align:center;font-size:11px;color:#9aa7af;margin-top:14px">Sent by OpenMasjid Donations · Secured by Stripe</p>
+  </div>
+</body></html>`;
+}
+
+/** The masjid's header block: its logo when we have a loadable one, else its name, else nothing. */
+function headerBlock(logo: string, masjid: string): string {
+  if (logo) return `<img src="${escapeHtml(logo)}" alt="${escapeHtml(masjid)}" style="max-height:60px;max-width:220px;height:auto">`;
+  return masjid ? `<div style="font-size:20px;font-weight:700;color:#16242b">${escapeHtml(masjid)}</div>` : '';
+}
+
+/** The small uppercase reference line under the logo, e.g. "Receipt · 0065A17F". */
+function refBlock(label: string, reference: string): string {
+  if (!reference) return '';
+  return `<div style="margin-top:12px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#9aa7af">${escapeHtml(label)} · ${escapeHtml(reference)}</div>`;
+}
+
+/** "Questions about this donation? Contact …" + an optional website line. */
+function contactBlocks(accent: string, masjid: string, ctx: Pick<ReceiptContext, 'contactEmail' | 'contactPhone' | 'contactWebsite'>): { contactLine: string; websiteLine: string } {
+  const website = safeUrl(ctx.contactWebsite);
+  const inner: string[] = [];
+  if (ctx.contactEmail.trim()) inner.push(`<a href="mailto:${escapeHtml(ctx.contactEmail.trim())}" style="color:${escapeHtml(accent)};text-decoration:none">${escapeHtml(ctx.contactEmail.trim())}</a>`);
+  if (ctx.contactPhone.trim()) inner.push(escapeHtml(ctx.contactPhone.trim()));
+  return {
+    contactLine: inner.length
+      ? `<p style="margin:0;font-size:13px;line-height:1.6;color:#7a8892">Questions about this donation? Contact ${escapeHtml(masjid || 'us')} — ${inner.join(' · ')}.</p>`
+      : `<p style="margin:0;font-size:13px;color:#7a8892">Questions about this donation? Please contact ${escapeHtml(masjid || 'the masjid')}.</p>`,
+    websiteLine: website
+      ? `<p style="margin:6px 0 0;font-size:13px"><a href="${escapeHtml(website)}" style="color:${escapeHtml(accent)};text-decoration:none">${escapeHtml(website.replace(/^https?:\/\//, ''))}</a></p>`
+      : '',
+  };
+}
+
+/** Resolve a hex accent, falling back to the default emerald for anything that isn't one (so an
+ *  unvalidated value can never reach a style attribute). */
+function resolveAccent(accent: string | undefined): string {
+  return /^#[0-9a-fA-F]{3,8}$/.test((accent || '').trim()) ? (accent as string).trim() : ACCENT_DEFAULT;
+}
+
+/** The plain-text tail every email ends with: how to reach the masjid. */
+function contactTextLines(masjid: string, ctx: Pick<ReceiptContext, 'contactEmail' | 'contactPhone' | 'contactWebsite'>): string[] {
+  const out: string[] = [];
+  const bits = [ctx.contactEmail, ctx.contactPhone].filter((s) => s && s.trim());
+  if (bits.length) out.push(`Questions? Contact ${masjid || 'us'} — ${bits.join(' · ')}`);
+  if (ctx.contactWebsite.trim()) out.push(ctx.contactWebsite.trim());
+  return out;
+}
+
 /** Build the subject/text/html of a receipt email. `html` is a light, Stripe-style receipt. */
 export function renderReceipt(tpl: ReceiptTemplate, ctx: ReceiptContext): RenderedEmail {
-  const accent = /^#[0-9a-fA-F]{3,8}$/.test((tpl.accent || '').trim()) ? tpl.accent.trim() : ACCENT_DEFAULT;
+  const accent = resolveAccent(tpl.accent);
   const vars = { name: ctx.name, amount: ctx.amountText, campaign: ctx.campaignTitle, masjid: ctx.masjidName };
   // oneLine BEFORE the length cap, so a 200-char slice can never end mid-escape or leave a CR.
   const subject = (oneLine(fillVars(tpl.subject || 'Your donation receipt', vars)) || 'Your donation receipt').slice(0, 200);
   const heading = fillVars(tpl.heading || 'JazākAllāhu khayran!', vars) || 'JazākAllāhu khayran!';
   const paragraph = fillVars(tpl.body || 'Your donation was received. May Allah accept it from you and reward you abundantly.', vars);
-  const logo = safeUrl(ctx.masjidLogo);
   const masjid = ctx.masjidName.trim();
-  const website = safeUrl(ctx.contactWebsite);
 
   // ── Plain-text part ──
   const lines = [
@@ -116,58 +189,109 @@ export function renderReceipt(tpl: ReceiptTemplate, ctx: ReceiptContext): Render
     ctx.campaignTitle ? `Fund:           ${ctx.campaignTitle}` : '',
     ctx.reference ? `Receipt:        ${ctx.reference}` : '',
     '',
+    ...contactTextLines(masjid, ctx),
   ];
-  const contactBits = [ctx.contactEmail, ctx.contactPhone].filter((s) => s && s.trim());
-  if (contactBits.length) lines.push(`Questions? Contact ${masjid || 'us'} — ${contactBits.join(' · ')}`);
-  if (ctx.contactWebsite.trim()) lines.push(ctx.contactWebsite.trim());
   const text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 
   // ── HTML part (everything escaped) ──
-  const header = logo
-    ? `<img src="${escapeHtml(logo)}" alt="${escapeHtml(masjid)}" style="max-height:60px;max-width:220px;height:auto">`
-    : masjid
-      ? `<div style="font-size:20px;font-weight:700;color:#16242b">${escapeHtml(masjid)}</div>`
-      : '';
-  const refLine = ctx.reference ? `<div style="margin-top:12px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#9aa7af">Receipt · ${escapeHtml(ctx.reference)}</div>` : '';
-  const bodyHtml = escapeHtml(paragraph).replace(/\n/g, '<br>');
   const details = [
     row('Amount paid', ctx.amountText, { bold: true, first: true }),
     row('Date paid', ctx.datePaid),
     row('Payment method', ctx.paymentMethod),
     ctx.campaignTitle ? row('Fund', ctx.campaignTitle) : '',
   ].join('');
+  const html = shell({
+    accent,
+    header: headerBlock(safeUrl(ctx.masjidLogo), masjid),
+    refLine: refBlock('Receipt', ctx.reference),
+    heading,
+    bodyHtml: escapeHtml(paragraph).replace(/\n/g, '<br>'),
+    details,
+    ...contactBlocks(accent, masjid, ctx),
+  });
 
-  // Contact line — a mailto link (accent) when an email is set, plus phone, plus a website link.
-  const contactInner: string[] = [];
-  if (ctx.contactEmail.trim()) contactInner.push(`<a href="mailto:${escapeHtml(ctx.contactEmail.trim())}" style="color:${escapeHtml(accent)};text-decoration:none">${escapeHtml(ctx.contactEmail.trim())}</a>`);
-  if (ctx.contactPhone.trim()) contactInner.push(escapeHtml(ctx.contactPhone.trim()));
-  const contactLine = contactInner.length
-    ? `<p style="margin:0;font-size:13px;line-height:1.6;color:#7a8892">Questions about this donation? Contact ${escapeHtml(masjid || 'us')} — ${contactInner.join(' · ')}.</p>`
-    : `<p style="margin:0;font-size:13px;color:#7a8892">Questions about this donation? Please contact ${escapeHtml(masjid || 'the masjid')}.</p>`;
-  const websiteLine = website ? `<p style="margin:6px 0 0;font-size:13px"><a href="${escapeHtml(website)}" style="color:${escapeHtml(accent)};text-decoration:none">${escapeHtml(website.replace(/^https?:\/\//, ''))}</a></p>` : '';
+  return { subject, text, html };
+}
 
-  const html = `<!doctype html><html><body style="margin:0;padding:0;background:#f4f6f9">
-  <div style="max-width:540px;margin:0 auto;padding:24px 16px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#16242b">
-    <div style="background:#ffffff;border:1px solid #e6eaed;border-radius:14px">
-      <div style="padding:30px 30px 6px;text-align:center">
-        ${header}
-        ${refLine}
-      </div>
-      <div style="padding:14px 30px 4px;text-align:center">
-        <h1 style="margin:0 0 12px;font-size:21px;line-height:1.25;color:${escapeHtml(accent)}">${escapeHtml(heading)}</h1>
-        <p style="margin:0;font-size:15px;line-height:1.6;color:#42535c">${bodyHtml}</p>
-      </div>
-      <div style="padding:14px 30px 4px">
-        <table role="presentation" width="100%" style="border-collapse:collapse;font-size:14px">${details}</table>
-      </div>
-      <div style="padding:16px 30px 28px;margin-top:8px;border-top:1px solid #eef1f3;text-align:center">
-        ${contactLine}
-        ${websiteLine}
-      </div>
-    </div>
-    <p style="text-align:center;font-size:11px;color:#9aa7af;margin-top:14px">Sent by OpenMasjid Donations · Secured by Stripe</p>
-  </div>
-</body></html>`;
+// ── Refund notice ─────────────────────────────────────────────────────────────
+
+/** Everything the donor's refund email needs. Same shape of data as a receipt (and the same
+ *  escaping rules apply to every field), plus the two figures a refund is about: what is coming
+ *  back, and what the original donation was. */
+export interface RefundContext extends Omit<ReceiptContext, 'datePaid'> {
+  /** What is being returned, already formatted, e.g. "£20.00". */
+  refundAmountText: string;
+  /** When the refund was made, formatted for reading. */
+  dateRefunded: string;
+  /** True when the WHOLE donation is coming back — the wording differs, and a masjid being told
+   *  "£20 of your £50 has been returned" when it was all of it would cause a phone call. */
+  full: boolean;
+}
+
+/** The refund notice sent to a donor, when the admin chooses to tell them.
+ *
+ *  Deliberately NOT admin-editable, unlike the receipt. A refund is a factual notice about
+ *  somebody's money — how long it takes to appear, and who to ask — and the wording is the part
+ *  most likely to worry a donor if it were got wrong. The masjid's branding (logo, accent, contact
+ *  details) still carries through, so it reads as their letter.
+ *
+ *  `accent` is the admin's receipt accent; anything that isn't a hex colour falls back to the
+ *  default, so an unvalidated value can never reach the markup. Every value is escaped and the
+ *  subject is flattened to one line — the donor's own name is in it, and the donor is an
+ *  unauthenticated stranger (DONATIONS-023). */
+export function renderRefundNotice(accentRaw: string, ctx: RefundContext): RenderedEmail {
+  const accent = resolveAccent(accentRaw);
+  const masjid = ctx.masjidName.trim();
+  const vars = { name: ctx.name, amount: ctx.refundAmountText, campaign: ctx.campaignTitle, masjid: masjid };
+
+  const subject = (oneLine(fillVars('Your donation to {masjid} has been refunded', vars)) || 'Your donation has been refunded').slice(0, 200);
+  const heading = fillVars(ctx.full ? 'Your donation has been refunded' : 'Part of your donation has been refunded', vars);
+  const paragraph = fillVars(
+    ctx.full
+      ? 'Assalāmu ʿalaykum {name}, your donation of {amount} to {masjid} has been refunded in full. ' +
+          'It should be back on your card within 5–10 days, depending on your bank. ' +
+          'If you weren’t expecting this, please get in touch with us using the details below.'
+      : '{name}, {amount} of your donation to {masjid} has been refunded. ' +
+          'It should be back on your card within 5–10 days, depending on your bank. ' +
+          'If you weren’t expecting this, please get in touch with us using the details below.',
+    vars,
+  );
+
+  // ── Plain-text part ──
+  const lines = [
+    heading,
+    '',
+    paragraph,
+    '',
+    `Refunded:       ${ctx.refundAmountText}`,
+    ctx.full ? '' : `Original gift:  ${ctx.amountText}`,
+    `Date refunded:  ${ctx.dateRefunded}`,
+    `Payment method: ${ctx.paymentMethod}`,
+    ctx.campaignTitle ? `Fund:           ${ctx.campaignTitle}` : '',
+    ctx.reference ? `Reference:      ${ctx.reference}` : '',
+    '',
+    ...contactTextLines(masjid, ctx),
+  ];
+  const text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+
+  // ── HTML part (everything escaped) ──
+  const details = [
+    row('Refunded', ctx.refundAmountText, { bold: true, first: true }),
+    // Only worth a row when it differs from the refund — on a full refund it would just repeat.
+    ctx.full ? '' : row('Original donation', ctx.amountText),
+    row('Date refunded', ctx.dateRefunded),
+    row('Payment method', ctx.paymentMethod),
+    ctx.campaignTitle ? row('Fund', ctx.campaignTitle) : '',
+  ].join('');
+  const html = shell({
+    accent,
+    header: headerBlock(safeUrl(ctx.masjidLogo), masjid),
+    refLine: refBlock('Refund', ctx.reference),
+    heading,
+    bodyHtml: escapeHtml(paragraph).replace(/\n/g, '<br>'),
+    details,
+    ...contactBlocks(accent, masjid, ctx),
+  });
 
   return { subject, text, html };
 }

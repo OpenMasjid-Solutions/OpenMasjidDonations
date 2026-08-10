@@ -184,6 +184,19 @@ export interface Donation {
   /** True for monthly (subscription) donations; subscriptionId is the Stripe sub. */
   recurring: boolean;
   subscriptionId: string;
+  /** How much of this donation has been given back to the donor, in MINOR units. 0 = none,
+   *  `amount` = fully refunded, anything between = a part refund.
+   *
+   *  A refund is recorded as an AMOUNT, not as a status, deliberately. `status` stays the
+   *  PAYMENT's outcome — the money really did arrive, and rewriting that to 'refunded' would
+   *  lose the fact and cannot express a part refund at all. Every money figure the masjid sees
+   *  (totals, the campaign goal bar, a monthly plan's "collected so far") is therefore
+   *  `amount - refundedAmount`, so a refund lowers what was raised without erasing the record.
+   *  Stripe is the source of truth for the running total; see refunds.ts. */
+  refundedAmount: number;
+  /** ISO timestamp of the MOST RECENT refund, '' when none. Not a history: a masjid needs
+   *  "when was money last sent back", and Stripe's dashboard holds the per-refund detail. */
+  refundedAt: string;
   /** Branded-receipt-email lifecycle, DECIDED ONCE at intent (so confirm/outbox stay
    *  consistent with whether Stripe's own receipt was suppressed):
    *  - 'stripe'  — Stripe sends its built-in receipt; we send nothing (no double).
@@ -341,6 +354,8 @@ export class Store {
         card_last4 TEXT NOT NULL DEFAULT '',
         recurring INTEGER NOT NULL DEFAULT 0,
         subscription_id TEXT NOT NULL DEFAULT '',
+        refunded_amount INTEGER NOT NULL DEFAULT 0,
+        refunded_at TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_donations_campaign ON donations(campaign_id);
@@ -426,6 +441,11 @@ export class Store {
     this.ensureColumn('donations', 'subscription_id', "TEXT NOT NULL DEFAULT ''");
     // Legacy rows default to 'stripe' (their receipts were Stripe's built-in ones).
     this.ensureColumn('donations', 'receipt', "TEXT NOT NULL DEFAULT 'stripe'");
+    // Refunds. Legacy rows default to 0 / '' = "nothing was given back", which is true of every
+    // donation taken before refunds existed — and, because every money figure now subtracts this
+    // column, a default of 0 also keeps existing totals exactly as they were.
+    this.ensureColumn('donations', 'refunded_amount', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('donations', 'refunded_at', "TEXT NOT NULL DEFAULT ''");
     // The per-child split of a tuition charge (students/billing v2). Legacy rows default to ''
     // = "no split", which is exactly how they were pushed to Students before this existed.
     this.ensureColumn('student_payments', 'students_split', "TEXT NOT NULL DEFAULT ''");
@@ -962,6 +982,8 @@ export class Store {
       cardLast4: String(r.card_last4 ?? ''),
       recurring: !!r.recurring,
       subscriptionId: String(r.subscription_id ?? ''),
+      refundedAmount: Number(r.refunded_amount ?? 0),
+      refundedAt: String(r.refunded_at ?? ''),
       receipt: (['stripe', 'pending', 'sent', 'skipped'] as const).includes(String(r.receipt) as Donation['receipt'])
         ? (String(r.receipt) as Donation['receipt'])
         : 'stripe',
@@ -970,7 +992,10 @@ export class Store {
   }
 
   createDonation(
-    input: Omit<Donation, 'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4' | 'recurring' | 'subscriptionId' | 'receipt'> & {
+    input: Omit<
+      Donation,
+      'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4' | 'recurring' | 'subscriptionId' | 'receipt' | 'refundedAmount' | 'refundedAt'
+    > & {
       status?: Donation['status'];
       recurring?: boolean;
       subscriptionId?: string;
@@ -997,6 +1022,10 @@ export class Store {
       cardLast4: input.cardLast4 ?? '',
       recurring: input.recurring ?? false,
       subscriptionId: input.subscriptionId ?? '',
+      // A brand-new donation has never been refunded — there is no path that creates one that
+      // has, so this is not an input the caller may set (only setDonationRefund moves it).
+      refundedAmount: 0,
+      refundedAt: '',
       receipt: input.receipt ?? 'stripe',
       createdAt: input.createdAt ?? new Date().toISOString(),
     };
@@ -1011,6 +1040,13 @@ export class Store {
       )
       .run({ ...d, coverFees: d.coverFees ? 1 : 0, giftAid: d.giftAid ? 1 : 0, recurring: d.recurring ? 1 : 0 });
     return d;
+  }
+
+  /** One donation by its own id — the key the admin panel holds for a row it is showing.
+   *  (Everything on the donor side keys off the PaymentIntent instead; this is for the panel.) */
+  getDonation(id: string): Donation | null {
+    const r = this.db.prepare('SELECT * FROM donations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return r ? this.rowToDonation(r) : null;
   }
 
   getDonationByPaymentIntent(pi: string): Donation | null {
@@ -1048,6 +1084,31 @@ export class Store {
         cardBrand: opts.cardBrand || cur.cardBrand,
         cardLast4: opts.cardLast4 || cur.cardLast4,
       });
+    return this.getDonationByPaymentIntent(pi);
+  }
+
+  /** Record how much of a donation has been refunded, as a RUNNING TOTAL in minor units — the
+   *  figure Stripe reports for the charge (`amount_refunded`), not the size of one refund.
+   *
+   *  Three guards, and each of them is load-bearing:
+   *   • MONOTONIC. The value may only ever rise. Two things write here — an admin's refund in the
+   *     panel and a `charge.refunded` webhook — and Stripe delivers webhooks with no ordering
+   *     guarantee, so a retry of the FIRST refund's event can arrive after a second refund. Taking
+   *     it at face value would quietly put money back into the masjid's totals.
+   *   • CLAMPED to the amount charged, so a currency/rounding surprise can never make a donation
+   *     read as more-than-refunded (which would show as negative money raised).
+   *   • The TIMESTAMP only moves when the amount does, so a duplicate event can't restamp a
+   *     week-old refund as today's.
+   *
+   *  Returns the row as it now stands, or null if there is no donation for that PaymentIntent. */
+  setDonationRefund(pi: string, refundedMinor: number, atIso: string): Donation | null {
+    const cur = this.getDonationByPaymentIntent(pi);
+    if (!cur) return null;
+    const next = Math.min(Math.max(0, Math.round(refundedMinor)), cur.amount);
+    if (next <= cur.refundedAmount) return cur; // nothing new — an out-of-order or replayed event
+    this.db
+      .prepare('UPDATE donations SET refunded_amount = ?, refunded_at = ? WHERE payment_intent_id = ?')
+      .run(next, atIso || new Date().toISOString(), pi);
     return this.getDonationByPaymentIntent(pi);
   }
 
@@ -1146,10 +1207,16 @@ export class Store {
     ).map((r) => this.rowToDonation(r));
   }
 
-  /** Total raised (succeeded) for a campaign, in minor units. */
+  /** Total raised (succeeded) for a campaign, in minor units, NET of anything refunded.
+   *
+   *  This is the number behind a campaign's goal/progress bar, which is shown to DONORS. A
+   *  refund that left it alone would keep asking the public to fund money the masjid no longer
+   *  has — so refunds come off here, as they do everywhere else money is counted. */
   raisedForCampaign(campaignId: string): number {
     return (
-      this.db.prepare(`SELECT COALESCE(SUM(amount), 0) AS s FROM donations WHERE campaign_id = ? AND status = 'succeeded'`).get(campaignId) as {
+      this.db
+        .prepare(`SELECT COALESCE(SUM(amount - refunded_amount), 0) AS s FROM donations WHERE campaign_id = ? AND status = 'succeeded'`)
+        .get(campaignId) as {
         s: number;
       }
     ).s;
@@ -1157,20 +1224,32 @@ export class Store {
 
   /** Aggregated donation metrics (all amounts in MINOR units; only succeeded
    *  donations count toward money raised). The route converts to major units, joins
-   *  campaign titles and fills the month window for display. */
+   *  campaign titles and fills the month window for display.
+   *
+   *  Every `raised` figure is NET of refunds (`amount - refunded_amount`), so returning money
+   *  to a donor lowers what the masjid is told it raised. The COUNTS are deliberately gross:
+   *  a refunded donation was still a donation that arrived, and quietly deducting it from the
+   *  count would make the ledger (which still lists the row) disagree with the headline.
+   *  `totalRefunded` is reported separately so the difference is never a mystery. */
   metrics(): {
     totalRaised: number;
     count: number;
+    totalRefunded: number;
+    refundedCount: number;
     byCampaign: { campaignId: string; raised: number; count: number }[];
     monthly: { month: string; raised: number; count: number }[];
   } {
     const totals = this.db
-      .prepare(`SELECT COALESCE(SUM(amount), 0) AS s, COUNT(*) AS n FROM donations WHERE status = 'succeeded'`)
-      .get() as { s: number; n: number };
+      .prepare(
+        `SELECT COALESCE(SUM(amount - refunded_amount), 0) AS s, COUNT(*) AS n,
+                COALESCE(SUM(refunded_amount), 0) AS r, COALESCE(SUM(refunded_amount > 0), 0) AS rn
+         FROM donations WHERE status = 'succeeded'`,
+      )
+      .get() as { s: number; n: number; r: number; rn: number };
     const byCampaign = (
       this.db
         .prepare(
-          `SELECT campaign_id AS campaignId, COALESCE(SUM(amount), 0) AS raised, COUNT(*) AS count
+          `SELECT campaign_id AS campaignId, COALESCE(SUM(amount - refunded_amount), 0) AS raised, COUNT(*) AS count
            FROM donations WHERE status = 'succeeded' GROUP BY campaign_id`,
         )
         .all() as { campaignId: string; raised: number; count: number }[]
@@ -1178,12 +1257,19 @@ export class Store {
     const monthly = (
       this.db
         .prepare(
-          `SELECT strftime('%Y-%m', created_at) AS month, COALESCE(SUM(amount), 0) AS raised, COUNT(*) AS count
+          `SELECT strftime('%Y-%m', created_at) AS month, COALESCE(SUM(amount - refunded_amount), 0) AS raised, COUNT(*) AS count
            FROM donations WHERE status = 'succeeded' GROUP BY month`,
         )
         .all() as { month: string; raised: number; count: number }[]
     ).map((r) => ({ month: String(r.month), raised: Number(r.raised), count: Number(r.count) }));
-    return { totalRaised: Number(totals.s), count: Number(totals.n), byCampaign, monthly };
+    return {
+      totalRaised: Number(totals.s),
+      count: Number(totals.n),
+      totalRefunded: Number(totals.r),
+      refundedCount: Number(totals.rn),
+      byCampaign,
+      monthly,
+    };
   }
 
   // ── Tuition (Students-billing) payments ─────────────────────────────────────

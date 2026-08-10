@@ -122,7 +122,7 @@ Eight tabs behind a login, with a bottom dock like the rest of the family:
 |---|---|
 | **Overview** | Total raised · this month (amount and count) · number of donations · live appeals · average gift · a per-appeal breakdown · a 6-month trend |
 | **Campaigns** | Create, edit, reorder, activate/deactivate and delete appeals, with a **live preview** as you type and a thumbnail in the list. Upload images or link them, set the presets, minimum, maximum, goal, monthly option, fee rule, widget, and which Stripe account this appeal pays into |
-| **Donations** | The full ledger. Every transaction has its own reference — click it for a window with the amount, status, appeal, card, whether fees were covered, the donor and the Stripe payment reference, plus **that donor's other gifts and their lifetime total**. **CSV export** |
+| **Donations** | The full ledger. Every transaction has its own reference — click it for a window with the amount, status, appeal, card, whether fees were covered, the donor and the Stripe payment reference, plus **that donor's other gifts and their lifetime total**. **Refund** a donation from that window — all of it or part of it, with a reason, and optionally an email to the donor telling them it's on its way; refunded rows are marked in the list and come off your totals. **CSV export** |
 | **Monthly** | Every recurring plan: the donor and how to reach them, amount and frequency, which appeal, **what the plan has raised so far**, when it started, the last and next payment, the card and its last four digits, and the status in plain words. **Pause** (nothing is taken while paused, and the missed months are never billed afterwards), **resume**, **stop**, or set an **end date** or **"stop after N more payments"** — it tells you which payment will be the last before you save. Each plan keeps its own **payment history**: every attempt with its date, amount, status, how many tries Stripe made, and why a card was declined, in a sentence rather than a code |
 | **Thank-you** | Write the on-screen thank-you, and design the emailed receipt — subject, heading, body, accent — with a **"send me a test"** |
 | **Large gifts** | The threshold, your wording, and the QR image for the bank-transfer suggestion |
@@ -145,10 +145,10 @@ the app, so it works with no internet.
   Payments, fetched server-to-server and never stored here, or paste keys into the app.
 - **Email without credentials.** Receipts go out through the platform's email provider,
   so this app never sees your mail password or From address.
-- **Notifications and alerts.** A relay for "a donation was received", plus three
+- **Notifications and alerts.** A relay for "a donation was received", plus four
   alerts you can route to email or a webhook: **a payment couldn't be started**, **a
-  tuition payment wasn't recorded**, and a **test**. You choose the channel in
-  OpenMasjidOS; this app never sees the address.
+  tuition payment wasn't recorded**, **a donation was refunded**, and a **test**. You
+  choose the channel in OpenMasjidOS; this app never sees the address.
 - **Public access without port-forwarding**, through the platform's Cloudflare Tunnel
   on a single hostname, or the app's own tunnel when standalone. Share links, QR codes
   and the Stripe webhook URL then use your public domain automatically.
@@ -166,7 +166,10 @@ the app, so it works with no internet.
 - **Nothing is lost to a temporary failure.** Receipts and tuition records that don't
   go through the first time are retried in the background.
 - **An activity record** of things worth checking later: who exported the donor list,
-  who paused or stopped a monthly plan, who changed the Stripe keys, and when.
+  who refunded a donation, who paused or stopped a monthly plan, who changed the Stripe
+  keys, and when.
+- **A refund made in Stripe's own dashboard finds its way here** too, so your totals
+  never go on counting money that has already gone back.
 - **No inbound connection needed.** Payments are confirmed by asking Stripe directly,
   outbound, so one-time giving works on a masjid network with no public access at all.
   Webhooks are an optional extra, never a requirement.

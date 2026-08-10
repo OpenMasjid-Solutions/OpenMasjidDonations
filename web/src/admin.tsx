@@ -10,15 +10,15 @@ import { QRCodeSVG } from 'qrcode.react';
 import {
   Ban, Bell, CalendarClock, CalendarDays, CheckCircle2, CloudOff, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
   KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, Pause, Pencil, Play, Plus, QrCode, ReceiptText, RefreshCw, Repeat, Send,
-  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Upload, Wallet, X,
+  Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Undo2, Upload, Wallet, X,
 } from 'lucide-react';
 import {
   cancelPlan, checkSlug, completeOnboarding, createAccount, createCampaign, deleteAccount, deleteCampaign, getDonations, getEmailReceipt,
   getFabricStripeAccounts, getLargeDonation, getMetrics, getPlan, getPlans, getSession, getSettings, getThankYou, getTunnel, listCampaigns, login, logout, money,
-  pausePlan, resumePlan, saveEmailReceipt, saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
+  pausePlan, refundDonation, resumePlan, saveEmailReceipt, saveFabricStripeAccount, saveLargeDonation, saveMasjid, saveThankYou, saveTunnel,
   schedulePlanEnd, sendTestAlert, sendTestNotification, setupAdmin, testAccount, updateAccount, updateCampaign, uploadImage,
   type AccountInput, type AppInfo, type Campaign, type CampaignInput, type CampaignType, type Donation, type DonationsResult,
-  type EmailReceipt, type EmailReceiptPatch, type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Plan, type PlanDetailResult, type PlanSchedule, type PlansResult, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
+  type EmailReceipt, type EmailReceiptPatch, type FabricStripeAccountRef, type FabricStripeStatus, type LargeDonation, type MasjidProfile, type Metrics, type Plan, type PlanDetailResult, type PlanSchedule, type PlansResult, type RefundReason, type Session, type Settings, type StripeAccount, type ThankYou, type TunnelStatus, type VerifyResult,
 } from './api';
 import { useReadableTheme } from './prefs';
 import { BASE, asset, withBase } from './base';
@@ -342,7 +342,15 @@ function MetricsDashboard() {
   const fmt = (n: number) => money(n, m.currency);
   const hasMoney = m.totalRaised > 0;
   const tiles: { icon: React.ReactNode; label: string; value: string; sub?: string; accent?: boolean }[] = [
-    { icon: <Coins size={17} />, label: 'Total raised', value: fmt(m.totalRaised), accent: true },
+    {
+      icon: <Coins size={17} />,
+      label: 'Total raised',
+      value: fmt(m.totalRaised),
+      // The headline is already net of refunds, so when any money HAS gone back the tile says so
+      // in its own sub-line — a total that quietly dropped is otherwise unexplainable from here.
+      sub: m.totalRefunded > 0 ? `after ${fmt(m.totalRefunded)} refunded` : undefined,
+      accent: true,
+    },
     { icon: <CalendarDays size={17} />, label: 'This month', value: fmt(m.thisMonthRaised), sub: `${m.thisMonthCount} donation${m.thisMonthCount === 1 ? '' : 's'}` },
     { icon: <TrendingUp size={17} />, label: 'Donations', value: String(m.count), sub: `${m.activeCampaigns} live appeal${m.activeCampaigns === 1 ? '' : 's'}` },
     { icon: <Sparkles size={17} />, label: 'Average gift', value: m.count ? fmt(m.average) : '—' },
@@ -956,11 +964,30 @@ function cardLabel(d: { cardBrand: string; cardLast4: string }): string {
 function donorKey(d: Donation): string {
   return (d.donorEmail || '').trim().toLowerCase() || (d.donorName || '').trim().toLowerCase();
 }
+/** What a donation is worth to the masjid after any refund — the figure the totals are built on. */
+function netAmount(d: Donation): number {
+  return Math.max(0, d.amount - d.refundedAmount);
+}
+/** The small grey pill that marks a refunded row, or null. Shown in the list AND in the window's
+ *  header, so a refund is never something you have to open a row to discover. */
+function RefundPill({ d }: { d: Donation }) {
+  if (d.refundState === 'none') return null;
+  return (
+    <span className="don-status don-status--refunded">{d.refundState === 'full' ? 'refunded' : 'part refunded'}</span>
+  );
+}
 
 function DonationsCard() {
   const [data, setData] = useState<DonationsResult | null>(null);
   const [sel, setSel] = useState<Donation | null>(null);
-  useEffect(() => { getDonations().then(setData).catch(() => setData(null)); }, []);
+  const load = async () => {
+    const fresh = await getDonations();
+    setData(fresh);
+    // Keep the open window pointed at the SAME donation's new row, so the totals behind it and the
+    // details in front of it can never disagree after a refund.
+    setSel((s) => (s ? fresh.donations.find((d) => d.id === s.id) ?? s : s));
+  };
+  useEffect(() => { void load().catch(() => setData(null)); }, []);
   return (
     <section className="don-page">
       <div className="card-head">
@@ -970,7 +997,14 @@ function DonationsCard() {
             <h2 className="section-title-inline">Donations</h2>
             {data && data.donations.length > 0 && <a className="btn btn--ghost btn--sm" href={withBase('/api/admin/donations.csv')}><Download size={14} /> Export CSV</a>}
           </div>
-          {data && <p className="muted">{money(data.stats.totalRaised, data.stats.currency)} raised · {data.stats.count} donation{data.stats.count === 1 ? '' : 's'}</p>}
+          {data && (
+            <p className="muted">
+              {money(data.stats.totalRaised, data.stats.currency)} raised · {data.stats.count} donation{data.stats.count === 1 ? '' : 's'}
+              {/* Named only when there is something to name — otherwise every masjid reads about a
+                  thing that has never happened to them. The total above is already net of it. */}
+              {data.stats.totalRefunded > 0 && <> · {money(data.stats.totalRefunded, data.stats.currency)} refunded</>}
+            </p>
+          )}
         </div>
       </div>
       {!data ? <span className="spinner" /> : data.donations.length === 0 ? (
@@ -991,17 +1025,34 @@ function DonationsCard() {
                   <td>{d.campaignTitle}</td>
                   <td>{d.donorEmail ? <span className="don-contact">{d.donorEmail}</span> : <span className="faint">—</span>}</td>
                   <td>{d.donorName ? <button className="don-id" onClick={() => setSel(d)}>{d.donorName}</button> : <span className="faint">—</span>}</td>
-                  <td>{money(d.amount, d.currency)}</td>
+                  {/* What was taken stays the headline figure — it is what the donor's statement
+                      says — with what came back named underneath it, so the row explains its own
+                      contribution to a total that is net of refunds. */}
+                  <td>
+                    {money(d.amount, d.currency)}
+                    {d.refundState !== 'none' && <div className="don-date">−{money(d.refundedAmount, d.currency)} refunded</div>}
+                  </td>
                   <td><span className="don-type">Stripe<span className="faint"> · {d.recurring ? 'Monthly' : 'One-time'} · Web</span></span></td>
                   <td>{cardLabel(d) || <span className="faint">—</span>}</td>
-                  <td><span className={`don-status don-status--${d.status}`}>{d.status}</span></td>
+                  <td>
+                    <span className={`don-status don-status--${d.status}`}>{d.status}</span>
+                    {d.refundState !== 'none' && <div><RefundPill d={d} /></div>}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-      {sel && data && <DonationDetail donation={sel} all={data.donations} onClose={() => setSel(null)} onPick={setSel} />}
+      {sel && data && (
+        <DonationDetail
+          donation={sel}
+          all={data.donations}
+          onClose={() => setSel(null)}
+          onPick={setSel}
+          onRefunded={() => void load().catch(() => { /* the window already shows the new state */ })}
+        />
+      )}
     </section>
   );
 }
@@ -1015,77 +1066,325 @@ function DetailRow({ label, value, mono }: { label: string; value: React.ReactNo
   );
 }
 
-/** Full details for one transaction + every other donation from the same donor. */
-function DonationDetail({ donation, all, onClose, onPick }: {
-  donation: Donation; all: Donation[]; onClose: () => void; onPick: (d: Donation) => void;
+/** Full details for one transaction, the refund controls, and every other donation from the
+ *  same donor. `onRefunded` lets the list behind the window follow along. */
+function DonationDetail({ donation, all, onClose, onPick, onRefunded }: {
+  donation: Donation; all: Donation[]; onClose: () => void; onPick: (d: Donation) => void; onRefunded: () => void;
 }) {
+  // The window's own copy of the row, so a refund updates what's on screen the instant Stripe
+  // confirms it — the list reloads in the background and flows back in through the prop.
+  const [don, setDon] = useState(donation);
+  useEffect(() => setDon(donation), [donation]);
+  const [confirm, setConfirm] = useState<{ amount?: number; reason?: RefundReason; notifyDonor: boolean } | null>(null);
+
   useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', h);
     const html = document.documentElement;
     const prev = html.style.overflow;
     html.style.overflow = 'hidden'; // lock background scroll while the window is open
-    return () => { window.removeEventListener('keydown', h); html.style.overflow = prev; };
-  }, [onClose]);
+    return () => { html.style.overflow = prev; };
+  }, []);
+  useEffect(() => {
+    // Escape backs out of the refund confirmation first, then closes the window — so it can never
+    // dismiss both at once and leave the admin unsure which one they cancelled.
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (confirm) setConfirm(null); else onClose();
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose, confirm]);
 
-  const k = donorKey(donation);
-  const related = k ? all.filter((x) => donorKey(x) === k) : [donation];
-  const others = related.filter((x) => x.id !== donation.id);
+  const k = donorKey(don);
+  const related = k ? all.filter((x) => donorKey(x) === k) : [don];
+  const others = related.filter((x) => x.id !== don.id);
   const succeeded = related.filter((x) => x.status === 'succeeded');
-  const lifetime = succeeded.reduce((s, x) => s + x.amount, 0);
+  // Net, so a donor's lifetime giving doesn't include money that was handed back to them.
+  const lifetime = succeeded.reduce((s, x) => s + netAmount(x), 0);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal glass-raised win" role="dialog" aria-modal="true" aria-label={`Transaction ${donation.ref}`} onClick={(e) => e.stopPropagation()}>
-        <div className="tl-bar">
-          <button className="tl tl--red" onClick={onClose} aria-label="Close" title="Close"><X size={9} strokeWidth={3.5} /></button>
-        </div>
-        <div className="modal-head">
-          <div>
-            <h3 className="modal-title">Transaction {donation.ref}</h3>
-            <p className="muted" style={{ fontSize: '0.85rem' }}>{fmtDateTime(donation.createdAt)}</p>
+    <>
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal glass-raised win" role="dialog" aria-modal="true" aria-label={`Transaction ${don.ref}`} onClick={(e) => e.stopPropagation()}>
+          <div className="tl-bar">
+            <button className="tl tl--red" onClick={onClose} aria-label="Close" title="Close"><X size={9} strokeWidth={3.5} /></button>
+          </div>
+          <div className="modal-head">
+            <div>
+              <h3 className="modal-title">Transaction {don.ref}</h3>
+              <p className="muted" style={{ fontSize: '0.85rem' }}>{fmtDateTime(don.createdAt)}</p>
+            </div>
+            <RefundPill d={don} />
+          </div>
+
+          <div className="detail-grid">
+            <DetailRow label="Amount" value={money(don.amount, don.currency)} />
+            <DetailRow label="Status" value={<span className={`don-status don-status--${don.status}`}>{don.status}</span>} />
+            {don.refundState !== 'none' && (
+              <>
+                <DetailRow label="Refunded" value={`${money(don.refundedAmount, don.currency)}${don.refundedAt ? ` · ${fmtDateTime(don.refundedAt)}` : ''}`} />
+                {/* The figure that reconciles with the totals — worth spelling out on a part
+                    refund, where neither the amount nor the refund is the answer. */}
+                <DetailRow label="Kept by the masjid" value={money(netAmount(don), don.currency)} />
+              </>
+            )}
+            <DetailRow label="Campaign" value={don.campaignTitle} />
+            <DetailRow label="Type" value={`Stripe · ${don.recurring ? 'Monthly' : 'One-time'} · Web`} />
+            <DetailRow label="Card" value={cardLabel(don) || '—'} />
+            <DetailRow label="Covered fees" value={don.coverFees ? 'Yes' : 'No'} />
+            <DetailRow label="Donor" value={don.donorName || '—'} />
+            <DetailRow label="Contact" value={don.donorEmail || '—'} />
+            <DetailRow label="Payment reference" value={don.paymentIntentId || '—'} mono />
+          </div>
+
+          <RefundSection donation={don} onAsk={setConfirm} />
+
+          <div className="detail-section">
+            <h4 className="metric-h">From this donor</h4>
+            {!k ? (
+              <p className="muted">No name or email was given, so we can’t link other donations.</p>
+            ) : (
+              <>
+                <p className="hint">{related.length} donation{related.length === 1 ? '' : 's'} · {money(lifetime, don.currency)} given in total.</p>
+                {others.length > 0 && (
+                  <div className="don-scroll">
+                    <table className="don-table">
+                      <thead><tr><th>ID &amp; Date</th><th>Campaign</th><th>Amount</th><th>Status</th></tr></thead>
+                      <tbody>
+                        {others.map((o) => (
+                          <tr key={o.id}>
+                            <td><button className="don-id" onClick={() => onPick(o)}>{o.ref}</button><div className="don-date">{fmtDateTime(o.createdAt)}</div></td>
+                            <td>{o.campaignTitle}</td>
+                            <td>
+                              {money(o.amount, o.currency)}
+                              {o.refundState !== 'none' && <div className="don-date">−{money(o.refundedAmount, o.currency)} refunded</div>}
+                            </td>
+                            <td>
+                              <span className={`don-status don-status--${o.status}`}>{o.status}</span>
+                              {o.refundState !== 'none' && <div><RefundPill d={o} /></div>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
+      </div>
+      {confirm && (
+        <RefundConfirm
+          donation={don}
+          request={confirm}
+          onClose={() => setConfirm(null)}
+          onRefunded={(fresh) => { setDon(fresh); onRefunded(); }}
+        />
+      )}
+    </>
+  );
+}
 
-        <div className="detail-grid">
-          <DetailRow label="Amount" value={money(donation.amount, donation.currency)} />
-          <DetailRow label="Status" value={<span className={`don-status don-status--${donation.status}`}>{donation.status}</span>} />
-          <DetailRow label="Campaign" value={donation.campaignTitle} />
-          <DetailRow label="Type" value={`Stripe · ${donation.recurring ? 'Monthly' : 'One-time'} · Web`} />
-          <DetailRow label="Card" value={cardLabel(donation) || '—'} />
-          <DetailRow label="Covered fees" value={donation.coverFees ? 'Yes' : 'No'} />
-          <DetailRow label="Donor" value={donation.donorName || '—'} />
-          <DetailRow label="Contact" value={donation.donorEmail || '—'} />
-          <DetailRow label="Payment reference" value={donation.paymentIntentId || '—'} mono />
+/** The refund controls for one donation: what can be given back, how much, why, and whether to
+ *  tell the donor. Collecting the choices here and confirming them in a second window means the
+ *  irreversible click is always a considered one — the same shape as stopping a monthly plan. */
+function RefundSection({ donation: d, onAsk }: {
+  donation: Donation; onAsk: (r: { amount?: number; reason?: RefundReason; notifyDonor: boolean }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [part, setPart] = useState(false);
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState<RefundReason>('requested_by_customer');
+  const [notifyDonor, setNotifyDonor] = useState(true);
+  const [error, setError] = useState('');
+
+  const canEmail = !!d.donorEmail.trim();
+  // Only a payment that actually went through can be given back, and only what's left of it.
+  const refundable = d.status === 'succeeded' ? d.refundable : 0;
+  const typed = Number(amount);
+  const partValid = Number.isFinite(typed) && typed > 0 && typed <= refundable + 1e-9;
+  const going = part ? (partValid ? typed : 0) : refundable;
+
+  const start = () => {
+    setError('');
+    if (part && !partValid) {
+      setError(typed > refundable ? `That’s more than the ${money(refundable, d.currency)} left on this donation.` : 'Please enter an amount to refund.');
+      return;
+    }
+    onAsk({ amount: part ? typed : undefined, reason, notifyDonor: notifyDonor && canEmail });
+  };
+
+  return (
+    <div className="detail-section">
+      <h4 className="metric-h">Refund</h4>
+      {d.status !== 'succeeded' ? (
+        <p className="muted">
+          Nothing was taken for this donation, so there’s nothing to refund.
+          {d.status === 'pending' && ' If the donor’s card did go through, it’ll be picked up automatically and this will change.'}
+        </p>
+      ) : d.refundState === 'full' ? (
+        <p className="muted">
+          All {money(d.refundedAmount, d.currency)} of this donation has been refunded{d.refundedAt ? ` on ${fmtDate(d.refundedAt)}` : ''}.
+          It can take 5–10 days to reach the donor’s bank.
+        </p>
+      ) : !open ? (
+        <div className="row-between">
+          <p className="muted" style={{ margin: 0 }}>
+            {d.refundState === 'partial'
+              ? `${money(d.refundedAmount, d.currency)} has already gone back — ${money(refundable, d.currency)} of this donation is left.`
+              : `Send this donation back to the donor. ${money(refundable, d.currency)} can be refunded.`}
+          </p>
+          <button className="btn btn--ghost btn--sm" type="button" onClick={() => setOpen(true)}><Undo2 size={14} /> Refund…</button>
         </div>
-
-        <div className="detail-section">
-          <h4 className="metric-h">From this donor</h4>
-          {!k ? (
-            <p className="muted">No name or email was given, so we can’t link other donations.</p>
-          ) : (
-            <>
-              <p className="hint">{related.length} donation{related.length === 1 ? '' : 's'} · {money(lifetime, donation.currency)} given in total.</p>
-              {others.length > 0 && (
-                <div className="don-scroll">
-                  <table className="don-table">
-                    <thead><tr><th>ID &amp; Date</th><th>Campaign</th><th>Amount</th><th>Status</th></tr></thead>
-                    <tbody>
-                      {others.map((o) => (
-                        <tr key={o.id}>
-                          <td><button className="don-id" onClick={() => onPick(o)}>{o.ref}</button><div className="don-date">{fmtDateTime(o.createdAt)}</div></td>
-                          <td>{o.campaignTitle}</td>
-                          <td>{money(o.amount, o.currency)}</td>
-                          <td><span className={`don-status don-status--${o.status}`}>{o.status}</span></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </>
+      ) : (
+        <div className="subform glass-inset">
+          {d.recurring && (
+            <p className="hint">
+              This is one payment of a monthly gift. Refunding it doesn’t stop the plan — use the <b>Monthly</b> tab for that.
+            </p>
           )}
+          <label className="check-row">
+            <input type="radio" name={`refund-${d.id}`} checked={!part} onChange={() => { setPart(false); setError(''); }} />
+            <span>Refund all of it — {money(refundable, d.currency)}</span>
+          </label>
+          <label className="check-row">
+            <input type="radio" name={`refund-${d.id}`} checked={part} onChange={() => { setPart(true); setError(''); }} />
+            <span>Refund part of it</span>
+          </label>
+          {part && (
+            <Field id={`refund-amount-${d.id}`} label={`How much to refund (${d.currency})`}>
+              <input
+                id={`refund-amount-${d.id}`}
+                className="input plan-in"
+                type="number"
+                min="0"
+                step="0.01"
+                max={refundable}
+                value={amount}
+                onChange={(e) => { setAmount(e.target.value); setError(''); }}
+                placeholder={String(refundable)}
+                autoFocus
+              />
+            </Field>
+          )}
+          <Field id={`refund-reason-${d.id}`} label="Why (recorded in Stripe)">
+            <select id={`refund-reason-${d.id}`} className="input plan-in" value={reason} onChange={(e) => setReason(e.target.value as RefundReason)}>
+              <option value="requested_by_customer">The donor asked for it back</option>
+              <option value="duplicate">It was a duplicate payment</option>
+              <option value="fraudulent">The payment was fraudulent</option>
+            </select>
+          </Field>
+          <label className="check-row">
+            <input type="checkbox" checked={notifyDonor && canEmail} disabled={!canEmail} onChange={(e) => setNotifyDonor(e.target.checked)} />
+            <span>
+              Email the donor about it
+              {!canEmail && <span className="faint"> — they didn’t leave an email address</span>}
+              {canEmail && <span className="faint"> — {d.donorEmail}</span>}
+            </span>
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          {/* Safe choice first, as everywhere else in this panel: the first Tab must never land on
+              the button that moves money. */}
+          <div className="confirm-actions">
+            <button className="btn btn--ghost" type="button" onClick={() => { setOpen(false); setError(''); }}>Cancel</button>
+            <button className="btn btn--danger" type="button" onClick={start} disabled={part && !partValid}>
+              <Undo2 size={16} /> Refund {money(going, d.currency)}
+            </button>
+          </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** The last word before money leaves. Does the refund itself, so the admin sees the result — the
+ *  amount that went back, whether the donor was told, and whether Stripe is still settling it —
+ *  rather than a window that closes and leaves them wondering.
+ *
+ *  The fresh row is handed back the MOMENT Stripe confirms, not when this window is dismissed.
+ *  Otherwise clicking outside (or pressing Escape) to dismiss the success would throw away the
+ *  update, and the panel behind would go on showing a donation that had already been refunded. */
+function RefundConfirm({ donation: d, request, onClose, onRefunded }: {
+  donation: Donation;
+  request: { amount?: number; reason?: RefundReason; notifyDonor: boolean };
+  onClose: () => void;
+  onRefunded: (fresh: Donation) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  // `full` is captured here rather than recomputed on render: `d` is refreshed by the refund we
+  // just made, so re-deriving it afterwards would read the NEW balance and could flip the wording.
+  const [done, setDone] = useState<{ refunded: number; currency: string; pending: boolean; full: boolean; donorEmailed: boolean; donorEmailReason: string } | null>(null);
+  const going = request.amount ?? d.refundable;
+
+  const go = async () => {
+    setBusy(true); setError('');
+    try {
+      const r = await refundDonation(d.id, request);
+      setDone({
+        refunded: r.refunded,
+        currency: r.currency,
+        pending: r.pending,
+        // The server's own verdict on whether anything is left, not our arithmetic.
+        full: r.donation.refundState === 'full',
+        donorEmailed: r.donorEmailed,
+        donorEmailReason: r.donorEmailReason,
+      });
+      onRefunded(r.donation);
+    } catch (e) { setError(msg(e)); } finally { setBusy(false); }
+  };
+
+  // Why the donor wasn't emailed, in words the admin can act on. 'not-asked' needs no sentence —
+  // they chose not to — so it is the one case that says nothing at all.
+  const emailNote = (reason: string): string => {
+    if (reason === 'not-asked') return '';
+    if (reason === 'no-email') return 'They didn’t leave an email address, so please let them know yourself.';
+    if (reason === 'no-fabric' || reason === 'not_configured') {
+      return 'Email isn’t set up in OpenMasjidOS yet, so we couldn’t write to them — please let them know yourself.';
+    }
+    return 'We couldn’t email them just now — please let them know yourself.';
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="modal glass-raised confirm-modal" role="dialog" aria-modal="true" aria-label="Refund this donation" onClick={(e) => e.stopPropagation()}>
+        <div className="donate-emblem" aria-hidden="true">{done ? <CheckCircle2 size={28} /> : <Undo2 size={28} />}</div>
+        {done ? (
+          <>
+            <h3 className="modal-title">{money(done.refunded, done.currency)} is on its way back</h3>
+            <p className="muted" style={{ marginBlockStart: '0.4rem' }}>
+              {done.pending
+                ? 'Stripe has accepted the refund and is settling it now.'
+                : 'Stripe has sent it back to the donor’s card.'}{' '}
+              It can take 5–10 days to appear, depending on their bank.
+              {done.full ? ' This donation has come off your totals.' : ' Your totals have gone down by that much.'}
+            </p>
+            <p className="hint" style={{ marginBlockStart: '0.5rem' }}>
+              {done.donorEmailed ? 'The donor has been emailed about it.' : emailNote(done.donorEmailReason)}
+            </p>
+            <div className="confirm-actions">
+              <button className="btn btn--primary" type="button" onClick={onClose}>Done</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h3 className="modal-title">Refund {money(going, d.currency)}?</h3>
+            <p className="muted" style={{ marginBlockStart: '0.4rem' }}>
+              {request.amount === undefined || request.amount >= d.refundable - 1e-9
+                ? 'The whole donation'
+                : `${money(going, d.currency)} of ${d.donorName ? `${d.donorName}’s` : 'this'} ${money(d.amount, d.currency)} donation`}
+              {' '}goes back to the card it was paid with, and comes off what your masjid has raised. This can’t be undone.
+            </p>
+            {request.notifyDonor && <p className="hint" style={{ marginBlockStart: '0.5rem' }}>The donor will be emailed about it.</p>}
+            {error && <p className="form-error" style={{ marginBlockStart: '0.5rem' }}>{error}</p>}
+            <div className="confirm-actions">
+              <button className="btn btn--ghost" type="button" onClick={onClose} disabled={busy}>Keep it</button>
+              <button className="btn btn--danger" type="button" onClick={go} disabled={busy}>
+                {busy ? <span className="spinner" /> : <Undo2 size={16} />} Refund {money(going, d.currency)}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1611,7 +1910,10 @@ function PlanStopConfirm({ plan, onClose, onStop }: {
         <h3 className="modal-title">Stop this monthly plan?</h3>
         <p className="muted" style={{ marginBlockStart: '0.4rem' }}>
           {plan.donorName ? `${plan.donorName}’s` : 'This'} gift of {planAmount(plan)} will end and they won’t be charged again.
-          Nothing already given is refunded, and they can start a new monthly gift whenever they like.
+          Nothing already given goes back, and they can start a new monthly gift whenever they like.
+        </p>
+        <p className="hint" style={{ marginBlockStart: '0.5rem' }}>
+          Need to send a past payment back? Open it in <b>Donations</b> and refund it there.
         </p>
         <p className="hint" style={{ marginBlockStart: '0.5rem' }}>
           Want one more payment first? Set “Stop after a set number of further payments” to 1 under <b>When it ends</b>.

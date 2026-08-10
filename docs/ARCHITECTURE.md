@@ -487,3 +487,96 @@ payment or end date, `live: false`, `stripeReachable: false` and a warm inline n
 stack trace, never an empty screen. The manage actions are the only things that genuinely
 can't work offline, and they say so. Nothing secret leaves the server: no keys, no webhook
 secret, no Stripe customer id.
+
+## Refunds: an amount on the donation, with Stripe as the truth (v0.42.0)
+
+An admin can send a donation back from the **Donations** tab — all of it or part of it — with a
+reason, and optionally an email to the donor. `POST /api/admin/donations/:id/refund`.
+
+### A refund is an amount, not a status
+
+`donations.status` stays the *payment's* outcome. A refund is recorded as
+`refunded_amount` (a running total in minor units) plus `refunded_at`. Rewriting the status to
+`'refunded'` was rejected twice over: it would lose the fact that the money really did arrive, and
+it cannot express a part refund at all.
+
+Everything the masjid — or a donor, via a campaign goal bar — is shown as money is therefore
+`amount - refunded_amount`: `raisedForCampaign`, all three `metrics()` figures, the donations-tab
+total, and a monthly plan's "collected so far". The **counts stay gross**: a refunded donation was
+still a donation that arrived, and the ledger still lists its row, so deducting it from the count
+would make the headline disagree with the list underneath it. `metrics()` reports `totalRefunded`
+and `refundedCount` separately, and the Overview tile says "after £X refunded", so a total that
+went down is explained on the same screen.
+
+### How much is left to refund is Stripe's fact, not ours
+
+Our `refunded_amount` is a *cache* of a fact about the Stripe charge, and it can go stale without
+this app being involved at all: a masjid can refund straight from Stripe's dashboard, and a
+LAN-only box may never receive the webhook that would have told it. So the route:
+
+1. reads the charge (`fetchChargeRefundState` → `amount_captured`, `amount_refunded`);
+2. writes back anything Stripe knows that we don't — **this is also the repair path** for a
+   dashboard refund, reached simply by opening the donation;
+3. computes what is left from Stripe's figures and validates the request against that;
+4. refunds, and only then records — `'failed'`/`'canceled'` are reported to the admin as failures
+   rather than quietly booked.
+
+`setDonationRefund` is **monotonic and clamped**: it only ever rises, and never past the amount
+charged. Both properties are load-bearing, because two things write to it (the route and the
+webhook) and Stripe gives no ordering guarantee — a replayed event for the *first* of two refunds
+would otherwise put money back into the totals.
+
+The **idempotency key is derived, not random**: `refund:<pi>:<already refunded>:<amount>`. A
+double-clicked button sends the money back once; a genuine second part refund of the same size has
+a different "already refunded" figure, so it is a different key and goes through.
+
+One residual race is accepted knowingly: two admins refunding *different* part amounts of the same
+donation in the same second read the same "already refunded" figure, so both are accepted at Stripe
+(correctly — the two refunds are genuinely different) but the second store write reports only its
+own share. Stripe is still right, and both repair paths above — the next open of that donation, and
+`charge.refunded` — correct our copy. Closing it properly would mean a second charge read on every
+refund, which is not worth paying for a two-admin, same-second, different-amount collision.
+
+### Three-decimal currencies
+
+KWD/BHD/JOD/OMR/TND are quoted in thousandths and Stripe requires a multiple of ten, so a *typed*
+part refund is snapped to the nearest 10 and then re-checked against the balance (snapping up must
+never overshoot). A *full* refund needs no snapping — it is exactly what was charged, which already
+satisfied the rule. This is the same trap as DONATIONS-001 on the charge side; `refunds.test.ts`
+locks it.
+
+### Who gets told
+
+- **The donor**, only if the admin ticks the box and they left an address:
+  `renderRefundNotice` → Fabric email. Deliberately **not** admin-editable (it is a factual notice
+  about somebody's money, and it is the wording most likely to worry them if got wrong) but it
+  carries the masjid's logo, accent and contact details. One attempt, no outbox — a refund notice
+  arriving silently three days late is worse than none — and the panel says plainly whether it went.
+- **The masjid**, via the declared `donation-refunded` **alert**, not `notify()`. An alert is the
+  only channel that can reach the admin's own email (the platform owns the address) and
+  OpenMasjidOS → Settings → Alerts lets them route it to email, webhook, both or off; `notify()`
+  would post to the same webhook a second time with no email and no off switch. It fires even
+  though an admin is standing at the screen, on purpose: a masjid's panel is shared, and "money
+  left the account, and who sent it back" is exactly what a treasurer should hear without having
+  been the one who pressed it.
+- **The audit log** gets `donation.refund` with the actor and the donation id — and no amount, per
+  the rule the `audit_log` DDL sets out; the row it names carries the figures.
+
+### The webhook half
+
+`charge.refunded` is handled in the existing optional per-account webhook, which is how a refund
+made in the masjid's own Stripe dashboard reaches the ledger. `amount_refunded` is the charge's
+running total, which is exactly what the store wants, and the alert fires **only when the figure
+actually moved** — that is what stops a panel refund being announced twice. The donor is
+deliberately *not* emailed from this path: Stripe sends its own notification for a dashboard
+refund, and a second letter from us would confuse them.
+
+A failed refund arriving later as `charge.refund.updated` is **not** handled: card refunds
+effectively do not fail after acceptance, and un-recording money is the one direction the monotonic
+guard forbids. If it ever matters it needs its own deliberate change, not a widened guard.
+
+### Tuition
+
+`/api/admin/donations/:id/refund` refuses a `tuition` campaign outright. A tuition payment
+lives in `student_payments` and never in `donations` (§13 route isolation), so no such row should
+exist — but refunding one from this side would leave the school's ledger claiming it was paid.
