@@ -23,7 +23,7 @@ services:
     #
     # The digest is added in a follow-up commit, once CI has actually published the image
     # and there is a real digest to pin — naming one before it exists would be a guess.
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.42.0
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.42.0@sha256:76a075273104b22f0c2c95601279c514554a268390efed5ecbd6f53ba6d04e0c
     restart: unless-stopped
     environment:
       PORT: "8080"
