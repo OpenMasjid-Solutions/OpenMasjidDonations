@@ -455,12 +455,12 @@ function FabricAccountPicker({ chosenId, onSaved }: { chosenId: string; onSaved:
   const pick = async (id: string) => { setSaving(true); try { await saveFabricStripeAccount(id); onSaved(); } catch { /* keep current */ } finally { setSaving(false); } };
   return (
     <div className="field" style={{ marginTop: '0.6rem' }}>
-      <label className="label" htmlFor="fab-acct">Which account to use</label>
+      <label className="label" htmlFor="fab-acct">Default account for this site</label>
       <select id="fab-acct" className="input" value={chosenId} disabled={saving} onChange={(e) => pick(e.target.value)}>
-        {accounts.length > 1 && <option value="">First / only account</option>}
+        {accounts.length > 1 && <option value="">First account in OpenMasjidOS</option>}
         {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
       </select>
-      <span className="hint">Accounts come from OpenMasjidOS → Settings → Payments. Switching takes effect right away.</span>
+      <span className="hint">Appeals use this account unless you choose a different one on the appeal itself. Accounts come from OpenMasjidOS → Settings → Payments; switching takes effect right away.</span>
     </div>
   );
 }
@@ -698,19 +698,37 @@ function CampaignsCard({ accounts, fabric, currency, masjidName, masjidLogo, pub
                 <div className="row" style={{ gap: '0.4rem', flexWrap: 'wrap' }}>
                   <span className="list-row__title">{c.title}</span>
                   {c.active ? <span className="status-pill status-pill--ok">Live</span> : <span className="status-pill">Hidden</span>}
+                  {/* An appeal that can't take a card is a 100% outage on that page, and it would
+                      otherwise be invisible from here — the donor just meets a dead button. */}
+                  {c.paymentAccountStatus !== 'ok' && <span className="status-pill status-pill--warn">Not taking donations</span>}
+                  {c.paymentAccountStatus === 'ok' && c.paymentAccountMode === 'test' && <span className="status-pill">TEST</span>}
                 </div>
                 <CampaignLink url={c.url} base={shareBase} />
                 <p className="list-row__sub">{money(c.raised, c.currency)} raised{c.goalAmount ? ` of ${money(c.goalAmount, c.currency)}` : ''}</p>
+                {/* Named only when it ISN'T the site default, so a masjid with one account never
+                    reads about accounts at all. */}
+                {c.paymentAccountSource !== 'default' && c.paymentAccountLabel && (
+                  <p className="list-row__sub faint">Pays into {c.paymentAccountLabel}</p>
+                )}
+                {c.paymentAccountStatus !== 'ok' && (
+                  <p className="list-row__sub form-error" style={{ marginBlockEnd: 0 }}>
+                    {c.paymentAccountStatus === 'unreachable'
+                      ? 'We couldn’t reach OpenMasjidOS to check the account this appeal pays into. Nothing has been sent anywhere else.'
+                      : c.paymentAccountStatus === 'not-configured'
+                        ? 'The account this appeal pays into isn’t finished being set up. Open it to choose another.'
+                        : 'The account this appeal pays into isn’t available any more. Open it to choose another.'}
+                  </p>
+                )}
               </div>
               <button className="icon-btn" title="Edit" onClick={() => setEditId(editId === c.id ? '' : c.id)}><Pencil size={15} /></button>
             </div>
-            {editId === c.id && <CampaignForm campaign={c} accounts={accounts} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} shareBase={shareBase} onDone={() => { setEditId(''); reload(); }} onCancel={() => setEditId('')} />}
+            {editId === c.id && <CampaignForm campaign={c} accounts={accounts} fabric={fabric} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} shareBase={shareBase} onDone={() => { setEditId(''); reload(); }} onCancel={() => setEditId('')} />}
           </div>
         ))}
         {campaigns && campaigns.length === 0 && !creating && <p className="muted" style={{ padding: '0.5rem 0' }}>No campaigns yet.</p>}
       </div>
       {creating ? (
-        <CampaignForm accounts={accounts} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} shareBase={shareBase} onDone={() => { setCreating(false); reload(); }} onCancel={() => setCreating(false)} />
+        <CampaignForm accounts={accounts} fabric={fabric} currency={currency} masjidName={masjidName} masjidLogo={masjidLogo} shareBase={shareBase} onDone={() => { setCreating(false); reload(); }} onCancel={() => setCreating(false)} />
       ) : (
         <button className="btn btn--primary btn--sm" disabled={noAccount} onClick={() => setCreating(true)}><Plus size={15} /> New campaign</button>
       )}
@@ -747,8 +765,77 @@ function CampaignLink({ url, base }: { url: string; base: string }) {
   );
 }
 
-function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, shareBase, onDone, onCancel }: {
-  campaign?: Campaign; accounts: StripeAccount[]; currency: string; masjidName: string; masjidLogo: string; shareBase: string; onDone: () => void; onCancel?: () => void;
+/** "Where this appeal's money goes" — the per-appeal Stripe account.
+ *
+ *  The default option comes FIRST and is worded so a masjid with a single account can ignore this
+ *  entirely. Vaulted accounts and on-device accounts are grouped, because "shared with your other
+ *  apps and backed up with your dashboard" and "keys live on this box only" are genuinely different
+ *  promises about somebody's money.
+ *
+ *  A stored value we can no longer resolve is pinned at the top as a selected option rather than
+ *  snapping back to the default — silently reverting it would re-route the money on the next save,
+ *  which is exactly the accident this whole feature exists to prevent.
+ */
+function PaymentAccountField({ value, onChange, accounts, vault, fabric, status, resolvedLabel }: {
+  value: string;
+  onChange: (v: string) => void;
+  accounts: StripeAccount[];
+  vault: FabricStripeAccountRef[];
+  fabric?: FabricStripeStatus;
+  status?: Campaign['paymentAccountStatus'];
+  resolvedLabel?: string;
+}) {
+  const local = accounts.map((a) => ({ value: `local:${a.id}`, label: `${a.label}${a.configured ? '' : ' · not finished setting up'}${a.mode === 'test' ? ' · TEST' : ''}` }));
+  const vaulted = vault.map((a) => ({ value: `fabric:${a.id}`, label: a.label }));
+  const known = new Set([...local, ...vaulted].map((o) => o.value));
+  // A choice we can't place any more (the account was deleted in the dashboard, say).
+  const orphan = value && !known.has(value) ? value : '';
+  const siteDefault = fabric?.available && fabric.label ? `Same account as the rest of the site — ${fabric.label}` : 'Same account as the rest of the site';
+  const nothingAnywhere = local.length === 0 && vaulted.length === 0;
+
+  return (
+    <Field id="cacct" label="Where this appeal’s money goes">
+      <select id="cacct" className="input" value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{siteDefault}</option>
+        {orphan && <option value={orphan}>No longer available — “{orphan.replace(/^(fabric|local):/, '')}”</option>}
+        {vaulted.length > 0 && (
+          <optgroup label="In OpenMasjidOS">
+            {vaulted.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </optgroup>
+        )}
+        {local.length > 0 && (
+          <optgroup label="On this device">
+            {local.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </optgroup>
+        )}
+      </select>
+      {/* Why this appeal currently turns donors away. The middle clause is the point: it answers the
+          question an admin actually has, which is "did it just send the money somewhere else?" */}
+      {status && status !== 'ok' && (
+        <p className="form-error" role="alert" style={{ marginBlockEnd: 0 }}>
+          {status === 'unreachable'
+            ? 'We couldn’t reach OpenMasjidOS to check this account just now, so this page isn’t taking donations for the moment. Nothing has been sent anywhere else.'
+            : status === 'not-configured'
+              ? 'This account isn’t finished being set up, so donors can’t give on this page — we won’t quietly send the money to a different account instead. Choose another account, or finish setting this one up.'
+              : 'The account this appeal pays into isn’t available any more, so donors can’t give on this page — we won’t quietly send the money to a different account instead. Please choose another.'}
+        </p>
+      )}
+      {nothingAnywhere ? (
+        <p className="hint">Add a Stripe account first — on the <b>Payments</b> tab, or in OpenMasjidOS → Settings → Payments.</p>
+      ) : (
+        <p className="hint">
+          Leave this alone unless this appeal should settle somewhere else — a separate Zakat account, say.
+          Accounts <b>in OpenMasjidOS</b> are set up once in your dashboard and shared with your other apps;
+          an account <b>on this device</b> keeps its keys here only.
+          {resolvedLabel && value ? <> Currently paying into <b>{resolvedLabel}</b>.</> : null}
+        </p>
+      )}
+    </Field>
+  );
+}
+
+function CampaignForm({ campaign, accounts, fabric, currency, masjidName, masjidLogo, shareBase, onDone, onCancel }: {
+  campaign?: Campaign; accounts: StripeAccount[]; fabric?: FabricStripeStatus; currency: string; masjidName: string; masjidLogo: string; shareBase: string; onDone: () => void; onCancel?: () => void;
 }) {
   const editing = !!campaign;
   const [title, setTitle] = useState(campaign?.title ?? '');
@@ -762,7 +849,21 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
   const [presets, setPresets] = useState((campaign?.presetAmounts ?? [10, 25, 50, 100]).join(', '));
   const [allowCustom, setAllowCustom] = useState(campaign?.allowCustom ?? true);
   const [minAmount, setMinAmount] = useState(String(campaign?.minAmount ?? 1));
-  const [stripeAccountId, setStripeAccountId] = useState(campaign?.stripeAccountId ?? accounts[0]?.id ?? '');
+  // LEGACY. No longer editable — "Where this appeal's money goes" below replaces it — but still
+  // posted, because on CREATE the server uses it to record the campaign's original account binding,
+  // which is the fallback for an appeal that never picks one explicitly. Read-only on purpose: the
+  // server now ignores an empty value on edit, so this can never blank a real id.
+  const [stripeAccountId] = useState(campaign?.stripeAccountId ?? accounts[0]?.id ?? '');
+  // Where this appeal's money goes. '' = the same account as the rest of the site, which is what
+  // every existing appeal has and what a new one starts as — a masjid with one account never has to
+  // think about this field at all.
+  const [paymentAccount, setPaymentAccount] = useState(campaign?.paymentAccount ?? '');
+  // Vaulted accounts, fetched on demand so the picker can offer them by name. Only when embedded.
+  const [vault, setVault] = useState<FabricStripeAccountRef[]>([]);
+  useEffect(() => {
+    if (!fabric?.available) return;
+    getFabricStripeAccounts().then((r) => setVault(r.accounts)).catch(() => setVault([]));
+  }, [fabric?.available]);
   const [coverFees, setCoverFees] = useState(campaign?.coverFees ?? false);
   const [forceCoverFees, setForceCoverFees] = useState(campaign?.forceCoverFees ?? false);
   // Keep the local fee state honest with the server's type→fee rule as the admin switches
@@ -810,6 +911,7 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
       allowCustom,
       minAmount: Number(minAmount) || 0,
       stripeAccountId,
+      paymentAccount,
       // Donation offers coverFees; Zakat/Tuition offer it only when the fee is enforced.
       // The server re-derives this authoritatively (deriveFees) — this just keeps them in sync.
       coverFees: type === 'donation' ? coverFees : forceCoverFees,
@@ -881,24 +983,22 @@ function CampaignForm({ campaign, accounts, currency, masjidName, masjidLogo, sh
           </div>
         </>
       )}
-      {accounts.length > 0 ? (
-        <Field id="cacct" label="Stripe account (where money goes)">
-          <select id="cacct" className="input" value={stripeAccountId} onChange={(e) => setStripeAccountId(e.target.value)}>
-            {accounts.map((a) => <option key={a.id} value={a.id}>{a.label}{a.configured ? '' : ' (needs keys)'}</option>)}
-          </select>
-        </Field>
-      ) : (
-        // No local account → this is an embedded install; money goes to the OpenMasjidOS
-        // Fabric account (the server resolves it at pay time regardless of this field).
-        <p className="hint">Payments go to your OpenMasjidOS Stripe account (Payments tab).</p>
-      )}
+      <PaymentAccountField
+        value={paymentAccount}
+        onChange={setPaymentAccount}
+        accounts={accounts}
+        vault={vault}
+        fabric={fabric}
+        status={campaign?.paymentAccountStatus}
+        resolvedLabel={campaign?.paymentAccountLabel ?? ''}
+      />
       {type === 'tuition' && (
         <div className="glass-inset" style={{ padding: '0.7rem 0.85rem', display: 'grid', gap: '0.35rem' }}>
           <p className="hint" style={{ marginBlock: 0 }}>
             <GraduationCap size={13} /> This is a <b>tuition</b> page powered by <b>OpenMasjid Students</b>. Parents enter their child’s <b>Student ID</b> (printed on the statement), confirm the child’s name, then see the balance and open months and pay by card — the payment is recorded straight into Students.
           </p>
           <p className="hint" style={{ marginBlock: 0 }}>
-            Choose the <b>same Stripe account OpenMasjid Students uses</b>, so tuition lands in the school’s account and reconciles there. Nothing else on this page (amounts, goals, fees) applies — Students owns all of that.
+            Set <b>Where this appeal’s money goes</b> to the <b>same account OpenMasjid Students uses</b>, so tuition lands in the school’s account and reconciles there. Nothing else on this page (amounts, goals, fees) applies — Students owns all of that.
           </p>
         </div>
       )}

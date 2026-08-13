@@ -150,6 +150,12 @@ export interface ThankYou {
 /** Required campaign type — drives the card-fee rule (see forceCoverFees). */
 export type CampaignType = 'donation' | 'zakat' | 'tuition';
 
+/** Where an appeal's money goes. 'default' = the same account as the rest of the site;
+ *  'openmasjidos' = an account vaulted in the dashboard; 'device' = keys held on this box. */
+export type PaymentAccountSource = 'default' | 'openmasjidos' | 'device';
+/** '' = fine. Anything else means this appeal is currently refusing donations. */
+export type PaymentAccountStatus = 'ok' | 'no-account' | 'not-configured' | 'unreachable';
+
 export interface Campaign {
   id: string;
   slug: string;
@@ -164,7 +170,15 @@ export interface Campaign {
   allowCustom: boolean;
   minAmount: number;
   maxAmount: number;
+  /** LEGACY — the account bound at creation. Kept for older clients; not what the server reads. */
   stripeAccountId: string;
+  /** '' = follow the site default, else 'fabric:<vault-id>' / 'local:<account-id>'. */
+  paymentAccount: string;
+  paymentAccountSource: PaymentAccountSource;
+  /** The account's own name, or '' when it couldn't be resolved (never invented). */
+  paymentAccountLabel: string;
+  paymentAccountMode: StripeMode;
+  paymentAccountStatus: PaymentAccountStatus;
   coverFees: boolean;
   /** Fee is mandatory (Zakat, or a Tuition the admin set to require it). */
   forceCoverFees: boolean;
@@ -182,7 +196,13 @@ export interface Campaign {
   currency: string;
   url: string;
 }
-export type CampaignInput = Partial<Omit<Campaign, 'id' | 'token' | 'createdAt' | 'raised' | 'currency' | 'url' | 'sortOrder'>>;
+export type CampaignInput = Partial<
+  Omit<
+    Campaign,
+    'id' | 'token' | 'createdAt' | 'raised' | 'currency' | 'url' | 'sortOrder'
+    | 'paymentAccountSource' | 'paymentAccountLabel' | 'paymentAccountMode' | 'paymentAccountStatus'
+  >
+>;
 
 export interface Donation {
   id: string;
@@ -499,6 +519,12 @@ export interface PublicCampaign {
   students?: { available: boolean; schoolName: string; tagline: string; allowAdvance: boolean; minAmount: number };
   publishableKey: string;
   ready: boolean;
+  /** Why the page can't take a card, when it can't. The donor is shown one friendly sentence built
+   *  from this — never the word "Stripe", never "account". '' when all is well. */
+  readyReason?: '' | 'no-account' | 'not-configured' | 'unreachable';
+  /** This appeal is on a TEST-mode account: show a clear badge, because a page that looks real and
+   *  takes no money is the worst of both (CLAUDE.md §6). */
+  testMode?: boolean;
 }
 export interface IntentResponse {
   clientSecret: string;

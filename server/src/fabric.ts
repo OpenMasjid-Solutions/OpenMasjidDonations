@@ -340,19 +340,36 @@ export interface FabricStripeAccount {
   webhookSecret: string;
 }
 
-interface StripeCache {
-  at: number;
-  account: string;
-  value: FabricStripeAccount | null;
-}
-let stripeCache: StripeCache | null = null;
+// Both caches are keyed PER ACCOUNT NAME ('' = the platform's own default/first account).
+//
+// They used to be single slots holding one account each, with the account name stored alongside so
+// a lookup for a different account counted as a miss. That was correct but thrashing: once
+// campaigns may each name their own vaulted account (v0.42.0), alternating donations on two
+// campaigns would evict each other's keys every time and make a platform round trip per donation —
+// and, worse, would keep evicting the LAST-GOOD copy that exists precisely so a platform blip
+// cannot stop donations. Per-account entries fix both; nothing else about the semantics changes.
+const stripeCache = new Map<string, { at: number; value: FabricStripeAccount | null }>();
 // The last account we successfully fetched, kept so a transient platform blip doesn't
 // break live donations (we'd rather serve slightly-stale vault keys than fail). `at` is
 // when THIS good copy was fetched, so the freshness window below is measured against the
 // last success — not against the last attempt (which may have been a 404 or a miss).
-let stripeLastGood: { at: number; account: string; value: FabricStripeAccount } | null = null;
+const stripeLastGood = new Map<string, { at: number; value: FabricStripeAccount }>();
 const STRIPE_CACHE_MS = 60_000;
 const STRIPE_LASTGOOD_MS = 10 * 60_000;
+/** A ceiling on both maps. The keys are admin-chosen account names, so this is a belt-and-braces
+ *  bound rather than a defence — but an unbounded map fed from stored config is a leak waiting for
+ *  a future caller, and a masjid will never have more accounts than this. */
+const STRIPE_CACHE_MAX = 32;
+
+/** Drop the oldest entries when a cache outgrows its ceiling. */
+function trimStripeCaches(): void {
+  for (const m of [stripeCache, stripeLastGood] as Map<string, { at: number }>[]) {
+    if (m.size <= STRIPE_CACHE_MAX) continue;
+    for (const [k] of [...m.entries()].sort((a, b) => a[1].at - b[1].at).slice(0, m.size - STRIPE_CACHE_MAX)) {
+      m.delete(k);
+    }
+  }
+}
 
 function parseFabricStripe(j: unknown): FabricStripeAccount | null {
   if (!j || typeof j !== 'object') return null;
@@ -376,12 +393,24 @@ function parseFabricStripe(j: unknown): FabricStripeAccount | null {
  * to local keys. Caches the result in memory (~60s); on a transient error serves the last
  * good copy (~10min) so a blip doesn't stop donations. NEVER throws; NEVER persists.
  */
+/** The outcome of a vault lookup. `authoritative` false means the platform told us NOTHING
+ *  (throttled, broken, unreachable) — as distinct from telling us there is no such account. Callers
+ *  that would ACT on "no account" must check it: the reboot watcher must not restart a box on a
+ *  fingerprint taken during an outage. */
+export interface FabricStripeResult {
+  value: FabricStripeAccount | null;
+  authoritative: boolean;
+}
+
 export async function fetchFabricStripe(accountName: string, force = false): Promise<FabricStripeAccount | null> {
-  if (!config.omosBaseUrl || !config.omosAppSecret) return null;
+  return (await fetchFabricStripeDetailed(accountName, force)).value;
+}
+
+export async function fetchFabricStripeDetailed(accountName: string, force = false): Promise<FabricStripeResult> {
+  if (!config.omosBaseUrl || !config.omosAppSecret) return { value: null, authoritative: true };
   const now = Date.now();
-  if (!force && stripeCache && stripeCache.account === accountName && now - stripeCache.at < STRIPE_CACHE_MS) {
-    return stripeCache.value;
-  }
+  const cached = stripeCache.get(accountName);
+  if (!force && cached && now - cached.at < STRIPE_CACHE_MS) return { value: cached.value, authoritative: true };
   warnIfCleartextSecret();
   try {
     const ctrl = new AbortController();
@@ -394,38 +423,69 @@ export async function fetchFabricStripe(accountName: string, force = false): Pro
     });
     clearTimeout(t);
     if (!res.ok) {
-      // Reached the platform and it has nothing for us (e.g. 404 unknown account, or this
-      // app lacks the stripe capability) — respect that: no Fabric account, use local.
-      stripeCache = { at: now, account: accountName, value: null };
-      return null;
+      // NOT all failures mean the same thing, and conflating them was safe only while a missing
+      // Fabric account silently fell back to a local one. Now that a campaign can PIN an account and
+      // an unresolvable pin REFUSES the donation, the difference is the difference between a correct
+      // refusal and a self-inflicted outage:
+      //
+      //  • 404 / 403 — the platform has answered authoritatively: no such account, or we may not have
+      //    it. Cache that. (404 is also how a vaulted account the admin has since deleted comes back
+      //    as "nothing" rather than as somebody else's keys — the platform does not substitute its
+      //    default for an unknown id.)
+      //  • 429 / 5xx — the platform is throttling or broken and has told us NOTHING about the
+      //    account. Caching a null here would turn one rate-limited request into a 60-second
+      //    donation outage for that appeal, and the Fabric budget is shared with every other app on
+      //    the box. So don't write the cache, and serve the last good copy if we have a fresh one —
+      //    exactly as for a transport failure.
+      const authoritative = res.status === 404 || res.status === 403;
+      if (authoritative) {
+        stripeCache.set(accountName, { at: now, value: null });
+        trimStripeCaches();
+        return { value: null, authoritative: true };
+      }
+      log.warn(`Fabric stripe fetch got HTTP ${res.status} — treating as "no information" and keeping any cached keys.`);
+      const held = stripeLastGood.get(accountName);
+      return { value: held && now - held.at < STRIPE_LASTGOOD_MS ? held.value : null, authoritative: false };
     }
     const value = parseFabricStripe(await res.json().catch(() => null));
-    stripeCache = { at: now, account: accountName, value };
-    if (value) stripeLastGood = { at: now, account: accountName, value };
-    return value;
+    stripeCache.set(accountName, { at: now, value });
+    if (value) stripeLastGood.set(accountName, { at: now, value });
+    trimStripeCaches();
+    return { value, authoritative: true };
   } catch (err) {
     log.debug(`Fabric stripe fetch failed: ${err instanceof Error ? err.message : String(err)}`);
-    // Transient unreachable: keep donations working with the last good copy if it's for
-    // this same account and was fetched within the freshness window.
-    if (stripeLastGood && stripeLastGood.account === accountName && now - stripeLastGood.at < STRIPE_LASTGOOD_MS) {
-      return stripeLastGood.value;
-    }
-    return null;
+    // Transient unreachable: keep donations working with the last good copy OF THIS ACCOUNT (never
+    // another one's) if it was fetched within the freshness window.
+    const good = stripeLastGood.get(accountName);
+    return { value: good && now - good.at < STRIPE_LASTGOOD_MS ? good.value : null, authoritative: false };
   }
 }
 
-/** The last fetched Fabric Stripe account WITHOUT triggering a network call — for cheap,
- *  frequently-hit sync paths (e.g. the public landing hint). May be stale or null. */
-export function cachedFabricStripe(): FabricStripeAccount | null {
-  return stripeCache?.value ?? stripeLastGood?.value ?? null;
+/** A cached Fabric Stripe account WITHOUT triggering a network call — for cheap, frequently-hit
+ *  sync paths (e.g. the public landing hint). May be stale or null.
+ *
+ *  With `accountName`, that account specifically. Without, ANY account we happen to hold, which is
+ *  what the landing hint wants: it only asks "can this masjid take a card at all?", and one usable
+ *  vaulted account is a truthful yes however many campaigns point elsewhere. */
+export function cachedFabricStripe(accountName?: string): FabricStripeAccount | null {
+  if (accountName !== undefined) {
+    return stripeCache.get(accountName)?.value ?? stripeLastGood.get(accountName)?.value ?? null;
+  }
+  for (const m of [stripeCache, stripeLastGood]) {
+    for (const e of m.values()) if (e.value) return e.value;
+  }
+  return null;
 }
 
 /** Drop the in-memory Stripe-keys cache so the next fetch re-reads the OS vault. Called
  *  when the admin changes the chosen account in-app, so a freshly-connected/rotated
- *  account takes effect immediately — no container restart needed. */
+ *  account takes effect immediately — no container restart needed.
+ *
+ *  Clears EVERY account, not just the one that changed: the admin may have re-pointed a campaign,
+ *  and a stale copy of any account is exactly what this exists to prevent. */
 export function clearFabricStripeCache(): void {
-  stripeCache = null;
-  stripeLastGood = null;
+  stripeCache.clear();
+  stripeLastGood.clear();
 }
 
 /** A non-secret reference to a vaulted Stripe account, for the in-app account picker. */
@@ -560,11 +620,19 @@ export function cachedFabricSite(): FabricSite {
  * both, so it sees changes promptly rather than through the normal cache.
  */
 export async function fabricConfigSignature(accountName: string): Promise<{ sig: string; reachable: boolean }> {
-  const [stripe, site, reachable] = await Promise.all([
-    fetchFabricStripe(accountName, true),
+  const [detailed, site, up] = await Promise.all([
+    fetchFabricStripeDetailed(accountName, true),
     fetchFabricSite(true),
     platformReachable(),
   ]);
+  const stripe = detailed.value;
+  // "Reachable" has to mean "we got real answers", not merely "something responded". The
+  // reachability probe hits /api/public/appearance, which is NOT behind the Fabric rate limiter — so
+  // while the Fabric routes are throttling, the probe says "up" while the Stripe lookup says
+  // "nothing". Believing that pair would blank s_pk/s_hasSecret, differ from the baseline, and
+  // restart a box in the middle of taking live donations — over and over, for as long as the
+  // throttling lasted. A non-authoritative lookup is no information, so the watcher must skip.
+  const reachable = up && detailed.authoritative;
   const sig = JSON.stringify({
     s_id: stripe?.id ?? '',
     s_pk: stripe?.publishableKey ?? '',

@@ -17,10 +17,10 @@ import fastifyMultipart from '@fastify/multipart';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify, rid, RESERVED_SLUGS } from './store';
+import { Store, slugify, rid, RESERVED_SLUGS, parsePaymentAccount } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
-import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
+import { notify, probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
   REFUND_REASONS,
@@ -418,14 +418,18 @@ async function main(): Promise<void> {
   /** Non-secret view of a Stripe account (publishable key + booleans only). */
   const publicAccount = (a: StripeAccount) => ({ id: a.id, label: a.label, ...publicStripeStatus(a) });
 
-  // ── Stripe account resolution: Fabric vault first, local keys as fallback ────
-  // When embedded under OpenMasjidOS with the `stripe` capability, the admin configures
-  // Stripe ONCE in the platform (Settings → Payments) and every app shares that vaulted
-  // account — chosen here by the STRIPE_ACCOUNT install setting. It is the source of
-  // truth and is shared by every campaign. Standalone (or if the Fabric is unreachable /
-  // has no such account), we fall back to the campaign's own locally-entered keys. The
-  // fetched secret/webhook keys live in memory only (never our data volume), so they
-  // always track the OS vault — including after a restore onto a new machine.
+  // ── Stripe account resolution ────────────────────────────────────────────────
+  // A masjid may hold SEVERAL Stripe accounts — some vaulted in OpenMasjidOS (set up once in the
+  // dashboard and shared with its other apps), some with keys on this device — and since v0.42.0
+  // each appeal may name the one its money goes into, so a Zakat page can settle somewhere separate
+  // from the general fund. An appeal that names none follows the site default, which is the
+  // pre-v0.42.0 behaviour: the globally-chosen vault account when it is fully configured, else the
+  // account the campaign was created against.
+  //
+  // Vaulted secret/webhook keys live in memory ONLY (never our data volume), so they always track the
+  // OS vault — including after a restore onto a new machine. No vault account may ever be written
+  // into the local stripe_accounts table: accountById resolves locally FIRST, so a stale copy would
+  // permanently shadow the real vault account and would survive a restore.
   type ResolvedAccount = StripeConfig & { id: string; label: string };
 
   /** The platform-vaulted Stripe account for this app, or null when not embedded /
@@ -436,24 +440,101 @@ async function main(): Promise<void> {
     return await fetchFabricStripe(store.getFabricStripeChoice());
   };
 
-  /** The effective Stripe account a campaign should charge through: the Fabric vault
-   *  account when it's actually CONFIGURED (a real pk+sk pair), else the campaign's own
-   *  local account. The `stripeConfigured` gate matters — a half-set-up vault account
-   *  (secret present but publishable still blank in OpenMasjidOS) must NOT shadow a
-   *  working local account, or donations would silently break mid-migration. */
-  const effectiveAccountFor = async (c: Campaign): Promise<ResolvedAccount | null> => {
+  /** Why an appeal cannot take a card right now. Reported to the admin per campaign, and (as a
+   *  single friendly sentence) to the donor — who must never learn that "Stripe accounts" exist. */
+  type AccountProblem = 'no-account' | 'not-configured' | 'unreachable';
+  type AccountResolution = { account: ResolvedAccount; problem?: undefined } | { account: null; problem: AccountProblem };
+
+  /**
+   * The Stripe account a campaign should charge through — the ONE function that decides which bank
+   * account receives a donation.
+   *
+   * Three cases, and the first rule of the third is that it has not changed:
+   *
+   *  • An explicit choice ('fabric:<id>' / 'local:<id>') is HONOURED OR REFUSED. It never falls back
+   *    to the site default, to another vault account, or to a local one. That is the whole point: an
+   *    admin who sends a Zakat appeal to its own account has made a statement about where that money
+   *    must go, and quietly settling it elsewhere would be worse than not taking it at all — the
+   *    ledger would even record the substitute account's id, so nothing would look wrong.
+   *  • An INVALID reference refuses too, rather than degrading to the default. 'fabric:' with an
+   *    empty id would otherwise reach the platform as `?account=` omitted, which it answers with its
+   *    FIRST account.
+   *  • No choice at all ('' — every campaign that existed before v0.42.0) runs the OLD resolver
+   *    verbatim: the globally-chosen vault account when it is fully configured, else the campaign's
+   *    legacy local account, read straight from the local table. Not through the widened resolver
+   *    below, because a bare vault slug left in `stripe_account_id` by an old create would then start
+   *    charging an account the admin never picked. This is the migration guarantee: an existing
+   *    appeal's destination is a function only of data that existed before the upgrade.
+   *
+   * The `stripeConfigured` gate stays everywhere: a half-set-up account (a secret with no publishable
+   * key, or a test/live mismatch) is not a usable account.
+   */
+  const resolveAccountFor = async (c: Campaign): Promise<AccountResolution> => {
+    const choice = parsePaymentAccount(c.paymentAccount);
+
+    if (choice.kind === 'invalid') {
+      log.warn(`campaign ${c.id} has an unreadable payment account setting — refusing rather than guessing`);
+      return { account: null, problem: 'no-account' };
+    }
+
+    if (choice.kind === 'openmasjidos') {
+      if (!ssoConfigured()) return { account: null, problem: 'no-account' }; // no platform to ask
+      const r = await fetchFabricStripeDetailed(choice.id);
+      if (!r.value) return { account: null, problem: r.authoritative ? 'no-account' : 'unreachable' };
+      return stripeConfigured(r.value) ? { account: r.value } : { account: null, problem: 'not-configured' };
+    }
+
+    if (choice.kind === 'device') {
+      const local = store.getStripeAccount(choice.id);
+      if (!local) return { account: null, problem: 'no-account' };
+      return stripeConfigured(local) ? { account: local } : { account: null, problem: 'not-configured' };
+    }
+
+    // ── The site default ──
+    // The same two steps, in the same order, as the pre-v0.42.0 resolver: the globally-chosen vault
+    // account when it is fully configured, else the account this campaign was created against, read
+    // straight from the local table.
+    //
+    // ONE deliberate difference, and it changes no destination: where the old code returned an
+    // unconfigured local account and left every caller to reject it, this returns null with a reason.
+    // Both refuse the donation — but now the panel can say why, and a half-set-up account's
+    // publishable key is no longer handed to the browser on a page that cannot take a card anyway.
     const fab = await fabricAccount();
-    if (fab && stripeConfigured(fab)) return fab;
-    return store.getStripeAccount(c.stripeAccountId);
+    if (fab && stripeConfigured(fab)) return { account: fab };
+    const legacy = store.getStripeAccount(c.stripeAccountId);
+    if (!legacy) return { account: null, problem: 'no-account' };
+    return stripeConfigured(legacy) ? { account: legacy } : { account: null, problem: 'not-configured' };
   };
 
-  /** Resolve a Stripe account by id across both sources (used by the webhook route,
-   *  whose URL embeds the account id we handed to Stripe). */
+  /**
+   * Resolve a Stripe account by the BARE id recorded on a donation / tuition payment / plan — the
+   * money-already-taken direction, used by confirm, refunds, all the plan routes, the donor stop
+   * link, the tuition outbox, the sweep and the webhook.
+   *
+   * This must never be re-pointed by a campaign's current choice: a payment taken on account A is
+   * confirmed, refunded and cancelled on account A for ever, even after the appeal moves to B.
+   *
+   * BOUNDED BY A KNOWN-ID SET, and that is a security property rather than an optimisation. The
+   * webhook route (/api/stripe/webhook/:accountId) is unauthenticated by necessity, so without this
+   * a stranger could name arbitrary accounts and have us fetch each one from the platform vault —
+   * an amplifier against the platform, and a way to flush the in-memory keys that keep donations
+   * working through a blip (DONATIONS-020's concern, one layer down).
+   */
   const accountById = async (id: string): Promise<ResolvedAccount | null> => {
-    const local = store.getStripeAccount(id);
+    const wanted = (id ?? '').trim();
+    if (!wanted || !store.knownAccountIds().has(wanted)) return null;
+    // Local first. Safe against a tie because local ids always contain '_' ("acct_<hex>") and a vault
+    // slug never can.
+    const local = store.getStripeAccount(wanted);
     if (local) return local;
+    if (!ssoConfigured()) return null;
+    const direct = await fetchFabricStripe(wanted);
+    if (direct) return direct;
+    // Legacy: rows written before per-campaign accounts recorded whatever id the vault reported,
+    // which for an older platform was the literal 'fabric'. The platform 404s that name, so those
+    // rows only resolve through the globally-chosen account — keep the old compare for them.
     const fab = await fabricAccount();
-    return fab && fab.id === id ? fab : null;
+    return fab && fab.id === wanted ? fab : null;
   };
 
   const checkKeys = (p: { publishableKey?: string; secretKey?: string; webhookSecret?: string }): string | null => {
@@ -463,8 +544,29 @@ async function main(): Promise<void> {
     return null;
   };
 
+  /** Where this appeal's money goes, as the panel needs to show it: which account, whose it is,
+   *  what mode it is in, and whether it can actually take a card right now.
+   *
+   *  Ids, labels, modes and booleans only — never a key, and never a webhook secret. Resolving costs
+   *  at most one vault lookup per distinct account, cached for a minute. */
+  const campaignAccountView = async (c: Campaign) => {
+    const choice = parsePaymentAccount(c.paymentAccount);
+    const r = await resolveAccountFor(c);
+    return {
+      paymentAccount: c.paymentAccount,
+      /** 'default' = follows the site; 'openmasjidos' = a vaulted account; 'device' = keys held here. */
+      paymentAccountSource: choice.kind === 'invalid' ? 'default' : choice.kind === 'openmasjidos' ? 'openmasjidos' : choice.kind === 'device' ? 'device' : 'default',
+      /** The account's own name, when we could resolve it. '' when we could not — never invented. */
+      paymentAccountLabel: r.account?.label ?? '',
+      paymentAccountMode: r.account ? stripeMode(r.account) : ('unknown' as const),
+      /** 'ok' | 'no-account' | 'not-configured' | 'unreachable'. Anything but 'ok' means this appeal
+       *  is refusing donations, which the list badges and the form explains. */
+      paymentAccountStatus: r.problem ?? ('ok' as const),
+    };
+  };
+
   /** Admin view of a campaign (amounts in major units + raised + public link). */
-  const adminCampaign = (c: Campaign) => ({
+  const adminCampaign = async (c: Campaign) => ({
     ...c,
     presetAmounts: c.presetAmounts.map(toMajorCur),
     minAmount: toMajorCur(c.minAmount),
@@ -473,6 +575,7 @@ async function main(): Promise<void> {
     raised: toMajorCur(store.raisedForCampaign(c.id)),
     currency: cur(),
     url: `/${c.slug}`,
+    ...(await campaignAccountView(c)),
   });
 
   /** Validate + resolve a campaign link slug. Returns the final slug, or an error
@@ -851,7 +954,13 @@ async function main(): Promise<void> {
     allowCustom: z.boolean().optional(),
     minAmount: z.number().nonnegative().optional(), // major
     maxAmount: z.number().nonnegative().optional(), // major, 0 = none
+    /** LEGACY, still accepted so an older client keeps working. Never read by the new resolver. */
     stripeAccountId: z.string().max(64).optional(),
+    /** Where this appeal's money goes: '' = the same account as the rest of the site, or
+     *  'fabric:<vault-id>' / 'local:<account-id>'. Shape-checked here; that the account actually
+     *  EXISTS and is usable is checked before saving, because saving an unusable one would silently
+     *  stop this appeal taking donations. */
+    paymentAccount: z.string().max(80).optional(),
     coverFees: z.boolean().optional(),
     forceCoverFees: z.boolean().optional(),
     giftAid: z.boolean().optional(),
@@ -867,6 +976,35 @@ async function main(): Promise<void> {
       accent: z.string().max(40).optional(),
     }).optional(),
   });
+  /** Check a requested per-campaign account before it is written. Returns an error SENTENCE for the
+   *  admin, or null when the choice is good.
+   *
+   *  Verified rather than merely parsed: an appeal pinned to an account that has gone, or that is
+   *  half set up, refuses every donation — so the admin must find that out while they are looking at
+   *  the form, not from a donor's phone call a week later. */
+  const checkPaymentAccount = async (raw: string): Promise<string | null> => {
+    const choice = parsePaymentAccount(raw);
+    if (choice.kind === 'default') return null;
+    if (choice.kind === 'invalid') return 'Please choose where this appeal’s money should go.';
+    if (choice.kind === 'device') {
+      const local = store.getStripeAccount(choice.id);
+      if (!local) return 'That payment account isn’t on this device any more. Please choose another.';
+      if (!stripeConfigured(local)) return `“${local.label}” isn’t finished being set up, so donors couldn’t give on this page. Add its keys on the Payments tab, or choose another account.`;
+      return null;
+    }
+    if (!ssoConfigured()) return 'This device isn’t connected to OpenMasjidOS, so it can’t use an account from your dashboard.';
+    const r = await fetchFabricStripeDetailed(choice.id);
+    if (!r.value) {
+      return r.authoritative
+        ? 'That account isn’t in OpenMasjidOS any more. Please choose another.'
+        : 'We couldn’t reach OpenMasjidOS to check that account just now. Please try again in a moment.';
+    }
+    if (!stripeConfigured(r.value)) {
+      return `“${r.value.label}” isn’t finished being set up in OpenMasjidOS, so donors couldn’t give on this page. Finish it in OpenMasjidOS → Settings → Payments, or choose another account.`;
+    }
+    return null;
+  };
+
   /** Keep an accent only if it's a valid hex colour, else '' — so an unvalidated value can
    *  never reach a style/markup consumer (the browser already checks, this is belt-and-braces). */
   const sanitizeAccent = (a?: string): string => (a && /^#[0-9a-fA-F]{3,8}$/.test(a.trim()) ? a.trim() : '');
@@ -883,7 +1021,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/admin/campaigns', { preHandler: requireAdmin }, async () => ({
-    data: store.listCampaigns().map(adminCampaign),
+    data: await Promise.all(store.listCampaigns().map(adminCampaign)),
   }));
   app.post('/api/admin/campaigns', { preHandler: requireAdmin }, async (req, reply) => {
     const parsed = CampaignBody.safeParse(req.body);
@@ -897,6 +1035,10 @@ async function main(): Promise<void> {
     if (!accountId) return reply.code(400).send({ error: 'Add a Stripe account before creating a campaign.' });
     const { slug, error } = resolveSlug(p.slug, p.title!);
     if (error) return reply.code(409).send({ error });
+    if (p.paymentAccount !== undefined) {
+      const bad = await checkPaymentAccount(p.paymentAccount);
+      if (bad) return reply.code(400).send({ error: bad });
+    }
     const c = store.createCampaign({
       title: p.title!, // guarded above — title is required for create
       type: p.type, // guarded above — required on create
@@ -907,6 +1049,7 @@ async function main(): Promise<void> {
       logo: p.logo,
       allowCustom: p.allowCustom,
       stripeAccountId: accountId,
+      paymentAccount: p.paymentAccount ?? '',
       coverFees: p.coverFees,
       forceCoverFees: p.forceCoverFees,
       giftAid: p.giftAid,
@@ -916,7 +1059,7 @@ async function main(): Promise<void> {
       thankYou: thankYouOverride(p.thankYou),
       ...campaignAmountsToMinor(p),
     });
-    return { data: adminCampaign(c) };
+    return { data: await adminCampaign(c) };
   });
   app.put('/api/admin/campaigns/:id', { preHandler: requireAdmin }, async (req, reply) => {
     const parsed = CampaignBody.safeParse(req.body);
@@ -931,16 +1074,30 @@ async function main(): Promise<void> {
       if (r.error) return reply.code(409).send({ error: r.error });
       slug = r.slug;
     }
+    if (p.paymentAccount !== undefined) {
+      const bad = await checkPaymentAccount(p.paymentAccount);
+      if (bad) return reply.code(400).send({ error: bad });
+    }
+    // Changing where an appeal's money lands is worth a line in the record — it is a money decision,
+    // and a masjid panel is shared. Labels and refs only, never key material.
+    const before = store.getCampaign(id);
+    if (before && p.paymentAccount !== undefined && p.paymentAccount !== before.paymentAccount) {
+      audit(req, 'campaign.account.change', id, `changed where “${before.title}” is paid into (${before.paymentAccount || 'site default'} → ${p.paymentAccount || 'site default'})`);
+    }
     const c = store.updateCampaign(id, {
       title: p.title,
       type: p.type,
       slug,
+      paymentAccount: p.paymentAccount,
       description: p.description,
       coverImage: p.coverImage,
       backgroundImage: p.backgroundImage,
       logo: p.logo,
       allowCustom: p.allowCustom,
-      stripeAccountId: p.stripeAccountId,
+      // An EMPTY legacy id is treated as "not sent". The admin form has always posted this field, and
+      // in an embedded install with no local accounts it posts '' — which would overwrite a real id
+      // with nothing and quietly destroy the fallback the site-default branch depends on.
+      stripeAccountId: p.stripeAccountId || undefined,
       coverFees: p.coverFees,
       forceCoverFees: p.forceCoverFees,
       giftAid: p.giftAid,
@@ -951,7 +1108,7 @@ async function main(): Promise<void> {
       ...campaignAmountsToMinor(p),
     });
     if (!c) return reply.code(404).send({ error: 'Campaign not found.' });
-    return { data: adminCampaign(c) };
+    return { data: await adminCampaign(c) };
   });
   app.delete('/api/admin/campaigns/:id', { preHandler: requireAdmin }, async (req) => {
     const doomed = store.getCampaign((req.params as { id: string }).id);
@@ -1788,7 +1945,8 @@ async function main(): Promise<void> {
   };
 
   const publicCampaign = async (c: Campaign) => {
-    const acct = await effectiveAccountFor(c);
+    const resolved = await resolveAccountFor(c);
+    const acct = resolved.account;
     const ld = store.getLargeDonation();
     // A tuition campaign is a Students-billing shell: ask Students (over the Fabric broker)
     // whether it's set up. Unavailable / disabled → the donor page shows a friendly notice
@@ -1840,6 +1998,14 @@ async function main(): Promise<void> {
       students,
       publishableKey: acct?.publishableKey ?? '', // safe; never the secret
       ready: !!acct && stripeConfigured(acct),
+      /** Why not, in a form the page can turn into ONE friendly sentence. Never mentions Stripe,
+       *  accounts or configuration to a donor — they only need to know it isn't them, and what to do
+       *  instead. '' when everything is fine. */
+      readyReason: resolved.problem ?? '',
+      /** True when this appeal is on a TEST-mode account: the page shows a clear badge, because a
+       *  page that looks exactly like the real one but takes no money is the worst of both
+       *  (CLAUDE.md §6). */
+      testMode: !!acct && stripeMode(acct) === 'test',
     };
   };
 
@@ -1865,6 +2031,30 @@ async function main(): Promise<void> {
     donorName: z.string().max(120).optional(),
     donorEmail: z.string().max(200).optional(),
   });
+  // One alert per campaign per day when an appeal turns donors away because its account isn't
+  // usable. Without it this failure is invisible: the donor sees a disabled button and leaves, and
+  // nothing on the masjid's side ever says so. Bounded and in-memory — a restart may re-alert, which
+  // is the right way round for something this quiet.
+  const refusalAlerted = new Map<string, number>();
+  const alertAccountRefusal = (c: Campaign, problem: AccountProblem): void => {
+    const today = new Date().toISOString().slice(0, 10);
+    if (refusalAlerted.get(c.id) === Date.parse(today)) return;
+    if (refusalAlerted.size > 500) refusalAlerted.clear();
+    refusalAlerted.set(c.id, Date.parse(today));
+    const why =
+      problem === 'unreachable'
+        ? 'we couldn’t reach OpenMasjidOS to fetch its keys'
+        : problem === 'not-configured'
+          ? 'that account isn’t finished being set up'
+          : 'the account it pays into isn’t available';
+    void fabricAlert(
+      'payment-failed',
+      `Donations are paused on “${c.title}”`,
+      `Somebody tried to give to “${c.title}” and couldn’t: ${why}. Open Donations → Campaigns to choose another account. Your other appeals are unaffected.`,
+      'error',
+    ).catch(() => {});
+  };
+
   const intentHandler = async (
     req: import('fastify').FastifyRequest,
     reply: import('fastify').FastifyReply,
@@ -1878,8 +2068,12 @@ async function main(): Promise<void> {
     // (that would file a client-chosen amount into the donations ledger, count it in totals/
     // CSV/Gift Aid, and orphan it from the Students ledger). Tuition has its own routes.
     if (!c || !c.active || c.type === 'tuition') return reply.code(404).send({ error: 'This donation page isn’t available.' });
-    const acct = await effectiveAccountFor(c);
-    if (!acct || !stripeConfigured(acct)) return reply.code(400).send({ error: 'Donations aren’t set up for this page yet.' });
+    const resolved = await resolveAccountFor(c);
+    const acct = resolved.account;
+    if (!acct || !stripeConfigured(acct)) {
+      alertAccountRefusal(c, resolved.problem ?? 'no-account');
+      return reply.code(400).send({ error: 'Donations aren’t set up for this page yet.' });
+    }
     const parsed = IntentBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose a valid amount.' });
     const p = parsed.data;
@@ -2122,7 +2316,7 @@ async function main(): Promise<void> {
    *  them, and nothing that widens what the token can do: no donor name, no email, no card, no
    *  Stripe or internal ids, no payment history, no totals. Everything left is either the reader's
    *  own arrangement or already public on the masjid's donation page. */
-  const publicPlanView = (seed: PlanSeed, state: PlanState | null) => {
+  const publicPlanView = (seed: PlanSeed, state: PlanState | null, haveKeys = true) => {
     const c = store.getCampaign(seed.campaignId);
     const m = store.getMasjid();
     const currency = (state?.currency || seed.currency || cur()).toUpperCase();
@@ -2148,8 +2342,13 @@ async function main(): Promise<void> {
       nextPaymentAt: state ? isoFromUnix(nextPaymentUnix(state)) : '',
       /** False only when we could not read Stripe on this request; the page then says so. */
       live: state !== null,
-      /** Is there anything left to stop? A finished plan shows the "already stopped" state instead. */
-      canStop: st.status !== 'canceled',
+      /** Is there anything left to stop, AND could we actually do it?
+       *
+       *  `haveKeys` is false when this plan's Stripe account is no longer on this device — and then
+       *  pressing Stop could only ever fail, so the page must not offer the button. It points the
+       *  donor at the masjid instead. (Stripe merely being unreachable is different: the keys are
+       *  here, the next attempt may well work, so the button stays with an honest failure message.) */
+      canStop: haveKeys && st.status !== 'canceled',
     };
   };
 
@@ -2165,8 +2364,9 @@ async function main(): Promise<void> {
     if (!seed) return reply.code(404).send({ error: PLAN_TOKEN_MISS });
     // One outbound Stripe read, and only for the subscription itself. Never syncPlan (see (1)).
     const acct = await accountById(seed.stripeAccountId);
-    const state = acct?.secretKey ? await fetchPlanState(acct.secretKey, seed.subscriptionId) : null;
-    return { data: publicPlanView(seed, state) };
+    const haveKeys = !!acct?.secretKey;
+    const state = haveKeys ? await fetchPlanState(acct!.secretKey, seed.subscriptionId) : null;
+    return { data: publicPlanView(seed, state, haveKeys) };
   });
 
   /** Stop the plan. Idempotent: a plan that has already finished is a SUCCESS, not an error. */
@@ -2217,7 +2417,7 @@ async function main(): Promise<void> {
     }
 
     const after = await fetchPlanState(acct.secretKey, seed.subscriptionId);
-    return { data: { ...publicPlanView(findSeed(planSeeds(), seed.subscriptionId) ?? seed, after), stopped: true, alreadyOver } };
+    return { data: { ...publicPlanView(findSeed(planSeeds(), seed.subscriptionId) ?? seed, after, true), stopped: true, alreadyOver } };
   });
 
   // ── Tuition (Students billing) — a `tuition` campaign is a shell around OpenMasjid ──
@@ -2461,8 +2661,12 @@ async function main(): Promise<void> {
     }
     const c = store.getCampaignBySlug((req.params as { slug: string }).slug);
     if (!c || !c.active || c.type !== 'tuition') return reply.code(404).send({ error: 'This page isn’t available.' });
-    const acct = await effectiveAccountFor(c);
-    if (!acct || !stripeConfigured(acct)) return reply.code(400).send({ error: 'Tuition payments aren’t set up for this page yet.' });
+    const resolvedAcct = await resolveAccountFor(c);
+    const acct = resolvedAcct.account;
+    if (!acct || !stripeConfigured(acct)) {
+      alertAccountRefusal(c, resolvedAcct.problem ?? 'no-account');
+      return reply.code(400).send({ error: 'Tuition payments aren’t set up for this page yet.' });
+    }
     const parsed = StudentsIntentBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose what to pay.' });
     const session = getTuitionSession(parsed.data.session);

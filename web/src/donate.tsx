@@ -250,6 +250,28 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
         </div>
       )}
 
+      {/* This page can't take a card. Until now `ready: false` only greyed the button out, so a
+          supporter met a dead page with nothing said and no idea whether it was them. One sentence,
+          and never a word about Stripe, accounts or configuration — none of that is theirs to fix.
+          `unreachable` is genuinely temporary, so it says so; the others are not, so they don't. */}
+      {!campaign.ready && (
+        <p className="donate-note" role="status">
+          <ShieldCheck size={14} aria-hidden="true" />
+          {campaign.readyReason === 'unreachable'
+            ? 'We can’t take card donations for a moment — please try again shortly, or contact the masjid to give another way.'
+            : 'Donations aren’t set up for this page yet — please check back soon, or contact the masjid to give another way.'}
+        </p>
+      )}
+
+      {/* CLAUDE.md §6 asks for a clear TEST MODE badge whenever test keys are in use. It matters most
+          here: a test page looks exactly like the real one and takes no money at all. */}
+      {campaign.ready && campaign.testMode && (
+        <p className="donate-note" role="status">
+          <ShieldCheck size={14} aria-hidden="true" />
+          <b>TEST MODE</b> — no real payment will be taken on this page.
+        </p>
+      )}
+
       <form onSubmit={submit}>
         {campaign.allowMonthly && (
           <div className="freq-toggle" role="group" aria-label="How often to give">

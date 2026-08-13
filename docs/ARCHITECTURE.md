@@ -112,13 +112,14 @@ optional — the app works fully standalone.
   distinguishes "not signed in" from "platform unreachable" so the panel can offer the
   local-password recovery instead of looping.
 - **Stripe via the Fabric** (`stripe: true`): keys are configured **once** in OpenMasjidOS
-  and fetched per-app with `fetchFabricStripe()` (the `STRIPE_ACCOUNT` setting names which
-  vaulted account). They are cached **in memory only, never written to the data volume**, so
-  they always track the OS vault — including after a restore onto a new machine. The
-  resolvers `effectiveAccountFor()` (charging) and `accountById()` (webhook) prefer the
-  Fabric account **only when it is fully configured**, otherwise fall back to locally-entered
-  keys. Confirm-on-return resolves the account by the donation's **recorded** account id, so
-  a config/reachability change between intent and confirm can't strand a succeeded payment.
+  and fetched per-app with `fetchFabricStripe()`. They are cached **in memory only, never written to
+  the data volume**, so they always track the OS vault — including after a restore onto a new
+  machine. `resolveAccountFor()` (charging) honours an appeal's own account choice and otherwise
+  prefers the vault account **only when it is fully configured**, falling back to locally-entered
+  keys; `accountById()` (confirm, refunds, plans, webhook) resolves by the **recorded** account id,
+  so a config or reachability change between intent and confirm can't strand a succeeded payment,
+  and money taken on one account is never acted on with another's keys. See *Per-appeal Stripe
+  accounts* below.
 - **Restore/migration resilience** (required of every Fabric app): `OPENMASJID_BASE_URL` and
   `OPENMASJID_APP_SECRET` are read from env every start and never persisted; every Fabric
   call fails soft (short timeout, `redirect:'error'`); and **local setup can never be
@@ -692,3 +693,125 @@ any existing campaign slugged `stop` on the next boot, breaking a link a masjid 
 bare or truncated `/stop` gets its own "this link looks incomplete" page, and the not-yet-onboarded
 redirect to `/admin` explicitly excludes it — that `location.replace` would destroy the only copy of
 the token. The page is its own lazy chunk (~8.7 kB, no Stripe.js).
+
+## Per-appeal Stripe accounts (v0.42.0)
+
+A masjid may hold several Stripe accounts — some vaulted in OpenMasjidOS (set up once in the
+dashboard, shared with its other apps), some with keys on this device — and each appeal may name the
+one its money goes into. A Zakat page can settle into a separate account from the general fund.
+
+Before this, a vaulted account **shadowed every campaign**: `effectiveAccountFor` returned the one
+globally-chosen vault account whenever it was configured, and `campaigns.stripe_account_id` was
+ignored entirely on an embedded install. Per-campaign accounts existed only standalone.
+
+### The migration rule
+
+**An existing appeal's destination is a function only of data that existed before the upgrade.**
+
+`campaigns.payment_account` defaults to `''`, there is **no backfill and no inference** from
+`stripe_account_id`, and the `''` branch of the resolver is the old code path verbatim — the
+globally-chosen vault account when `stripeConfigured`, else `store.getStripeAccount(c.stripeAccountId)`
+read straight from the local table. Not through the widened `accountById`: a bare vault slug left in
+`stripe_account_id` by an old create would otherwise start charging an account the admin never chose.
+
+So an unattended overnight update cannot move anybody's money, and a masjid that wants per-appeal
+accounts opts in per appeal. `accounts.test.ts` locks the storage half of this; the resolver's
+default branch is a byte-for-byte copy of what it replaced.
+
+### Namespacing
+
+`''` | `fabric:<vault-slug>` | `local:<local-id>`. Vault ids are the platform's `slugify()` output
+(lowercase, `[a-z0-9-]`, no underscore); local ids are `acct_<hex>`. **Provably disjoint on the
+underscore**, which is what makes it safe for `accountById` to try the local table first.
+
+Ids, never labels. The platform matches a label too, so a label would appear to work right up until
+the admin renamed the account — and would also multiply the cache keys.
+
+Anything that does not parse EXACTLY is `invalid`, and invalid **refuses**. That is not pedantry:
+`fabric:` with an empty id would reach the platform as `?account=` omitted, which it answers with its
+**first** account — so a Zakat appeal would quietly settle into the general fund and the ledger would
+record the general fund's id, leaving nothing that looked wrong.
+
+### Refuse, never substitute
+
+An explicit choice is honoured or the appeal stops taking cards. It never falls back to the site
+default, to another vault account, or to a local one. An admin who points Zakat at its own account
+has made a statement about where that money must go; settling it elsewhere is worse than not taking
+it. The three refusal causes are distinguished all the way to the surface — `no-account`,
+`not-configured`, `unreachable` — because "try again in a minute" and "this account is gone" need
+different words.
+
+**A refusal is loud in three places**, or it would be an invisible 100% outage on one appeal:
+
+- the donor sees a sentence (never "Stripe", never "account" — none of it is theirs to fix);
+- the Campaigns list shows a **Not taking donations** pill with the cause, and the form explains it
+  next to the picker, including the clause that answers the admin's real fear: *we won't quietly send
+  the money to a different account instead*;
+- the first refused intent per campaign per day fires the `payment-failed` alert.
+
+### The two resolvers, and why they differ
+
+| | reads | may it be re-pointed? |
+|---|---|---|
+| `resolveAccountFor(campaign)` | the appeal's current choice | yes — it decides where NEW money goes |
+| `accountById(bareId)` | the id recorded on the row | **never** |
+
+Money taken on account A is confirmed, refunded and cancelled on account A for ever, even after the
+appeal moves to B. That asymmetry is what makes the feature safe, and it is why the confirm route
+keeps resolving by the recorded id even though it has the Campaign in hand.
+
+`accountById` is **bounded by a known-id set** (`store.knownAccountIds()`): the accounts campaigns
+point at, the accounts money was taken on, and the site default. An unknown id returns `null` with
+**no network call**. This is a security property, not an optimisation — `/api/stripe/webhook/:accountId`
+is unauthenticated by necessity, so without the bound a stranger could name arbitrary accounts and
+have us fetch each from the platform vault: an amplifier against the platform, and a way to flush the
+in-memory keys that keep donations working through a blip.
+
+It still keeps the old `fab.id === id` comparison as a last step, for rows written when the vault
+reported the literal id `'fabric'`. The platform 404s that name, so those rows resolve only through
+the globally-chosen account.
+
+### Vault key caching
+
+`fetchFabricStripe`'s cache is keyed **per account**. It was a single slot with the account name
+stored alongside — correct, but two appeals on two accounts would evict each other on every donation,
+including the last-good copy that exists precisely so a platform blip cannot stop donations.
+
+The non-ok branch is **split by status**, and this is a precondition for "refuse rather than fall
+back" being safe rather than fragile:
+
+- **404 / 403** — the platform has answered: no such account. Cache it. (This is also how an account
+  the admin deleted in the dashboard comes back as "nothing" rather than as somebody else's keys —
+  the platform does not substitute its default for an unknown id.)
+- **429 / 5xx / transport** — it has told us *nothing*. Don't cache, serve the last good copy. The
+  Fabric rate limit is shared with every other app on the box, so negative-caching a 429 would turn
+  one throttled request into a 60-second donation outage.
+
+`fabricConfigSignature` therefore reports `reachable: false` when the lookup was non-authoritative.
+Without that, a Fabric throttling storm would blank the fingerprint while the reachability probe
+(which hits an unthrottled route) said "up" — and the watcher would restart a box in the middle of
+taking live donations, repeatedly.
+
+No vault account may **ever** be written into `stripe_accounts`. `accountById` is local-first, so a
+stale copy would permanently shadow the real vault account and survive a restore.
+
+### Deleting an account
+
+Blocked when any campaign depends on it through **either** column, and blocked outright when
+`donations` or `student_payments` reference it. The second guard is the important one: deleting an
+account money was taken on would strand every refund and leave a monthly plan that neither the admin
+nor the donor could ever stop — a card mandate nobody can cancel is a chargeback, and on a shared
+vault account that lands on the whole platform.
+
+### Known limitations
+
+- **One currency.** `cur()` is charged on every account; an account that cannot accept it fails
+  loudly at Stripe. Per-account currency is not built.
+- **One webhook endpoint per account.** A masjid using two accounts registers the optional webhook
+  twice (`/api/stripe/webhook/<id>` each). Webhooks remain optional — the retrieve-on-return and
+  reconciliation paths do not need them.
+- **Rename a vault account; never delete and re-add it.** The platform frees the slug on delete and
+  re-derives it on create, so a re-added account with the same name silently re-points an appeal's
+  reference at new keys with no 404 to notice.
+- **Test-mode money is counted in the totals**, with the appeal badged `TEST` and the donor shown a
+  `TEST MODE` notice. Excluding it would make the headline fall with no explanation.

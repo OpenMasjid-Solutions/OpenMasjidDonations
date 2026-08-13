@@ -90,7 +90,14 @@ export interface Campaign {
   /** Min/max custom amount in minor units. maxAmount 0 = no max. */
   minAmount: number;
   maxAmount: number;
+  /** LEGACY. The account chosen when the campaign was made, and still the fallback for a campaign
+   *  that has never picked one explicitly. Read ONLY by the site-default branch of the resolver —
+   *  new logic goes through `paymentAccount`. */
   stripeAccountId: string;
+  /** Which Stripe account this appeal's money goes into: '' = the site default, or a namespaced
+   *  reference ('fabric:<vault-id>' / 'local:<account-id>'). See parsePaymentAccount. '' is the
+   *  value every pre-v0.42.0 campaign has, and it means "behave exactly as before". */
+  paymentAccount: string;
   /** Offer the donor the option to cover the card fee. */
   coverFees: boolean;
   /** Require the donor to cover the card fee (no opt-out). Always true for Zakat; set by
@@ -302,6 +309,52 @@ export function slugify(s: string): string {
   return out || 'appeal';
 }
 
+// ── Which Stripe account an appeal's money goes into ──────────────────────────
+/**
+ * A campaign's `paymentAccount` is a namespaced reference, so that "which bank account receives
+ * this donation" can never be ambiguous:
+ *
+ *   ''              — no choice: follow the site default (exactly the pre-v0.42.0 behaviour).
+ *   'fabric:<id>'   — a named account in the OpenMasjidOS vault, by its ID (a slugified label:
+ *                     lowercase, [a-z0-9-], never an underscore). IDs, never labels — the platform
+ *                     matches either, but a label changes when the admin renames the account while
+ *                     the id is minted once and never moves.
+ *   'local:<id>'    — an account whose keys live on this device (`stripe_accounts.id`, "acct_<hex>").
+ *
+ * The two namespaces are provably disjoint on the underscore, which is what makes it safe for
+ * `accountById` to try the local table first when re-resolving a bare recorded id.
+ *
+ * Anything that does not match EXACTLY is `invalid`, and an invalid reference must make the appeal
+ * refuse rather than fall back to some other account. That is not pedantry: `fabric:` with an empty
+ * id would reach the platform as `?account=` omitted, which it answers with its FIRST account — so a
+ * Zakat appeal would quietly settle into the general account and the ledger would record the general
+ * account's id, leaving nothing to notice.
+ */
+export type ParsedAccount =
+  | { kind: 'default' }
+  | { kind: 'openmasjidos'; id: string }
+  | { kind: 'device'; id: string }
+  | { kind: 'invalid' };
+
+const FABRIC_REF_RE = /^fabric:([a-z0-9][a-z0-9-]{0,62})$/;
+const LOCAL_REF_RE = /^local:([A-Za-z0-9_-]{1,64})$/;
+
+export function parsePaymentAccount(raw: string | null | undefined): ParsedAccount {
+  const v = (raw ?? '').trim();
+  if (!v) return { kind: 'default' };
+  const fab = FABRIC_REF_RE.exec(v);
+  if (fab) return { kind: 'openmasjidos', id: fab[1] };
+  const loc = LOCAL_REF_RE.exec(v);
+  if (loc) return { kind: 'device', id: loc[1] };
+  return { kind: 'invalid' };
+}
+
+/** Build a reference for storage. Returns '' for the site default. */
+export function formatPaymentAccount(kind: 'default' | 'openmasjidos' | 'device', id = ''): string {
+  if (kind === 'default') return '';
+  return `${kind === 'openmasjidos' ? 'fabric' : 'local'}:${id}`;
+}
+
 /** Slugs the admin must not claim — they collide with the app's own top-level paths
  *  (the admin panel, the API, health check, the built assets, and the legacy /c/ link
  *  prefix). The donation page lives at /<slug>, so these are off-limits. */
@@ -473,6 +526,11 @@ export class Store {
     this.ensureColumn('campaigns', 'type', "TEXT NOT NULL DEFAULT 'donation'");
     this.ensureColumn('campaigns', 'force_cover_fees', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('campaigns', 'widget_enabled', 'INTEGER NOT NULL DEFAULT 0');
+    // Which Stripe account an appeal pays into. Legacy rows default to '' = "the site default",
+    // which is precisely the behaviour they had before this column existed — there is deliberately
+    // NO backfill from stripe_account_id, because inferring a choice nobody made is how an existing
+    // appeal would start charging a different bank account after an unattended overnight update.
+    this.ensureColumn('campaigns', 'payment_account', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'card_brand', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'card_last4', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
@@ -755,14 +813,58 @@ export class Store {
     return next;
   }
 
+  /** How many campaigns depend on this local account — through EITHER the legacy column or an
+   *  explicit 'local:<id>' choice. Missing the second one would let an admin delete an account a
+   *  live appeal is pinned to, and that appeal would then refuse every donation. */
   campaignsForAccount(id: string): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM campaigns WHERE stripe_account_id = ?').get(id) as { n: number }).n;
+    return (
+      this.db
+        .prepare('SELECT COUNT(*) AS n FROM campaigns WHERE stripe_account_id = ? OR payment_account = ?')
+        .get(id, formatPaymentAccount('device', id)) as { n: number }
+    ).n;
+  }
+
+  /** How many donations / tuition payments were TAKEN on this account. Money already taken is the
+   *  stronger claim: confirming, refunding, and cancelling a monthly plan all re-resolve the account
+   *  from the row, so deleting it would strand those records for ever — including leaving a card
+   *  mandate that neither the admin nor the donor could stop. */
+  paymentsForAccount(id: string): number {
+    const d = (this.db.prepare('SELECT COUNT(*) AS n FROM donations WHERE stripe_account_id = ?').get(id) as { n: number }).n;
+    const s = (this.db.prepare('SELECT COUNT(*) AS n FROM student_payments WHERE stripe_account_id = ?').get(id) as { n: number }).n;
+    return d + s;
   }
 
   deleteStripeAccount(id: string): { ok: boolean; reason?: string } {
     if (this.campaignsForAccount(id) > 0) return { ok: false, reason: 'in-use' };
+    if (this.paymentsForAccount(id) > 0) return { ok: false, reason: 'has-payments' };
     this.db.prepare('DELETE FROM stripe_accounts WHERE id = ?').run(id);
     return { ok: true };
+  }
+
+  /** Every account id this installation could legitimately be asked about: the ones campaigns point
+   *  at, the ones money was actually taken on, and the site default. Bare ids, as recorded on rows.
+   *
+   *  This is a GUARD, not a convenience. accountById is reached from the UNAUTHENTICATED Stripe
+   *  webhook (/api/stripe/webhook/:accountId), so without a known-id bound a stranger could make the
+   *  app fetch arbitrary account names from the platform vault — an amplifier against the platform,
+   *  and a way to flush the in-memory key cache that keeps donations alive through a blip. */
+  knownAccountIds(): Set<string> {
+    const out = new Set<string>();
+    const add = (v: unknown) => {
+      const t = String(v ?? '').trim();
+      if (t) out.add(t);
+    };
+    for (const r of this.db.prepare('SELECT id FROM stripe_accounts').all() as { id: string }[]) add(r.id);
+    for (const r of this.db.prepare('SELECT DISTINCT stripe_account_id AS a FROM donations').all() as { a: string }[]) add(r.a);
+    for (const r of this.db.prepare('SELECT DISTINCT stripe_account_id AS a FROM student_payments').all() as { a: string }[]) add(r.a);
+    for (const r of this.db.prepare('SELECT DISTINCT stripe_account_id AS a FROM campaigns').all() as { a: string }[]) add(r.a);
+    // Explicit per-campaign choices, unwrapped to the bare id the vault/local table knows.
+    for (const r of this.db.prepare("SELECT DISTINCT payment_account AS a FROM campaigns WHERE payment_account <> ''").all() as { a: string }[]) {
+      const parsed = parsePaymentAccount(r.a);
+      if (parsed.kind === 'openmasjidos' || parsed.kind === 'device') add(parsed.id);
+    }
+    add(this.getFabricStripeChoice());
+    return out;
   }
 
   // ── Campaigns ─────────────────────────────────────────────────────────────
@@ -788,6 +890,7 @@ export class Store {
       minAmount: Number(r.min_amount),
       maxAmount: Number(r.max_amount),
       stripeAccountId: String(r.stripe_account_id),
+      paymentAccount: String(r.payment_account ?? ''),
       coverFees: !!r.cover_fees,
       forceCoverFees: !!r.force_cover_fees,
       giftAid: !!r.gift_aid,
@@ -885,15 +988,16 @@ export class Store {
       .prepare(
         `INSERT INTO campaigns
           (id, slug, token, title, type, description, cover_image, background_image, logo, preset_amounts, allow_custom, min_amount,
-           max_amount, stripe_account_id, cover_fees, force_cover_fees, gift_aid, allow_monthly, widget_enabled, goal_amount, active, sort_order, thank_you, created_at)
+           max_amount, stripe_account_id, payment_account, cover_fees, force_cover_fees, gift_aid, allow_monthly, widget_enabled, goal_amount, active, sort_order, thank_you, created_at)
          VALUES
           (@id, @slug, @token, @title, @type, @description, @coverImage, @backgroundImage, @logo, @presetAmounts, @allowCustom, @minAmount,
-           @maxAmount, @stripeAccountId, @coverFees, @forceCoverFees, @giftAid, @allowMonthly, @widgetEnabled, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
+           @maxAmount, @stripeAccountId, @paymentAccount, @coverFees, @forceCoverFees, @giftAid, @allowMonthly, @widgetEnabled, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
          ON CONFLICT(id) DO UPDATE SET
            slug=excluded.slug, title=excluded.title, type=excluded.type, description=excluded.description, cover_image=excluded.cover_image,
            background_image=excluded.background_image, logo=excluded.logo, preset_amounts=excluded.preset_amounts,
            allow_custom=excluded.allow_custom, min_amount=excluded.min_amount, max_amount=excluded.max_amount,
-           stripe_account_id=excluded.stripe_account_id, cover_fees=excluded.cover_fees, force_cover_fees=excluded.force_cover_fees,
+           stripe_account_id=excluded.stripe_account_id, payment_account=excluded.payment_account,
+           cover_fees=excluded.cover_fees, force_cover_fees=excluded.force_cover_fees,
            gift_aid=excluded.gift_aid, allow_monthly=excluded.allow_monthly, widget_enabled=excluded.widget_enabled,
            goal_amount=excluded.goal_amount, active=excluded.active, sort_order=excluded.sort_order, thank_you=excluded.thank_you`,
       )
@@ -974,6 +1078,7 @@ export class Store {
       minAmount: input.minAmount ?? 100,
       maxAmount: input.maxAmount ?? 0,
       stripeAccountId: input.stripeAccountId,
+      paymentAccount: input.paymentAccount ?? '',
       coverFees: input.coverFees ?? false,
       forceCoverFees: input.forceCoverFees ?? false,
       giftAid: input.giftAid ?? false,

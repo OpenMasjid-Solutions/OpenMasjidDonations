@@ -208,6 +208,9 @@ h1, h2, h3, p { margin: 0; }
   background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border);
 }
 .status-pill--ok { color: var(--color-success); }
+/* Something needs attention but nothing is broken or lost — e.g. an appeal whose payment account
+   has gone, which stops donations on that page only. Amber, never red: no money went astray. */
+.status-pill--warn { color: var(--color-warning); }
 
 /* Instruction steps (Stripe how-to + collapsibles) */
 .steps-details { margin-block: 0.4rem 1rem; border-radius: var(--radius-button); }
@@ -318,6 +321,16 @@ select.input { appearance: auto; }
 .amount-btn.is-active { background: var(--color-primary); color: var(--color-on-primary); border-color: transparent; }
 
 /* Goal progress */
+/* A quiet inline notice on the donation page: "we can't take a card just now", or the TEST MODE
+   badge. Deliberately calm rather than alarming — the supporter has done nothing wrong. */
+.donate-note {
+  display: flex; align-items: flex-start; gap: 0.45rem; text-align: start;
+  margin-block: 0.5rem; padding: 0.6rem 0.75rem; border-radius: var(--radius-md, 10px);
+  background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border);
+  font-size: 0.88rem; line-height: 1.5; color: var(--color-ink-muted);
+}
+.donate-note svg { flex-shrink: 0; margin-block-start: 0.15rem; }
+
 .goal { margin-block: 0.3rem 0.5rem; }
 .goal-bar { height: 0.5rem; border-radius: 999px; background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border); overflow: hidden; }
 .goal-fill { height: 100%; background: var(--color-primary); border-radius: 999px; transition: width var(--dur-settle) var(--ease-settle); }
