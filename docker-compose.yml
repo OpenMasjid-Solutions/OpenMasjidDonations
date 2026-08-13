@@ -31,7 +31,7 @@ services:
     #
     # On `main` this line is the release tag + @sha256 digest. Never carry this dev
     # line into main: a merge must restore the pinned form (Branching policy, rule 6).
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.42.0-dev.4
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.43.0-dev.1
     restart: unless-stopped
     environment:
       PORT: "8080"
@@ -43,9 +43,11 @@ services:
       OPENMASJID_BASE_URL: ${OPENMASJID_BASE_URL:-}
       OPENMASJID_APP_ID: ${OPENMASJID_APP_ID:-}
       OPENMASJID_APP_SECRET: ${OPENMASJID_APP_SECRET:-}
-      # Optional install settings (also settable in the admin panel). Delivered the
-      # same way — ${KEY} substitution from the platform-written .env. The secret
-      # key is read server-side only and never sent to the browser.
+      # First-run SEEDS, not install settings — `manifest.yaml` declares no `settings:`
+      # block, so the platform never asks for these and never writes them. They are kept
+      # for an operator running this container by hand, and are read once at first run;
+      # anything saved in the admin panel afterwards wins. The secret key is read
+      # server-side only and never sent to the browser.
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}

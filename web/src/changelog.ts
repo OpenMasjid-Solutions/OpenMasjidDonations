@@ -65,6 +65,7 @@ export const RELEASES: Release[] = [
       'A monthly donor’s stop link is now checked for its shape before anything is looked up, so the automatic scanners that follow links in email cost nothing.',
       '**A full security and code-health review went over the whole app**, including the three features added this month. No new weakness was found. What it did find, and everything still outstanding, is written up in the project’s own `docs/audit/` folder.',
       'Housekeeping with no effect on how the app runs: the project’s documentation was brought back in line with the code after a few months of drift, an old unused logo file was removed, and a page of internal notes that would have told a future contributor to remove a security check was corrected.',
+      'Anything new that lands on the Development channel from here on will be added to this list, and the headline items will become the next release’s notes.',
     ],
   },
   {
