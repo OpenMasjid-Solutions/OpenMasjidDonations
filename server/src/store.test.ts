@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { Store } from './store';
+import { Store, looksLikePlanToken } from './store';
 
 function fresh(): Store {
   return new Store(':memory:');
@@ -395,4 +395,157 @@ test('sweep query: oldest first and bounded, so a backlog drains in arrival orde
   for (let i = 1; i < found.length; i++) {
     assert.ok(found[i - 1].createdAt <= found[i].createdAt, 'ascending by date');
   }
+});
+
+// ── Refunds ───────────────────────────────────────────────────────────────────
+// A refund is recorded as an AMOUNT on the donation, not as a status, so that a part refund can
+// be expressed at all and so the fact that money DID arrive is never lost. Three properties are
+// worth guarding, and nothing else in the repo guards them:
+//
+//  1. Every money figure the masjid (or a donor, via a campaign goal bar) is shown must be NET of
+//     refunds. A refund that left the totals alone would keep counting money that had gone back.
+//  2. setDonationRefund is MONOTONIC and CLAMPED. Two things write to it — an admin's refund and a
+//     `charge.refunded` webhook — and Stripe gives no ordering guarantee, so a replayed event for
+//     the FIRST of two refunds must not put money back into the totals.
+//  3. The COUNTS stay gross. A refunded donation was still a donation that arrived, and the ledger
+//     still lists its row, so deducting it from the count would make the headline disagree.
+
+test('refunds: a donation starts un-refunded', () => {
+  const s = fresh();
+  const d = donation(s, { status: 'succeeded' });
+  assert.equal(d.refundedAmount, 0);
+  assert.equal(d.refundedAt, '');
+  assert.equal(s.getDonation(d.id)!.refundedAmount, 0, 'and survives a DB round-trip');
+});
+
+test('refunds: getDonation finds a row by its own id (the key the panel holds)', () => {
+  const s = fresh();
+  const d = donation(s, { status: 'succeeded' });
+  assert.equal(s.getDonation(d.id)!.paymentIntentId, d.paymentIntentId);
+  assert.equal(s.getDonation('don_nope'), null);
+});
+
+test('refunds: every money figure is net — totals, per-campaign, per-month and the goal bar', () => {
+  const s = fresh();
+  const a = donation(s, { campaignId: 'cmp_1', amount: 5000, status: 'succeeded' });
+  donation(s, { campaignId: 'cmp_1', amount: 3000, status: 'succeeded' });
+  s.setDonationRefund(a.paymentIntentId, 2000, '2026-08-10T00:00:00.000Z');
+
+  assert.equal(s.raisedForCampaign('cmp_1'), 6000, 'the goal bar donors see must not count money that went back');
+  const m = s.metrics();
+  assert.equal(m.totalRaised, 6000);
+  assert.equal(m.totalRefunded, 2000, 'and the difference is reported, never left a mystery');
+  assert.equal(m.refundedCount, 1);
+  assert.equal(m.count, 2, 'both donations still happened');
+  assert.equal(m.byCampaign[0].raised, 6000);
+  assert.equal(m.byCampaign[0].count, 2);
+  assert.equal(m.monthly.reduce((t, r) => t + r.raised, 0), 6000, 'the trend chart is net too');
+});
+
+test('refunds: a fully refunded donation contributes nothing but is still counted and listed', () => {
+  const s = fresh();
+  const d = donation(s, { campaignId: 'cmp_1', amount: 5000, status: 'succeeded' });
+  s.setDonationRefund(d.paymentIntentId, 5000, '2026-08-10T00:00:00.000Z');
+  assert.equal(s.raisedForCampaign('cmp_1'), 0);
+  const m = s.metrics();
+  assert.equal(m.totalRaised, 0);
+  assert.equal(m.count, 1, 'the donation is not erased');
+  assert.equal(s.listDonations().length, 1, 'and the ledger still shows the row');
+});
+
+test('refunds: a pending or failed donation never affects the totals, refunded or not', () => {
+  const s = fresh();
+  const p = donation(s, { amount: 5000, status: 'pending' });
+  s.setDonationRefund(p.paymentIntentId, 5000, '2026-08-10T00:00:00.000Z');
+  assert.equal(s.metrics().totalRaised, 0);
+  assert.equal(s.metrics().totalRefunded, 0, 'money that never arrived cannot be reported as refunded');
+});
+
+test('refunds: the running total only ever RISES — a replayed webhook cannot restore money', () => {
+  const s = fresh();
+  const d = donation(s, { amount: 5000, status: 'succeeded' });
+  s.setDonationRefund(d.paymentIntentId, 1000, '2026-08-01T00:00:00.000Z');
+  s.setDonationRefund(d.paymentIntentId, 4000, '2026-08-02T00:00:00.000Z');
+  // Stripe re-delivers the FIRST refund's event after the second: a smaller running total.
+  const after = s.setDonationRefund(d.paymentIntentId, 1000, '2026-08-03T00:00:00.000Z')!;
+  assert.equal(after.refundedAmount, 4000, 'the lower figure must be ignored');
+  assert.equal(after.refundedAt, '2026-08-02T00:00:00.000Z', 'and a duplicate must not restamp the date');
+  assert.equal(s.metrics().totalRaised, 1000);
+});
+
+test('refunds: the running total is clamped to the amount charged (never negative money raised)', () => {
+  const s = fresh();
+  const d = donation(s, { amount: 5000, status: 'succeeded' });
+  const after = s.setDonationRefund(d.paymentIntentId, 999_999, '2026-08-10T00:00:00.000Z')!;
+  assert.equal(after.refundedAmount, 5000);
+  assert.equal(s.metrics().totalRaised, 0);
+  assert.equal(s.raisedForCampaign(d.campaignId), 0);
+});
+
+test('refunds: an unknown PaymentIntent is a no-op, not a crash', () => {
+  assert.equal(fresh().setDonationRefund('pi_never_existed', 100, '2026-08-10T00:00:00.000Z'), null);
+});
+
+// ── The monthly donor's stop link ─────────────────────────────────────────────
+// The token in that link is the app's only unauthenticated destructive capability, so:
+//
+//  1. It must be STABLE. The letter carrying it is rendered up to three times for one donation (the
+//     donor's confirm, the receipt outbox for up to three days, the lost-donation sweep) and every
+//     render must produce the same URL — a fresh token per render would leave whichever letter
+//     actually arrived pointing at a dead link.
+//  2. It must be UNGUESSABLE and shape-checked before it ever reaches SQLite.
+//  3. A blank subscription id must never mint one, or every one-off donation would collapse onto a
+//     single token.
+
+test('stop link: the same subscription always gets the SAME token', () => {
+  const s = fresh();
+  const a = s.ensurePlanLink('sub_A');
+  assert.ok(looksLikePlanToken(a), `expected 32 hex chars, got ${a}`);
+  assert.equal(s.ensurePlanLink('sub_A'), a, 're-rendering the letter must not re-mint');
+  assert.equal(s.ensurePlanLink('sub_A'), a);
+});
+
+test('stop link: different subscriptions get different tokens, and resolve back correctly', () => {
+  const s = fresh();
+  const a = s.ensurePlanLink('sub_A');
+  const b = s.ensurePlanLink('sub_B');
+  assert.notEqual(a, b);
+  assert.equal(s.planLinkSubscription(a), 'sub_A');
+  assert.equal(s.planLinkSubscription(b), 'sub_B');
+});
+
+test('stop link: a blank subscription id mints nothing', () => {
+  const s = fresh();
+  assert.equal(s.ensurePlanLink(''), '');
+  // …and the table stays empty, so no one-off donation can ever share a link.
+  assert.equal(s.planLinkSubscription('0'.repeat(32)), '');
+});
+
+test('stop link: an unknown or malformed token resolves to nothing, and is refused by shape first', () => {
+  const s = fresh();
+  s.ensurePlanLink('sub_A');
+  for (const bad of ['', 'nope', '0123456789abcdef', 'g'.repeat(32), '0'.repeat(31), '0'.repeat(33), 'ABCDEF0123456789ABCDEF0123456789']) {
+    assert.equal(looksLikePlanToken(bad), false, `${bad} must fail the shape check`);
+    assert.equal(s.planLinkSubscription(bad), '', `${bad} must not resolve`);
+  }
+  assert.equal(s.planLinkSubscription('0'.repeat(32)), '', 'a well-shaped but unknown token resolves to nothing');
+});
+
+test('stop link: tokens are 128 bits of hex and do not repeat', () => {
+  const s = fresh();
+  const seen = new Set<string>();
+  for (let i = 0; i < 200; i++) {
+    const t = s.ensurePlanLink(`sub_${i}`);
+    assert.ok(looksLikePlanToken(t));
+    assert.ok(!seen.has(t), 'a collision would let one donor stop another donor’s gift');
+    seen.add(t);
+  }
+});
+
+test('stop link: the row SURVIVES the plan ending, so an old link reads "already stopped"', () => {
+  // Nothing in the app deletes these rows. A donor clicking a link months later must land on a page
+  // that explains, not a frightening "this link doesn't work".
+  const s = fresh();
+  const t = s.ensurePlanLink('sub_GONE');
+  assert.equal(s.planLinkSubscription(t), 'sub_GONE');
 });

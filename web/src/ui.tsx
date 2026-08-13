@@ -209,9 +209,14 @@ function WhatsNew({ version, onClose }: { version: string; onClose: () => void }
           {releases?.map((r) => (
             <section className="wn-release" key={r.version}>
               <h4 className="wn-version">
-                {r.version}
-                {r.version === version && <span className="status-pill status-pill--ok">You’re on this</span>}
-                <span className="faint wn-date">{releaseDate(r.date)}</span>
+                {/* An unreleased entry says so instead of posing as a version. It only exists on the
+                    Development channel, where the build genuinely is ahead of every release — and a
+                    number here would have a dev box appear to be running one that doesn't exist. */}
+                {r.unreleased ? 'Unreleased' : r.version}
+                {r.unreleased
+                  ? <span className="status-pill">On the Development channel</span>
+                  : r.version === version && <span className="status-pill status-pill--ok">You’re on this</span>}
+                <span className="faint wn-date">{r.unreleased ? 'not released yet' : releaseDate(r.date)}</span>
               </h4>
               <ul className="wn-list">
                 {r.notes.map((n, i) => <li key={i}>{inline(n)}</li>)}

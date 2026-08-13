@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Copyright (C) 2026 OpenMasjid-Solutions -->
+
 <p align="center">
   <img src="assets/Donations - rounded corners.png" alt="OpenMasjidDonations" width="280"/>
 </p>
@@ -90,6 +93,20 @@ The full feature set, as it stands.
 - **Light and dark**, matching the masjid's dashboard, laid out with logical CSS so
   it's ready for right-to-left languages, and it honours "reduce motion".
 
+### Monthly gifts, and stopping them
+
+When someone sets up a monthly donation, they're emailed a confirmation of what they've
+set up — the amount, the fund, the date of the first payment — with **their own link to
+stop the payments whenever they like**. No account, no password, nobody to phone. The
+email asks them to keep it, since that link lives only there; if they lose it, you can
+stop the gift from the **Monthly** tab in a moment, and the email says so too.
+
+You're told (by email or webhook, your choice) whenever a donor uses their link, so a
+stopped gift is never a surprise you find out about a month later. The link is reachable
+from anywhere through the remote-access hostname OpenMasjidOS gives you (see **Built into
+OpenMasjidOS** below). On a masjid network with no public access there's no link to send, so the email
+asks them to get in touch instead, and stopping it stays your job.
+
 ### School fees, if you run a school
 
 A **Tuition** appeal turns the site into a payment desk for
@@ -121,12 +138,12 @@ Eight tabs behind a login, with a bottom dock like the rest of the family:
 | Tab | What's in it |
 |---|---|
 | **Overview** | Total raised · this month (amount and count) · number of donations · live appeals · average gift · a per-appeal breakdown · a 6-month trend |
-| **Campaigns** | Create, edit, reorder, activate/deactivate and delete appeals, with a **live preview** as you type and a thumbnail in the list. Upload images or link them, set the presets, minimum, maximum, goal, monthly option, fee rule, widget, and which Stripe account this appeal pays into |
-| **Donations** | The full ledger. Every transaction has its own reference — click it for a window with the amount, status, appeal, card, whether fees were covered, the donor and the Stripe payment reference, plus **that donor's other gifts and their lifetime total**. **CSV export** |
-| **Monthly** | Every recurring plan: the donor and how to reach them, amount and frequency, which appeal, **what the plan has raised so far**, when it started, the last and next payment, the card and its last four digits, and the status in plain words. **Pause** (nothing is taken while paused, and the missed months are never billed afterwards), **resume**, **stop**, or set an **end date** or **"stop after N more payments"** — it tells you which payment will be the last before you save. Each plan keeps its own **payment history**: every attempt with its date, amount, status, how many tries Stripe made, and why a card was declined, in a sentence rather than a code |
+| **Campaigns** | Create, edit, reorder, activate/deactivate and delete appeals, with a **live preview** as you type and a thumbnail in the list. Upload images or link them, set the presets, minimum, maximum, goal, monthly option, fee rule, widget, and **which Stripe account this appeal pays into** — the same one as the rest of the site, or an account of its own |
+| **Donations** | The full ledger. Every transaction has its own reference — click it for a window with the amount, status, appeal, card, whether fees were covered, the donor and the Stripe payment reference, plus **that donor's other gifts and their lifetime total**. **Refund** a donation from that window — all of it or part of it, with a reason, and optionally an email to the donor telling them it's on its way; refunded rows are marked in the list and come off your totals. **CSV export** |
+| **Monthly** | Every recurring plan: the donor and how to reach them, amount and frequency, which appeal, **what the plan has raised so far**, when it started, the last and next payment, the card and its last four digits, and the status in plain words. Donors also get **their own link to stop the payments**, emailed when the gift is set up — they don't need to ring you, and you're told when one of them uses it. **Pause** (nothing is taken while paused, and the missed months are never billed afterwards), **resume**, **stop**, or set an **end date** or **"stop after N more payments"** — it tells you which payment will be the last before you save. Each plan keeps its own **payment history**: every attempt with its date, amount, status, how many tries Stripe made, and why a card was declined, in a sentence rather than a code |
 | **Thank-you** | Write the on-screen thank-you, and design the emailed receipt — subject, heading, body, accent — with a **"send me a test"** |
 | **Large gifts** | The threshold, your wording, and the QR image for the bank-transfer suggestion |
-| **Payments** | **Several Stripe accounts** (add, edit, test the keys, remove) so Zakat and general funds stay apart, or pick a **vaulted OpenMasjidOS payment account** instead; the currency; a clear **TEST MODE** badge; and the optional per-account webhook with the URL to paste into Stripe |
+| **Payments** | **Several Stripe accounts** — add, edit, test the keys and remove accounts whose keys live on this device, and pick which **vaulted OpenMasjidOS account** is the default for the site. Any appeal can then be pointed at a different one, so Zakat and general funds settle separately; the currency; a clear **TEST MODE** badge; and the optional per-account webhook with the URL to paste into Stripe |
 | **Settings** | **Your masjid** (name, address, email, phone, website, currency) · **Appearance** (light/dark/follow-system, accent, logo, wallpaper, or mirror the dashboard) · **Notifications** · **Email receipts** on/off · **Public access** via a Cloudflare Tunnel |
 
 Plus a **guided first-run setup**, a top-right account menu (theme · settings · sign
@@ -145,10 +162,11 @@ the app, so it works with no internet.
   Payments, fetched server-to-server and never stored here, or paste keys into the app.
 - **Email without credentials.** Receipts go out through the platform's email provider,
   so this app never sees your mail password or From address.
-- **Notifications and alerts.** A relay for "a donation was received", plus three
+- **Notifications and alerts.** A relay for "a donation was received", plus five
   alerts you can route to email or a webhook: **a payment couldn't be started**, **a
-  tuition payment wasn't recorded**, and a **test**. You choose the channel in
-  OpenMasjidOS; this app never sees the address.
+  tuition payment wasn't recorded**, **a donation was refunded**, **a monthly donation
+  was stopped by the donor**, and a **test**. You choose the channel in OpenMasjidOS;
+  this app never sees the address.
 - **Public access without port-forwarding**, through the platform's Cloudflare Tunnel
   on a single hostname, or the app's own tunnel when standalone. Share links, QR codes
   and the Stripe webhook URL then use your public domain automatically.
@@ -166,7 +184,10 @@ the app, so it works with no internet.
 - **Nothing is lost to a temporary failure.** Receipts and tuition records that don't
   go through the first time are retried in the background.
 - **An activity record** of things worth checking later: who exported the donor list,
-  who paused or stopped a monthly plan, who changed the Stripe keys, and when.
+  who refunded a donation, who paused or stopped a monthly plan, who changed the Stripe
+  keys, and when.
+- **A refund made in Stripe's own dashboard finds its way here** too, so your totals
+  never go on counting money that has already gone back.
 - **No inbound connection needed.** Payments are confirmed by asking Stripe directly,
   outbound, so one-time giving works on a masjid network with no public access at all.
   Webhooks are an optional extra, never a requirement.
@@ -194,8 +215,9 @@ the app, so it works with no internet.
   at different content.
 - The admin password is stored as a **scrypt hash**; sessions are signed, HTTP-only,
   SameSite cookies that become `Secure` over HTTPS.
-- A full [security and code-health audit](docs/audit/) was carried out on 2026-08-03;
-  its report, remediation notes and findings are in the repo.
+- Full [security and code-health audits](docs/audit/) were carried out on 2026-08-03 and
+  2026-08-13 — the reports, the remediation notes, what was fixed and what is still open
+  are all in the repo rather than in someone's head.
 
 ---
 
@@ -349,7 +371,8 @@ docker build -t openmasjiddonations:dev .               # the whole container
 | [`docs/REMOTE_ACCESS_INGRESS.md`](docs/REMOTE_ACCESS_INGRESS.md) | Public access, tunnels and base paths |
 | [`docs/STUDENTS_INTEGRATION.md`](docs/STUDENTS_INTEGRATION.md) | The tuition flow and the billing contract |
 | [`docs/RESTORE_SSO_FIX.md`](docs/RESTORE_SSO_FIX.md) | Recovering admin access after a restore |
-| [`docs/audit/`](docs/audit/) | The 2026-08-03 security and code-health audit |
+| [`docs/audit/`](docs/audit/) | The security and code-health audits, and what's still open |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Setting up, building, testing, and the ground rules |
 
 This is an OpenMasjidOS **app**; the platform that runs it lives in
 [OpenMasjidOS](https://github.com/OpenMasjid-Solutions/OpenMasjidOS), and apps are listed in

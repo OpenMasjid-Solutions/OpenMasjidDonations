@@ -176,11 +176,6 @@ export async function studentsInfo(force = false): Promise<InfoResult> {
   return value;
 }
 
-/** Last cached info without a network call — for cheap sync paths. */
-export function cachedStudentsInfo(): InfoResult {
-  return infoCache?.value ?? { available: false };
-}
-
 // ── identify (Student ID → whose it is) ─────────────────────────────────────
 // Step 1 of the v2 flow and NOT optional: it is the confirmation that replaced the PIN
 // (§11.0). Deliberately thin — a first name + last initial and nothing else: no balance, no

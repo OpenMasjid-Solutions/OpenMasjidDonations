@@ -250,6 +250,28 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
         </div>
       )}
 
+      {/* This page can't take a card. Until now `ready: false` only greyed the button out, so a
+          supporter met a dead page with nothing said and no idea whether it was them. One sentence,
+          and never a word about Stripe, accounts or configuration — none of that is theirs to fix.
+          `unreachable` is genuinely temporary, so it says so; the others are not, so they don't. */}
+      {!campaign.ready && (
+        <p className="donate-note" role="status">
+          <ShieldCheck size={14} aria-hidden="true" />
+          {campaign.readyReason === 'unreachable'
+            ? 'We can’t take card donations for a moment — please try again shortly, or contact the masjid to give another way.'
+            : 'Donations aren’t set up for this page yet — please check back soon, or contact the masjid to give another way.'}
+        </p>
+      )}
+
+      {/* CLAUDE.md §6 asks for a clear TEST MODE badge whenever test keys are in use. It matters most
+          here: a test page looks exactly like the real one and takes no money at all. */}
+      {campaign.ready && campaign.testMode && (
+        <p className="donate-note" role="status">
+          <ShieldCheck size={14} aria-hidden="true" />
+          <b>TEST MODE</b> — no real payment will be taken on this page.
+        </p>
+      )}
+
       <form onSubmit={submit}>
         {campaign.allowMonthly && (
           <div className="freq-toggle" role="group" aria-label="How often to give">
@@ -474,6 +496,16 @@ function ThankYou({ result, campaign }: { result: ConfirmResponse; campaign: Pub
         <>
           <p className="donate-desc">{message}</p>
           {result.recurring && <p className="donate-desc"><b>This is a monthly donation</b> — it'll repeat automatically until you cancel.</p>}
+          {/* Careful wording: ConfirmResponse carries no "was the email sent" signal (the send is
+              fire-and-forget with a retry outbox behind it), so this must not promise delivery —
+              and it names the fallback in the same breath, so a donor whose email never arrives
+              still knows exactly what to do. */}
+          {result.recurring && (
+            <p className="donate-desc muted">
+              Keep an eye out for our email: it has everything about the gift, and a link you can use to stop the payments
+              yourself at any time. If it doesn’t arrive, just contact us and we’ll stop them for you whenever you ask.
+            </p>
+          )}
         </>
       ) : result.status === 'processing' ? (
         <p className="donate-desc">Your payment is processing. You’ll receive confirmation shortly, in shā’ Allah.</p>

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Copyright (C) 2026 OpenMasjid-Solutions -->
+
 # Architecture & decisions — OpenMasjid Donations
 
 This records the non-obvious decisions. The reference template is
@@ -67,17 +70,19 @@ must not be renamed.
   with the app secret and `{text, title?, level?}` — e.g. "A new donation of £50 was
   received." Never sees the webhook URL; fails soft.
 
-## Stripe (later slices)
+## Stripe — the two rules everything else hangs off
 
 - One-time donations must work with **no inbound webhook** (a masjid box is usually
   LAN-only): the server creates a PaymentIntent, the client confirms with the
   Payment Element, and on the donor's return the server **retrieves** the
   PaymentIntent to verify `succeeded` before recording it. Webhooks are an optional
-  enhancement (recurring `invoice.paid`, resilience) for when the app is public.
+  enhancement (recurring `invoice.paid`, refunds made in Stripe's dashboard,
+  resilience) for when the app is public — never a requirement. The renewal
+  reconciliation and the lost-donation sweep exist because of this rule.
 - The **secret key is server-side only** — never sent to the browser, never logged,
   never committed. The browser sees only the publishable key.
 
-## Build order (vertical slices)
+## Build order (vertical slices) — the original plan, all shipped
 
 1. **Scaffold**: boots, themed shell, `/healthz`. ✅
 2. **Platform SSO + theme + local-password fallback** (Fabric: SSO, notifications, appearance). ✅
@@ -97,9 +102,12 @@ must not be renamed.
    month, average gift, per-appeal breakdown, 6-month trend). ✅
 9. Cloudflare Tunnel helper (bundled `cloudflared`, in-app token, supervised) for
    public access — no port-forwarding. ✅
-9. Appearance/theming polish, animations, friendly errors.
-10. README/screenshots/docs; tag `v0.1.0`; add the `registry.yaml` entry to
-    OpenMasjidAPPS (move `donations` out of `coming_soon`).
+10. Appearance/theming polish, animations, friendly errors. ✅
+11. README/screenshots/docs; tag `v0.1.0`; add the `registry.yaml` entry to
+    OpenMasjidAPPS (move `donations` out of `coming_soon`). ✅
+
+Everything after this list — tuition, alerts, email receipts, monthly plan management,
+refunds, the donor stop link, per-appeal accounts — has its own section below, newest last.
 
 ## OpenMasjidOS Fabric: SSO, Stripe vault & restore resilience (v0.16.0)
 
@@ -112,13 +120,14 @@ optional — the app works fully standalone.
   distinguishes "not signed in" from "platform unreachable" so the panel can offer the
   local-password recovery instead of looping.
 - **Stripe via the Fabric** (`stripe: true`): keys are configured **once** in OpenMasjidOS
-  and fetched per-app with `fetchFabricStripe()` (the `STRIPE_ACCOUNT` setting names which
-  vaulted account). They are cached **in memory only, never written to the data volume**, so
-  they always track the OS vault — including after a restore onto a new machine. The
-  resolvers `effectiveAccountFor()` (charging) and `accountById()` (webhook) prefer the
-  Fabric account **only when it is fully configured**, otherwise fall back to locally-entered
-  keys. Confirm-on-return resolves the account by the donation's **recorded** account id, so
-  a config/reachability change between intent and confirm can't strand a succeeded payment.
+  and fetched per-app with `fetchFabricStripe()`. They are cached **in memory only, never written to
+  the data volume**, so they always track the OS vault — including after a restore onto a new
+  machine. `resolveAccountFor()` (charging) honours an appeal's own account choice and otherwise
+  prefers the vault account **only when it is fully configured**, falling back to locally-entered
+  keys; `accountById()` (confirm, refunds, plans, webhook) resolves by the **recorded** account id,
+  so a config or reachability change between intent and confirm can't strand a succeeded payment,
+  and money taken on one account is never acted on with another's keys. See *Per-appeal Stripe
+  accounts* below.
 - **Restore/migration resilience** (required of every Fabric app): `OPENMASJID_BASE_URL` and
   `OPENMASJID_APP_SECRET` are read from env every start and never persisted; every Fabric
   call fails soft (short timeout, `redirect:'error'`); and **local setup can never be
@@ -271,9 +280,10 @@ credentials or the From address.
   inject markup; images are embedded only from an http(s) URL (an uploaded `/uploads/…` header image is
   resolved to the Fabric public URL, and dropped when the app isn't publicly reachable). Sent
   non-blocking on the donation's first success (the donor's thank-you isn't delayed). **Receipt
-  strategy:** Stripe's own `receipt_email` is suppressed **only** when our email is enabled *and*
-  confirmed working (`emailStatus()==='ok'`), so a donor never ends up with zero receipts — until email
-  is proven working, Stripe's receipt stays as the fallback; the state is self-correcting per donation.
+  strategy:** Stripe's own `receipt_email` is suppressed only when our email is enabled *and* we hold
+  no positive evidence that OpenMasjidOS email is unavailable (`emailLikelyAvailable()` — false only
+  for `not_configured` / `no-fabric`, and persisted to the data volume via `store.setEmailStatus` so a
+  restart doesn't forget). See *The receipt gate was a closed loop* below for why it is that way round.
   There's no OS "is email configured?" endpoint, so the admin UI shows the last send/test outcome and a
   **"send test"** button (admin-only) rather than probing.
 - **Admin alerts (`alerts:`).** Declared ids: **`payment-failed`** (Stripe rejected a payment *setup* —
@@ -487,3 +497,361 @@ payment or end date, `live: false`, `stripeReachable: false` and a warm inline n
 stack trace, never an empty screen. The manage actions are the only things that genuinely
 can't work offline, and they say so. Nothing secret leaves the server: no keys, no webhook
 secret, no Stripe customer id.
+
+## Refunds: an amount on the donation, with Stripe as the truth (v0.42.0)
+
+An admin can send a donation back from the **Donations** tab — all of it or part of it — with a
+reason, and optionally an email to the donor. `POST /api/admin/donations/:id/refund`.
+
+### A refund is an amount, not a status
+
+`donations.status` stays the *payment's* outcome. A refund is recorded as
+`refunded_amount` (a running total in minor units) plus `refunded_at`. Rewriting the status to
+`'refunded'` was rejected twice over: it would lose the fact that the money really did arrive, and
+it cannot express a part refund at all.
+
+Everything the masjid — or a donor, via a campaign goal bar — is shown as money is therefore
+`amount - refunded_amount`: `raisedForCampaign`, all three `metrics()` figures, the donations-tab
+total, and a monthly plan's "collected so far". The **counts stay gross**: a refunded donation was
+still a donation that arrived, and the ledger still lists its row, so deducting it from the count
+would make the headline disagree with the list underneath it. `metrics()` reports `totalRefunded`
+and `refundedCount` separately, and the Overview tile says "after £X refunded", so a total that
+went down is explained on the same screen.
+
+### How much is left to refund is Stripe's fact, not ours
+
+Our `refunded_amount` is a *cache* of a fact about the Stripe charge, and it can go stale without
+this app being involved at all: a masjid can refund straight from Stripe's dashboard, and a
+LAN-only box may never receive the webhook that would have told it. So the route:
+
+1. reads the charge (`fetchChargeRefundState` → `amount_captured`, `amount_refunded`);
+2. writes back anything Stripe knows that we don't — **this is also the repair path** for a
+   dashboard refund, reached simply by opening the donation;
+3. computes what is left from Stripe's figures and validates the request against that;
+4. refunds, and only then records — `'failed'`/`'canceled'` are reported to the admin as failures
+   rather than quietly booked.
+
+`setDonationRefund` is **monotonic and clamped**: it only ever rises, and never past the amount
+charged. Both properties are load-bearing, because two things write to it (the route and the
+webhook) and Stripe gives no ordering guarantee — a replayed event for the *first* of two refunds
+would otherwise put money back into the totals.
+
+The **idempotency key is derived, not random**: `refund:<pi>:<already refunded>:<amount>`. A
+double-clicked button sends the money back once; a genuine second part refund of the same size has
+a different "already refunded" figure, so it is a different key and goes through.
+
+One residual race is accepted knowingly: two admins refunding *different* part amounts of the same
+donation in the same second read the same "already refunded" figure, so both are accepted at Stripe
+(correctly — the two refunds are genuinely different) but the second store write reports only its
+own share. Stripe is still right, and both repair paths above — the next open of that donation, and
+`charge.refunded` — correct our copy. Closing it properly would mean a second charge read on every
+refund, which is not worth paying for a two-admin, same-second, different-amount collision.
+
+### Three-decimal currencies
+
+KWD/BHD/JOD/OMR/TND are quoted in thousandths and Stripe requires a multiple of ten, so a *typed*
+part refund is snapped to the nearest 10 and then re-checked against the balance (snapping up must
+never overshoot). A *full* refund needs no snapping — it is exactly what was charged, which already
+satisfied the rule. This is the same trap as DONATIONS-001 on the charge side; `refunds.test.ts`
+locks it.
+
+### Who gets told
+
+- **The donor**, only if the admin ticks the box and they left an address:
+  `renderRefundNotice` → Fabric email. Deliberately **not** admin-editable (it is a factual notice
+  about somebody's money, and it is the wording most likely to worry them if got wrong) but it
+  carries the masjid's logo, accent and contact details. One attempt, no outbox — a refund notice
+  arriving silently three days late is worse than none — and the panel says plainly whether it went.
+- **The masjid**, via the declared `donation-refunded` **alert**, not `notify()`. An alert is the
+  only channel that can reach the admin's own email (the platform owns the address) and
+  OpenMasjidOS → Settings → Alerts lets them route it to email, webhook, both or off; `notify()`
+  would post to the same webhook a second time with no email and no off switch. It fires even
+  though an admin is standing at the screen, on purpose: a masjid's panel is shared, and "money
+  left the account, and who sent it back" is exactly what a treasurer should hear without having
+  been the one who pressed it.
+- **The audit log** gets `donation.refund` with the actor and the donation id — and no amount, per
+  the rule the `audit_log` DDL sets out; the row it names carries the figures.
+
+### The webhook half
+
+`charge.refunded` is handled in the existing optional per-account webhook, which is how a refund
+made in the masjid's own Stripe dashboard reaches the ledger. `amount_refunded` is the charge's
+running total, which is exactly what the store wants, and the alert fires **only when the figure
+actually moved** — that is what stops a panel refund being announced twice. The donor is
+deliberately *not* emailed from this path: Stripe sends its own notification for a dashboard
+refund, and a second letter from us would confuse them.
+
+A failed refund arriving later as `charge.refund.updated` is **not** handled: card refunds
+effectively do not fail after acceptance, and un-recording money is the one direction the monotonic
+guard forbids. If it ever matters it needs its own deliberate change, not a widened guard.
+
+### Tuition
+
+`/api/admin/donations/:id/refund` refuses a `tuition` campaign outright. A tuition payment
+lives in `student_payments` and never in `donations` (§13 route isolation), so no such row should
+exist — but refunding one from this side would leave the school's ledger claiming it was paid.
+
+## The monthly donor's own stop link (v0.42.0)
+
+A donor who sets up a monthly gift is emailed a letter confirming it, carrying a link to
+`https://<public>/stop/<token>` where they can stop the payments themselves — no sign-in, nobody to
+phone. This is the app's **only unauthenticated destructive capability**, so most of the design is
+about keeping it narrow.
+
+### The letter
+
+Sent when the FIRST payment succeeds, never at intent — an abandoned monthly checkout leaves a
+`donations` row behind (that is what `isAbandonedSeed` exists for) and must not be written to.
+
+It reuses the existing receipt lifecycle rather than inventing a second one: `receipt = 'pending'`
+means "we owe this donor a letter", and `sendDonationReceipt` picks WHICH letter from the row's own
+`recurring` flag — the monthly setup letter, or the plain receipt. So the retry outbox, the
+lost-donation sweep and the `sent`/`skipped` states all work unchanged, there is exactly one owed
+letter per donation, and no new double-send hole. `recurring` is immutable on the row, so every
+render (confirm, outbox three days later, sweep) picks the same letter.
+
+**No admin toggle, deliberately.** Not the receipt toggle (off by default — the donor's only exit
+would be off by default), and not a new one, whose honest label would be "don't tell monthly donors
+how to stop". A payer who cannot stop a card mandate rings their bank instead, and on a shared
+Fabric Stripe account that chargeback lands on the whole platform. The admin's control surface is
+the letter's branding and the panel's own Stop button.
+
+**The email-availability gate is skipped for monthly.** It exists to avoid suppressing Stripe's own
+receipt in favour of one we cannot deliver; on the monthly branch there is nothing to suppress,
+because `createSubscription` never sets `receipt_email`. So trying costs the donor nothing even when
+we believe email is down, and the outbox keeps trying for three days.
+
+Everything in the letter is a LOCAL fact (amount, first-payment date, fund, reference), so the
+outbox can re-render it three days later without a Stripe call. Card details and the next payment
+date are deliberately absent for that reason.
+
+### The token
+
+32 lowercase hex characters (128 bits), in `plan_links(token PRIMARY KEY, subscription_id NOT NULL
+UNIQUE CHECK(length > 0), created_at)`. Hex rather than base64url because mail clients mangle case
+and `-_`; the entropy is the defence, because a per-peer rate limit cannot be (behind the platform's
+ingress every remote donor shares one bucket — DONATIONS-009).
+
+Stored **plaintext**. Hashing would mean the letter could never be rendered twice, and it is rendered
+up to three times for one donation — so a hash would either mail no link or re-mint one and silently
+kill the link already in the donor's inbox. It would also buy little: the session secret lives in the
+same file and mints admin session cookies, so anyone who can read this table can already reach the
+panel's own Stop button. `ensurePlanLink` is get-or-create for the same reason, and a token is minted
+only when there is a public URL to put it in.
+
+Rows are **kept after a plan ends**, so an old link reads "these payments have already stopped"
+rather than a frightening "this link doesn't work". A stale forwarded token is harmless precisely
+because stopping is all it can ever do.
+
+### The two routes, and five things that must not change
+
+`POST /api/public/plan/lookup` and `POST /api/public/plan/cancel`, token in the **body**:
+
+1. **Never `syncPlan`.** It lists invoices and INSERTs donation rows, and its only guard
+   (`ownPageFetch`, a `Sec-Fetch-Site` check) is structurally unusable for a link in an email — a
+   corporate mail scanner's prefetch would otherwise drive writes against the masjid's Stripe
+   account. Use `fetchPlanState` alone: one subscription read, no invoices, no reconciliation, no
+   cache write. (Cancel *deletes* the `planCache` entry, so the admin's Monthly tab doesn't show
+   "Active" for 60 seconds after a donor stops.)
+2. **Resolve through the local recurring index** (`findSeed(planSeeds(), …)`), exactly as the admin
+   write routes do — the v0.38.0 invariant, now covering a fifth writer. `getDonationBySubscription`
+   is not good enough: it lacks the `recurring = 1 AND subscription_id <> ''` filter.
+3. **POST only, token in the body.** A GET that mutates is fired by every link-preview bot that
+   touches the email; keeping the token out of the API URL also keeps it out of access logs. The
+   page URL itself is unavoidably in the masjid's own Cloudflare logs — which is why the token
+   authorises so little. `referrer-policy: no-referrer` (already global) stops it leaking onward.
+4. **Every failure is the same 404** — unknown token, malformed token, no local row, a tuition
+   campaign — so nothing is an oracle. Both routes are `no-store, private`.
+5. **A fixed audit actor.** `audit(req, …)` reads the admin session and falls back to
+   `local admin`, which would file a donor's cancellation as the masjid's own action in the one log
+   they trust. It writes `store.recordAudit` with `'the donor, from their email link'`, and a
+   `plan-stopped` alert — for an unauthenticated destructive write with no undo, the masjid hearing
+   about it *is* the compensating control.
+
+Cancel is **idempotent**: a finished plan is a success, not an error. Stripe refuses to cancel a
+canceled subscription and `cancelPlan` would report that as "we couldn't reach Stripe" — which a
+donor double-clicking would hit every time.
+
+### What the donor is told
+
+Amount, frequency, fund, reference, next payment (omitted, never guessed, when unknown), status,
+and the masjid's name/logo/contact details. **Never** the donor's name or email, the card, any
+Stripe or internal id, or any payment history — the token can be forwarded, sit in a shared family
+inbox, or be pasted into a support ticket.
+
+### When there is no public URL
+
+The letter still goes, with no link and the "get in touch and we'll stop it for you" wording —
+mirroring `resolveEmailImage`, which omits rather than fabricates a host. Never a LAN URL. On a
+LAN-only box (the default posture) the panel is the real cancel mechanism; on a standalone non-SSO
+box no letter is sent at all, because `fabricEmail` goes through the platform. `publicBaseUrl()`
+also refuses the app's OWN tunnel hostname under SSO, where that tunnel is force-stopped at boot but
+its stored `enabled` flag stays true — a link to a host nothing is listening on is worse than none,
+and worst of all in an email to a stranger.
+
+### Routing
+
+`/stop/<token>` is two segments, and `parseCampaignPath` is anchored to one — so it can never be
+mistaken for a campaign, and `stop` is deliberately **not** added to `RESERVED_SLUGS`. Reserving it
+would buy only the bare `/stop` and would pay for it with `migrateCampaignSlugs` silently renaming
+any existing campaign slugged `stop` on the next boot, breaking a link a masjid may have printed. A
+bare or truncated `/stop` gets its own "this link looks incomplete" page, and the not-yet-onboarded
+redirect to `/admin` explicitly excludes it — that `location.replace` would destroy the only copy of
+the token. The page is its own lazy chunk (~8.7 kB, no Stripe.js).
+
+## Per-appeal Stripe accounts (v0.42.0)
+
+A masjid may hold several Stripe accounts — some vaulted in OpenMasjidOS (set up once in the
+dashboard, shared with its other apps), some with keys on this device — and each appeal may name the
+one its money goes into. A Zakat page can settle into a separate account from the general fund.
+
+Before this, a vaulted account **shadowed every campaign**: `effectiveAccountFor` returned the one
+globally-chosen vault account whenever it was configured, and `campaigns.stripe_account_id` was
+ignored entirely on an embedded install. Per-campaign accounts existed only standalone.
+
+### The migration rule
+
+**An existing appeal's destination is a function only of data that existed before the upgrade.**
+
+`campaigns.payment_account` defaults to `''`, there is **no backfill and no inference** from
+`stripe_account_id`, and the `''` branch of the resolver is the old code path verbatim — the
+globally-chosen vault account when `stripeConfigured`, else `store.getStripeAccount(c.stripeAccountId)`
+read straight from the local table. Not through the widened `accountById`: a bare vault slug left in
+`stripe_account_id` by an old create would otherwise start charging an account the admin never chose.
+
+So an unattended overnight update cannot move anybody's money, and a masjid that wants per-appeal
+accounts opts in per appeal. `accounts.test.ts` locks the storage half of this; the resolver's
+default branch is a byte-for-byte copy of what it replaced.
+
+### Namespacing
+
+`''` | `fabric:<vault-slug>` | `local:<local-id>`. Vault ids are the platform's `slugify()` output
+(lowercase, `[a-z0-9-]`, no underscore); local ids are `acct_<hex>`. **Provably disjoint on the
+underscore**, which is what makes it safe for `accountById` to try the local table first.
+
+Ids, never labels. The platform matches a label too, so a label would appear to work right up until
+the admin renamed the account — and would also multiply the cache keys.
+
+Anything that does not parse EXACTLY is `invalid`, and invalid **refuses**. That is not pedantry:
+`fabric:` with an empty id would reach the platform as `?account=` omitted, which it answers with its
+**first** account — so a Zakat appeal would quietly settle into the general fund and the ledger would
+record the general fund's id, leaving nothing that looked wrong.
+
+### Refuse, never substitute
+
+An explicit choice is honoured or the appeal stops taking cards. It never falls back to the site
+default, to another vault account, or to a local one. An admin who points Zakat at its own account
+has made a statement about where that money must go; settling it elsewhere is worse than not taking
+it. The three refusal causes are distinguished all the way to the surface — `no-account`,
+`not-configured`, `unreachable` — because "try again in a minute" and "this account is gone" need
+different words.
+
+**A refusal is loud in three places**, or it would be an invisible 100% outage on one appeal:
+
+- the donor sees a sentence (never "Stripe", never "account" — none of it is theirs to fix);
+- the Campaigns list shows a **Not taking donations** pill with the cause, and the form explains it
+  next to the picker, including the clause that answers the admin's real fear: *we won't quietly send
+  the money to a different account instead*;
+- the first refused intent per campaign per day fires the `payment-failed` alert.
+
+### The two resolvers, and why they differ
+
+| | reads | may it be re-pointed? |
+|---|---|---|
+| `resolveAccountFor(campaign)` | the appeal's current choice | yes — it decides where NEW money goes |
+| `accountById(bareId)` | the id recorded on the row | **never** |
+
+Money taken on account A is confirmed, refunded and cancelled on account A for ever, even after the
+appeal moves to B. That asymmetry is what makes the feature safe, and it is why the confirm route
+keeps resolving by the recorded id even though it has the Campaign in hand.
+
+`accountById` is **bounded by a known-id set** (`store.knownAccountIds()`): the accounts campaigns
+point at, the accounts money was taken on, and the site default. An unknown id returns `null` with
+**no network call**. This is a security property, not an optimisation — `/api/stripe/webhook/:accountId`
+is unauthenticated by necessity, so without the bound a stranger could name arbitrary accounts and
+have us fetch each from the platform vault: an amplifier against the platform, and a way to flush the
+in-memory keys that keep donations working through a blip.
+
+It still keeps the old `fab.id === id` comparison as a last step, for rows written when the vault
+reported the literal id `'fabric'`. The platform 404s that name, so those rows resolve only through
+the globally-chosen account.
+
+### Vault key caching
+
+`fetchFabricStripe`'s cache is keyed **per account**. It was a single slot with the account name
+stored alongside — correct, but two appeals on two accounts would evict each other on every donation,
+including the last-good copy that exists precisely so a platform blip cannot stop donations.
+
+The non-ok branch is **split by status**, and this is a precondition for "refuse rather than fall
+back" being safe rather than fragile:
+
+- **404 / 403** — the platform has answered: no such account. Cache it. (This is also how an account
+  the admin deleted in the dashboard comes back as "nothing" rather than as somebody else's keys —
+  the platform does not substitute its default for an unknown id.)
+- **429 / 5xx / transport** — it has told us *nothing*. Don't cache, serve the last good copy. The
+  Fabric rate limit is shared with every other app on the box, so negative-caching a 429 would turn
+  one throttled request into a 60-second donation outage.
+
+`fabricConfigSignature` therefore reports `reachable: false` when the lookup was non-authoritative.
+Without that, a Fabric throttling storm would blank the fingerprint while the reachability probe
+(which hits an unthrottled route) said "up" — and the watcher would restart a box in the middle of
+taking live donations, repeatedly.
+
+No vault account may **ever** be written into `stripe_accounts`. `accountById` is local-first, so a
+stale copy would permanently shadow the real vault account and survive a restore.
+
+### Deleting an account
+
+Blocked when any campaign depends on it through **either** column, and blocked outright when
+`donations` or `student_payments` reference it. The second guard is the important one: deleting an
+account money was taken on would strand every refund and leave a monthly plan that neither the admin
+nor the donor could ever stop — a card mandate nobody can cancel is a chargeback, and on a shared
+vault account that lands on the whole platform.
+
+### Known limitations
+
+- **One currency.** `cur()` is charged on every account; an account that cannot accept it fails
+  loudly at Stripe. Per-account currency is not built.
+- **One webhook endpoint per account.** A masjid using two accounts registers the optional webhook
+  twice (`/api/stripe/webhook/<id>` each). Webhooks remain optional — the retrieve-on-return and
+  reconciliation paths do not need them.
+- **Rename a vault account; never delete and re-add it.** The platform frees the slug on delete and
+  re-derives it on create, so a re-added account with the same name silently re-points an appeal's
+  reference at new keys with no 404 to notice.
+- **Test-mode money is counted in the totals**, with the appeal badged `TEST` and the donor shown a
+  `TEST MODE` notice. Excluding it would make the headline fall with no explanation.
+
+## The receipt gate was a closed loop (v0.42.0)
+
+A donation records, **once at intent**, which receipt it is owed:
+
+| `donations.receipt` | meaning |
+|---|---|
+| `stripe` | Stripe sends its own built-in receipt; we send nothing. |
+| `pending` | Stripe's receipt was suppressed; **we** owe a branded one (the outbox retries for 3 days). |
+| `sent` / `skipped` | delivered, or permanently un-sendable (no/invalid address, recipient rejected). |
+
+Deciding once is the point: re-evaluating at confirm was the original double/zero-receipt bug, because
+the answer could differ from the one that decided whether to suppress Stripe's.
+
+Going `pending` means switching off the receipt the donor would otherwise certainly have got, so it
+needs a reason to believe we can deliver our own. That gate used to be `emailStatus() === 'ok'` — and
+`'ok'` is set in exactly one place, inside `fabricEmail`, which is reached only when a donation
+already owes a letter, which required `'ok'`. **A closed loop.** On any fresh container the branded
+receipt (shipped in v0.29.0) could therefore never be sent at all, and a restart re-closed it —
+including the restart the app performs on itself when remote access changes in OpenMasjidOS.
+
+The gate is now `emailLikelyAvailable()`: true unless we hold **positive** evidence that email cannot
+work — the platform answered `not_configured`, or there is no Fabric. Everything else (never tried, a
+timeout, a 500, a rate limit) is "we don't know", and the honest response to not knowing is to try.
+The status is persisted (`store.getEmailStatus` / `setEmailStatus`, mirrored from `fabric.ts` through
+a small sink) so the negative survives a restart.
+
+**The failure this direction is bounded and self-healing.** If email really is unconfigured, the first
+donation after the admin turns receipts on loses its receipt — we suppressed Stripe's, ours failed —
+the platform tells us `not_configured`, that is written down, and every donation after it falls back
+to Stripe's own receipt. One donation, once, against every donation, for ever.
+
+Do not tighten this back to "a previous send succeeded". If a cheap authoritative "is email set up?"
+probe ever appears on the Fabric, that is the right way to close the remaining gap; a success
+requirement is not.

@@ -150,6 +150,12 @@ export interface ThankYou {
 /** Required campaign type — drives the card-fee rule (see forceCoverFees). */
 export type CampaignType = 'donation' | 'zakat' | 'tuition';
 
+/** Where an appeal's money goes. 'default' = the same account as the rest of the site;
+ *  'openmasjidos' = an account vaulted in the dashboard; 'device' = keys held on this box. */
+export type PaymentAccountSource = 'default' | 'openmasjidos' | 'device';
+/** '' = fine. Anything else means this appeal is currently refusing donations. */
+export type PaymentAccountStatus = 'ok' | 'no-account' | 'not-configured' | 'unreachable';
+
 export interface Campaign {
   id: string;
   slug: string;
@@ -164,7 +170,15 @@ export interface Campaign {
   allowCustom: boolean;
   minAmount: number;
   maxAmount: number;
+  /** LEGACY — the account bound at creation. Kept for older clients; not what the server reads. */
   stripeAccountId: string;
+  /** '' = follow the site default, else 'fabric:<vault-id>' / 'local:<account-id>'. */
+  paymentAccount: string;
+  paymentAccountSource: PaymentAccountSource;
+  /** The account's own name, or '' when it couldn't be resolved (never invented). */
+  paymentAccountLabel: string;
+  paymentAccountMode: StripeMode;
+  paymentAccountStatus: PaymentAccountStatus;
   coverFees: boolean;
   /** Fee is mandatory (Zakat, or a Tuition the admin set to require it). */
   forceCoverFees: boolean;
@@ -182,7 +196,13 @@ export interface Campaign {
   currency: string;
   url: string;
 }
-export type CampaignInput = Partial<Omit<Campaign, 'id' | 'token' | 'createdAt' | 'raised' | 'currency' | 'url' | 'sortOrder'>>;
+export type CampaignInput = Partial<
+  Omit<
+    Campaign,
+    'id' | 'token' | 'createdAt' | 'raised' | 'currency' | 'url' | 'sortOrder'
+    | 'paymentAccountSource' | 'paymentAccountLabel' | 'paymentAccountMode' | 'paymentAccountStatus'
+  >
+>;
 
 export interface Donation {
   id: string;
@@ -202,11 +222,43 @@ export interface Donation {
   cardLast4: string;
   recurring: boolean;
   createdAt: string;
+  /** How much of this donation has been given back (major units). 0 = none. */
+  refundedAmount: number;
+  /** ISO timestamp of the most recent refund, '' when none. */
+  refundedAt: string;
+  /** How the row should read: nothing refunded, part of it, or all of it. Derived on the
+   *  server so the list, the detail window, the CSV and the alerts all agree. */
+  refundState: RefundState;
+  /** What is left to refund by OUR records (major units) — pre-fills the amount field and
+   *  hides the button at zero. The server re-checks against Stripe before refunding, since a
+   *  refund made in the Stripe dashboard may not have reached us yet. */
+  refundable: number;
 }
 export interface DonationsResult {
   donations: Donation[];
-  stats: { totalRaised: number; count: number; currency: string };
+  stats: { totalRaised: number; count: number; totalRefunded: number; currency: string };
 }
+
+// ── Refunds ─────────────────────────────────────────────────────────────────
+export type RefundState = 'none' | 'partial' | 'full';
+/** Stripe's three reasons, the only ones its API accepts. 'fraudulent' also marks the charge as
+ *  fraud in Stripe (it feeds Radar), so it is never the default. */
+export type RefundReason = 'requested_by_customer' | 'duplicate' | 'fraudulent';
+export interface RefundResult {
+  donation: Donation;
+  /** What went back on THIS refund (major units) — not the running total. */
+  refunded: number;
+  currency: string;
+  /** Stripe accepted it but hasn't settled it yet — normal for some payment methods. */
+  pending: boolean;
+  donorEmailed: boolean;
+  /** Why the donor wasn't emailed: 'not-asked' | 'no-email' | 'no-fabric' | a provider reason. */
+  donorEmailReason: string;
+}
+/** Refund a donation. `amount` omitted = everything left on it. `notifyDonor` emails the donor a
+ *  branded refund notice (only possible when they gave an address and OS email is set up). */
+export const refundDonation = (id: string, body: { amount?: number; reason?: RefundReason; notifyDonor?: boolean }) =>
+  request<RefundResult>(`/api/admin/donations/${encodeURIComponent(id)}/refund`, { method: 'POST', body: JSON.stringify(body) });
 
 export interface CampaignMetric {
   id: string;
@@ -225,8 +277,13 @@ export interface MonthMetric {
 }
 export interface Metrics {
   currency: string;
+  /** Net of refunds, like every `raised` figure. */
   totalRaised: number;
   count: number;
+  /** How much has gone back to donors, and on how many donations. Reported alongside the totals
+   *  so a figure that dropped is explained on the same screen. */
+  totalRefunded: number;
+  refundedCount: number;
   average: number;
   thisMonthRaised: number;
   thisMonthCount: number;
@@ -462,6 +519,12 @@ export interface PublicCampaign {
   students?: { available: boolean; schoolName: string; tagline: string; allowAdvance: boolean; minAmount: number };
   publishableKey: string;
   ready: boolean;
+  /** Why the page can't take a card, when it can't. The donor is shown one friendly sentence built
+   *  from this — never the word "Stripe", never "account". '' when all is well. */
+  readyReason?: '' | 'no-account' | 'not-configured' | 'unreachable';
+  /** This appeal is on a TEST-mode account: show a clear badge, because a page that looks real and
+   *  takes no money is the worst of both (CLAUDE.md §6). */
+  testMode?: boolean;
 }
 export interface IntentResponse {
   clientSecret: string;
@@ -498,6 +561,50 @@ export const createIntent = (
   });
 export const confirmDonation = (body: { paymentIntentId: string; slug: string; token?: string }) =>
   request<ConfirmResponse>('/api/public/confirm', { method: 'POST', body: JSON.stringify(body) });
+
+// ── A monthly donor's own "stop these payments" page (/stop/<token>) ─────────
+// The donor is emailed this link when their gift is set up; the token is the only credential, so
+// it authorises exactly two things — read this description, and stop the payments. Both are POSTs
+// with the token in the BODY: no GET may mutate (link-preview bots follow GET links), and it keeps
+// the token out of URL logs.
+
+/** What a donor may be told about their own monthly gift. Deliberately thin — the token can be
+ *  forwarded or sit in a shared inbox, so there is no donor name, no email, no card and no ids. */
+export interface PublicPlan {
+  /** The short reference also printed in their email, so the masjid can find it if they ring up. */
+  reference: string;
+  /** What is taken each time (major units), in the currency it is charged in. */
+  amount: number;
+  currency: string;
+  /** 'Monthly', 'Every 3 months', … or '' when we couldn't read it from Stripe. */
+  frequency: string;
+  campaignTitle: string;
+  /** Relative path to the campaign's donation page ('/zakat'), or '' if it's gone/hidden. */
+  campaignPath: string;
+  masjidName: string;
+  masjidLogo: string;
+  contactEmail: string;
+  contactPhone: string;
+  contactWebsite: string;
+  status: 'active' | 'paused' | 'past_due' | 'unpaid' | 'incomplete' | 'trialing' | 'canceled' | 'unknown';
+  /** The status in plain warm words — show this, never `status`. */
+  statusLabel: string;
+  /** '' = we are not saying (unknown, paused, or finished). Never a guessed date. */
+  nextPaymentAt: string;
+  /** False when Stripe couldn't be read on this request — the page says so and offers a retry. */
+  live: boolean;
+  /** Is there anything left to stop? */
+  canStop: boolean;
+}
+export interface PublicPlanStopped extends PublicPlan {
+  stopped: true;
+  /** True when it had already finished before they pressed — so we say "already stopped". */
+  alreadyOver: boolean;
+}
+export const lookupPlan = (token: string) =>
+  request<PublicPlan>('/api/public/plan/lookup', { method: 'POST', body: JSON.stringify({ token }) });
+export const stopPlan = (token: string) =>
+  request<PublicPlanStopped>('/api/public/plan/cancel', { method: 'POST', body: JSON.stringify({ token }) });
 
 // ── Tuition (Students billing) — the `tuition` campaign flow ─────────────────
 // Contract students/billing v2: the parent types a Student ID (no PIN), `identify` echoes the

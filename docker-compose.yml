@@ -15,12 +15,15 @@ services:
     # Tag for humans + @sha256 digest for integrity (the digest is the real pin — a
     # moved tag can't repoint it to a different image). Bump both on every release.
     #
-    # On `dev` this line is the moving `:dev` tag with NO digest. That is correct there
-    # and wrong here: a merge from dev will try to bring it across, and carrying it into
-    # main would point every stable install at a development build. Git will normally
-    # conflict on this line — that conflict is a feature, so resolve it by keeping the
-    # pinned form below (CLAUDE.md → Branching policy, rule 6).
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.41.0@sha256:9cc3ef125f09f6a0f7df2cc2715354a5e5d87b639c6ca9bdbf13cb3ccd61d819
+    # On `dev` this line names that build's exact `X.Y.Z-dev.N` tag, with no digest. That
+    # is correct there and wrong here: a merge from dev will try to bring it across, and
+    # carrying it into main would point every stable install at a development build. Git
+    # conflicts on this line every release — that conflict is a feature, so resolve it by
+    # keeping the pinned form below (CLAUDE.md → Branching policy, rule 6).
+    #
+    # The digest is added in a follow-up commit, once CI has actually published the image
+    # and there is a real digest to pin — naming one before it exists would be a guess.
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.42.0
     restart: unless-stopped
     environment:
       PORT: "8080"

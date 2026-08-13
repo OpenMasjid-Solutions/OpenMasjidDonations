@@ -90,7 +90,14 @@ export interface Campaign {
   /** Min/max custom amount in minor units. maxAmount 0 = no max. */
   minAmount: number;
   maxAmount: number;
+  /** LEGACY. The account chosen when the campaign was made, and still the fallback for a campaign
+   *  that has never picked one explicitly. Read ONLY by the site-default branch of the resolver —
+   *  new logic goes through `paymentAccount`. */
   stripeAccountId: string;
+  /** Which Stripe account this appeal's money goes into: '' = the site default, or a namespaced
+   *  reference ('fabric:<vault-id>' / 'local:<account-id>'). See parsePaymentAccount. '' is the
+   *  value every pre-v0.42.0 campaign has, and it means "behave exactly as before". */
+  paymentAccount: string;
   /** Offer the donor the option to cover the card fee. */
   coverFees: boolean;
   /** Require the donor to cover the card fee (no opt-out). Always true for Zakat; set by
@@ -184,6 +191,19 @@ export interface Donation {
   /** True for monthly (subscription) donations; subscriptionId is the Stripe sub. */
   recurring: boolean;
   subscriptionId: string;
+  /** How much of this donation has been given back to the donor, in MINOR units. 0 = none,
+   *  `amount` = fully refunded, anything between = a part refund.
+   *
+   *  A refund is recorded as an AMOUNT, not as a status, deliberately. `status` stays the
+   *  PAYMENT's outcome — the money really did arrive, and rewriting that to 'refunded' would
+   *  lose the fact and cannot express a part refund at all. Every money figure the masjid sees
+   *  (totals, the campaign goal bar, a monthly plan's "collected so far") is therefore
+   *  `amount - refundedAmount`, so a refund lowers what was raised without erasing the record.
+   *  Stripe is the source of truth for the running total; see refunds.ts. */
+  refundedAmount: number;
+  /** ISO timestamp of the MOST RECENT refund, '' when none. Not a history: a masjid needs
+   *  "when was money last sent back", and Stripe's dashboard holds the per-refund detail. */
+  refundedAt: string;
   /** Branded-receipt-email lifecycle, DECIDED ONCE at intent (so confirm/outbox stay
    *  consistent with whether Stripe's own receipt was suppressed):
    *  - 'stripe'  — Stripe sends its built-in receipt; we send nothing (no double).
@@ -262,6 +282,22 @@ export function campaignToken(): string {
   return crypto.randomBytes(5).toString('hex'); // 10 hex chars
 }
 
+/** The token in a monthly donor's "stop these payments" link — 128 bits, as 32 lowercase hex
+ *  characters.
+ *
+ *  Hex, not base64url, and deliberately: this string is retyped, forwarded and line-wrapped by mail
+ *  clients, and `-`/`_`/mixed case are exactly what those mangle. It is the ONLY thing standing
+ *  between a stranger and stopping somebody's donation, so the entropy is the defence (a rate limit
+ *  cannot be, because behind the platform's ingress every remote visitor shares one bucket —
+ *  DONATIONS-009). 2^128 makes guessing hopeless. */
+export function planLinkToken(): string {
+  return crypto.randomBytes(16).toString('hex');
+}
+/** Shape check before any lookup, so a junk path can be refused without touching the database. */
+export function looksLikePlanToken(v: string): boolean {
+  return /^[0-9a-f]{32}$/.test(v);
+}
+
 /** Make a URL-safe slug from a title (kebab-case, alnum + dashes). */
 export function slugify(s: string): string {
   const out = s
@@ -271,6 +307,52 @@ export function slugify(s: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 40);
   return out || 'appeal';
+}
+
+// ── Which Stripe account an appeal's money goes into ──────────────────────────
+/**
+ * A campaign's `paymentAccount` is a namespaced reference, so that "which bank account receives
+ * this donation" can never be ambiguous:
+ *
+ *   ''              — no choice: follow the site default (exactly the pre-v0.42.0 behaviour).
+ *   'fabric:<id>'   — a named account in the OpenMasjidOS vault, by its ID (a slugified label:
+ *                     lowercase, [a-z0-9-], never an underscore). IDs, never labels — the platform
+ *                     matches either, but a label changes when the admin renames the account while
+ *                     the id is minted once and never moves.
+ *   'local:<id>'    — an account whose keys live on this device (`stripe_accounts.id`, "acct_<hex>").
+ *
+ * The two namespaces are provably disjoint on the underscore, which is what makes it safe for
+ * `accountById` to try the local table first when re-resolving a bare recorded id.
+ *
+ * Anything that does not match EXACTLY is `invalid`, and an invalid reference must make the appeal
+ * refuse rather than fall back to some other account. That is not pedantry: `fabric:` with an empty
+ * id would reach the platform as `?account=` omitted, which it answers with its FIRST account — so a
+ * Zakat appeal would quietly settle into the general account and the ledger would record the general
+ * account's id, leaving nothing to notice.
+ */
+export type ParsedAccount =
+  | { kind: 'default' }
+  | { kind: 'openmasjidos'; id: string }
+  | { kind: 'device'; id: string }
+  | { kind: 'invalid' };
+
+const FABRIC_REF_RE = /^fabric:([a-z0-9][a-z0-9-]{0,62})$/;
+const LOCAL_REF_RE = /^local:([A-Za-z0-9_-]{1,64})$/;
+
+export function parsePaymentAccount(raw: string | null | undefined): ParsedAccount {
+  const v = (raw ?? '').trim();
+  if (!v) return { kind: 'default' };
+  const fab = FABRIC_REF_RE.exec(v);
+  if (fab) return { kind: 'openmasjidos', id: fab[1] };
+  const loc = LOCAL_REF_RE.exec(v);
+  if (loc) return { kind: 'device', id: loc[1] };
+  return { kind: 'invalid' };
+}
+
+/** Build a reference for storage. Returns '' for the site default. */
+export function formatPaymentAccount(kind: 'default' | 'openmasjidos' | 'device', id = ''): string {
+  if (kind === 'default') return '';
+  return `${kind === 'openmasjidos' ? 'fabric' : 'local'}:${id}`;
 }
 
 /** Slugs the admin must not claim — they collide with the app's own top-level paths
@@ -341,6 +423,8 @@ export class Store {
         card_last4 TEXT NOT NULL DEFAULT '',
         recurring INTEGER NOT NULL DEFAULT 0,
         subscription_id TEXT NOT NULL DEFAULT '',
+        refunded_amount INTEGER NOT NULL DEFAULT 0,
+        refunded_at TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_donations_campaign ON donations(campaign_id);
@@ -390,6 +474,28 @@ export class Store {
         detail TEXT NOT NULL DEFAULT ''
       );
       CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
+
+      -- The "stop these payments" link a monthly donor is emailed. One token per Stripe
+      -- subscription; the token IS the credential, so it is the primary key and the lookup is a
+      -- single indexed probe.
+      --
+      -- Stored in PLAINTEXT, on purpose. Hashing it would mean the letter could never be rendered
+      -- twice — and it is rendered up to three times for one donation (the donor's own confirm, the
+      -- receipt outbox for up to three days, and the lost-donation sweep) — so a hash would either
+      -- mail no link or re-mint one and silently kill the link already sitting in the donor's inbox.
+      -- Nor would hashing buy much: the session_secret lives in this same file and mints admin
+      -- session cookies, so anyone who can read this table can already reach the panel's own Stop
+      -- button. (No backticks in here: this DDL is a JS template literal.)
+      --
+      -- CHECK(...) because a blank subscription_id would collapse every one-off donation onto one
+      -- token; UNIQUE so re-rendering the letter always produces the SAME link. Rows are KEPT after
+      -- a plan ends, so a donor clicking an old link reads "these payments have already stopped"
+      -- rather than a frightening "this link doesn't work".
+      CREATE TABLE IF NOT EXISTS plan_links (
+        token TEXT PRIMARY KEY,
+        subscription_id TEXT NOT NULL UNIQUE CHECK(length(subscription_id) > 0),
+        created_at TEXT NOT NULL
+      );
     `);
     // Tighten file perms where the OS supports it (secrets + admin hash live here).
     //
@@ -420,12 +526,22 @@ export class Store {
     this.ensureColumn('campaigns', 'type', "TEXT NOT NULL DEFAULT 'donation'");
     this.ensureColumn('campaigns', 'force_cover_fees', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('campaigns', 'widget_enabled', 'INTEGER NOT NULL DEFAULT 0');
+    // Which Stripe account an appeal pays into. Legacy rows default to '' = "the site default",
+    // which is precisely the behaviour they had before this column existed — there is deliberately
+    // NO backfill from stripe_account_id, because inferring a choice nobody made is how an existing
+    // appeal would start charging a different bank account after an unattended overnight update.
+    this.ensureColumn('campaigns', 'payment_account', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'card_brand', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'card_last4', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('donations', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('donations', 'subscription_id', "TEXT NOT NULL DEFAULT ''");
     // Legacy rows default to 'stripe' (their receipts were Stripe's built-in ones).
     this.ensureColumn('donations', 'receipt', "TEXT NOT NULL DEFAULT 'stripe'");
+    // Refunds. Legacy rows default to 0 / '' = "nothing was given back", which is true of every
+    // donation taken before refunds existed — and, because every money figure now subtracts this
+    // column, a default of 0 also keeps existing totals exactly as they were.
+    this.ensureColumn('donations', 'refunded_amount', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('donations', 'refunded_at', "TEXT NOT NULL DEFAULT ''");
     // The per-child split of a tuition charge (students/billing v2). Legacy rows default to ''
     // = "no split", which is exactly how they were pushed to Students before this existed.
     this.ensureColumn('student_payments', 'students_split', "TEXT NOT NULL DEFAULT ''");
@@ -558,6 +674,19 @@ export class Store {
   }
   setFabricStripeChoice(id: string): void {
     this.setRaw('fabric_stripe_account', id);
+  }
+
+  /** The last decisive outcome of a Fabric email send ('ok' / 'not_configured' / …).
+   *
+   *  Persisted only so the app does not forget, on every restart, whether the masjid's OpenMasjidOS
+   *  email provider works — which is what decides whether a donor's receipt may be a branded one of
+   *  ours (Stripe's own suppressed) or must be left to Stripe. Not a secret, not a setting: a cached
+   *  observation, and the live value in memory always wins. See fabric.ts `emailLikelyAvailable`. */
+  getEmailStatus(): string {
+    return this.getRaw('email_status') ?? '';
+  }
+  setEmailStatus(status: string): void {
+    this.setRaw('email_status', status);
   }
 
   /** Cached Stripe Product id per account + mode (test/live), for recurring prices. */
@@ -697,14 +826,58 @@ export class Store {
     return next;
   }
 
+  /** How many campaigns depend on this local account — through EITHER the legacy column or an
+   *  explicit 'local:<id>' choice. Missing the second one would let an admin delete an account a
+   *  live appeal is pinned to, and that appeal would then refuse every donation. */
   campaignsForAccount(id: string): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM campaigns WHERE stripe_account_id = ?').get(id) as { n: number }).n;
+    return (
+      this.db
+        .prepare('SELECT COUNT(*) AS n FROM campaigns WHERE stripe_account_id = ? OR payment_account = ?')
+        .get(id, formatPaymentAccount('device', id)) as { n: number }
+    ).n;
+  }
+
+  /** How many donations / tuition payments were TAKEN on this account. Money already taken is the
+   *  stronger claim: confirming, refunding, and cancelling a monthly plan all re-resolve the account
+   *  from the row, so deleting it would strand those records for ever — including leaving a card
+   *  mandate that neither the admin nor the donor could stop. */
+  paymentsForAccount(id: string): number {
+    const d = (this.db.prepare('SELECT COUNT(*) AS n FROM donations WHERE stripe_account_id = ?').get(id) as { n: number }).n;
+    const s = (this.db.prepare('SELECT COUNT(*) AS n FROM student_payments WHERE stripe_account_id = ?').get(id) as { n: number }).n;
+    return d + s;
   }
 
   deleteStripeAccount(id: string): { ok: boolean; reason?: string } {
     if (this.campaignsForAccount(id) > 0) return { ok: false, reason: 'in-use' };
+    if (this.paymentsForAccount(id) > 0) return { ok: false, reason: 'has-payments' };
     this.db.prepare('DELETE FROM stripe_accounts WHERE id = ?').run(id);
     return { ok: true };
+  }
+
+  /** Every account id this installation could legitimately be asked about: the ones campaigns point
+   *  at, the ones money was actually taken on, and the site default. Bare ids, as recorded on rows.
+   *
+   *  This is a GUARD, not a convenience. accountById is reached from the UNAUTHENTICATED Stripe
+   *  webhook (/api/stripe/webhook/:accountId), so without a known-id bound a stranger could make the
+   *  app fetch arbitrary account names from the platform vault — an amplifier against the platform,
+   *  and a way to flush the in-memory key cache that keeps donations alive through a blip. */
+  knownAccountIds(): Set<string> {
+    const out = new Set<string>();
+    const add = (v: unknown) => {
+      const t = String(v ?? '').trim();
+      if (t) out.add(t);
+    };
+    for (const r of this.db.prepare('SELECT id FROM stripe_accounts').all() as { id: string }[]) add(r.id);
+    for (const r of this.db.prepare('SELECT DISTINCT stripe_account_id AS a FROM donations').all() as { a: string }[]) add(r.a);
+    for (const r of this.db.prepare('SELECT DISTINCT stripe_account_id AS a FROM student_payments').all() as { a: string }[]) add(r.a);
+    for (const r of this.db.prepare('SELECT DISTINCT stripe_account_id AS a FROM campaigns').all() as { a: string }[]) add(r.a);
+    // Explicit per-campaign choices, unwrapped to the bare id the vault/local table knows.
+    for (const r of this.db.prepare("SELECT DISTINCT payment_account AS a FROM campaigns WHERE payment_account <> ''").all() as { a: string }[]) {
+      const parsed = parsePaymentAccount(r.a);
+      if (parsed.kind === 'openmasjidos' || parsed.kind === 'device') add(parsed.id);
+    }
+    add(this.getFabricStripeChoice());
+    return out;
   }
 
   // ── Campaigns ─────────────────────────────────────────────────────────────
@@ -730,6 +903,7 @@ export class Store {
       minAmount: Number(r.min_amount),
       maxAmount: Number(r.max_amount),
       stripeAccountId: String(r.stripe_account_id),
+      paymentAccount: String(r.payment_account ?? ''),
       coverFees: !!r.cover_fees,
       forceCoverFees: !!r.force_cover_fees,
       giftAid: !!r.gift_aid,
@@ -827,15 +1001,16 @@ export class Store {
       .prepare(
         `INSERT INTO campaigns
           (id, slug, token, title, type, description, cover_image, background_image, logo, preset_amounts, allow_custom, min_amount,
-           max_amount, stripe_account_id, cover_fees, force_cover_fees, gift_aid, allow_monthly, widget_enabled, goal_amount, active, sort_order, thank_you, created_at)
+           max_amount, stripe_account_id, payment_account, cover_fees, force_cover_fees, gift_aid, allow_monthly, widget_enabled, goal_amount, active, sort_order, thank_you, created_at)
          VALUES
           (@id, @slug, @token, @title, @type, @description, @coverImage, @backgroundImage, @logo, @presetAmounts, @allowCustom, @minAmount,
-           @maxAmount, @stripeAccountId, @coverFees, @forceCoverFees, @giftAid, @allowMonthly, @widgetEnabled, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
+           @maxAmount, @stripeAccountId, @paymentAccount, @coverFees, @forceCoverFees, @giftAid, @allowMonthly, @widgetEnabled, @goalAmount, @active, @sortOrder, @thankYou, @createdAt)
          ON CONFLICT(id) DO UPDATE SET
            slug=excluded.slug, title=excluded.title, type=excluded.type, description=excluded.description, cover_image=excluded.cover_image,
            background_image=excluded.background_image, logo=excluded.logo, preset_amounts=excluded.preset_amounts,
            allow_custom=excluded.allow_custom, min_amount=excluded.min_amount, max_amount=excluded.max_amount,
-           stripe_account_id=excluded.stripe_account_id, cover_fees=excluded.cover_fees, force_cover_fees=excluded.force_cover_fees,
+           stripe_account_id=excluded.stripe_account_id, payment_account=excluded.payment_account,
+           cover_fees=excluded.cover_fees, force_cover_fees=excluded.force_cover_fees,
            gift_aid=excluded.gift_aid, allow_monthly=excluded.allow_monthly, widget_enabled=excluded.widget_enabled,
            goal_amount=excluded.goal_amount, active=excluded.active, sort_order=excluded.sort_order, thank_you=excluded.thank_you`,
       )
@@ -916,6 +1091,7 @@ export class Store {
       minAmount: input.minAmount ?? 100,
       maxAmount: input.maxAmount ?? 0,
       stripeAccountId: input.stripeAccountId,
+      paymentAccount: input.paymentAccount ?? '',
       coverFees: input.coverFees ?? false,
       forceCoverFees: input.forceCoverFees ?? false,
       giftAid: input.giftAid ?? false,
@@ -962,6 +1138,8 @@ export class Store {
       cardLast4: String(r.card_last4 ?? ''),
       recurring: !!r.recurring,
       subscriptionId: String(r.subscription_id ?? ''),
+      refundedAmount: Number(r.refunded_amount ?? 0),
+      refundedAt: String(r.refunded_at ?? ''),
       receipt: (['stripe', 'pending', 'sent', 'skipped'] as const).includes(String(r.receipt) as Donation['receipt'])
         ? (String(r.receipt) as Donation['receipt'])
         : 'stripe',
@@ -970,7 +1148,10 @@ export class Store {
   }
 
   createDonation(
-    input: Omit<Donation, 'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4' | 'recurring' | 'subscriptionId' | 'receipt'> & {
+    input: Omit<
+      Donation,
+      'id' | 'createdAt' | 'status' | 'cardBrand' | 'cardLast4' | 'recurring' | 'subscriptionId' | 'receipt' | 'refundedAmount' | 'refundedAt'
+    > & {
       status?: Donation['status'];
       recurring?: boolean;
       subscriptionId?: string;
@@ -997,6 +1178,10 @@ export class Store {
       cardLast4: input.cardLast4 ?? '',
       recurring: input.recurring ?? false,
       subscriptionId: input.subscriptionId ?? '',
+      // A brand-new donation has never been refunded — there is no path that creates one that
+      // has, so this is not an input the caller may set (only setDonationRefund moves it).
+      refundedAmount: 0,
+      refundedAt: '',
       receipt: input.receipt ?? 'stripe',
       createdAt: input.createdAt ?? new Date().toISOString(),
     };
@@ -1011,6 +1196,13 @@ export class Store {
       )
       .run({ ...d, coverFees: d.coverFees ? 1 : 0, giftAid: d.giftAid ? 1 : 0, recurring: d.recurring ? 1 : 0 });
     return d;
+  }
+
+  /** One donation by its own id — the key the admin panel holds for a row it is showing.
+   *  (Everything on the donor side keys off the PaymentIntent instead; this is for the panel.) */
+  getDonation(id: string): Donation | null {
+    const r = this.db.prepare('SELECT * FROM donations WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return r ? this.rowToDonation(r) : null;
   }
 
   getDonationByPaymentIntent(pi: string): Donation | null {
@@ -1051,6 +1243,31 @@ export class Store {
     return this.getDonationByPaymentIntent(pi);
   }
 
+  /** Record how much of a donation has been refunded, as a RUNNING TOTAL in minor units — the
+   *  figure Stripe reports for the charge (`amount_refunded`), not the size of one refund.
+   *
+   *  Three guards, and each of them is load-bearing:
+   *   • MONOTONIC. The value may only ever rise. Two things write here — an admin's refund in the
+   *     panel and a `charge.refunded` webhook — and Stripe delivers webhooks with no ordering
+   *     guarantee, so a retry of the FIRST refund's event can arrive after a second refund. Taking
+   *     it at face value would quietly put money back into the masjid's totals.
+   *   • CLAMPED to the amount charged, so a currency/rounding surprise can never make a donation
+   *     read as more-than-refunded (which would show as negative money raised).
+   *   • The TIMESTAMP only moves when the amount does, so a duplicate event can't restamp a
+   *     week-old refund as today's.
+   *
+   *  Returns the row as it now stands, or null if there is no donation for that PaymentIntent. */
+  setDonationRefund(pi: string, refundedMinor: number, atIso: string): Donation | null {
+    const cur = this.getDonationByPaymentIntent(pi);
+    if (!cur) return null;
+    const next = Math.min(Math.max(0, Math.round(refundedMinor)), cur.amount);
+    if (next <= cur.refundedAmount) return cur; // nothing new — an out-of-order or replayed event
+    this.db
+      .prepare('UPDATE donations SET refunded_amount = ?, refunded_at = ? WHERE payment_intent_id = ?')
+      .run(next, atIso || new Date().toISOString(), pi);
+    return this.getDonationByPaymentIntent(pi);
+  }
+
   /** Every donation row that belongs to a monthly (subscription) plan, OLDEST FIRST so the
    *  first row of each subscription is the plan's origin. This is the whole index behind the
    *  admin "Monthly plans" tab — and the reason a subscription we did not create can never
@@ -1063,6 +1280,45 @@ export class Store {
         unknown
       >[]
     ).map((r) => this.rowToDonation(r));
+  }
+
+  // ── The monthly donor's "stop these payments" link ──────────────────────────
+  /** The token for this subscription's stop link, minting one on first need.
+   *
+   *  GET-OR-CREATE, and that is the whole point: the letter carrying this link is rendered up to
+   *  three times for one donation (the donor's own confirm, the receipt outbox retrying for up to
+   *  three days, and the lost-donation sweep), and every render must produce the SAME URL. Minting a
+   *  fresh token per render would leave whichever letter actually arrived pointing at a dead link.
+   *
+   *  Returns '' for a blank subscription id (a one-off donation has no plan to stop). */
+  ensurePlanLink(subscriptionId: string): string {
+    if (!subscriptionId) return '';
+    const read = (): string => {
+      const r = this.db.prepare('SELECT token FROM plan_links WHERE subscription_id = ?').get(subscriptionId) as { token: string } | undefined;
+      return r?.token ?? '';
+    };
+    const existing = read();
+    if (existing) return existing;
+    const token = planLinkToken();
+    try {
+      this.db.prepare('INSERT INTO plan_links (token, subscription_id, created_at) VALUES (?, ?, ?)').run(token, subscriptionId, new Date().toISOString());
+      return token;
+    } catch {
+      // Lost the UNIQUE race with a concurrent render — the other one wrote a token, so use theirs
+      // rather than failing the letter.
+      return read();
+    }
+  }
+
+  /** The subscription a stop-link token belongs to, or '' when the token is unknown.
+   *
+   *  Shape-checked first so a junk path never reaches SQLite. Note this deliberately says nothing
+   *  about whether the plan is one of OURS or still running — the caller must resolve it through the
+   *  local recurring-donations index (see plans.ts groupPlanSeeds) before acting on it. */
+  planLinkSubscription(token: string): string {
+    if (!looksLikePlanToken(token)) return '';
+    const r = this.db.prepare('SELECT subscription_id FROM plan_links WHERE token = ?').get(token) as { subscription_id: string } | undefined;
+    return r?.subscription_id ?? '';
   }
 
   // ── Audit log (append-only) ─────────────────────────────────────────────────
@@ -1146,10 +1402,16 @@ export class Store {
     ).map((r) => this.rowToDonation(r));
   }
 
-  /** Total raised (succeeded) for a campaign, in minor units. */
+  /** Total raised (succeeded) for a campaign, in minor units, NET of anything refunded.
+   *
+   *  This is the number behind a campaign's goal/progress bar, which is shown to DONORS. A
+   *  refund that left it alone would keep asking the public to fund money the masjid no longer
+   *  has — so refunds come off here, as they do everywhere else money is counted. */
   raisedForCampaign(campaignId: string): number {
     return (
-      this.db.prepare(`SELECT COALESCE(SUM(amount), 0) AS s FROM donations WHERE campaign_id = ? AND status = 'succeeded'`).get(campaignId) as {
+      this.db
+        .prepare(`SELECT COALESCE(SUM(amount - refunded_amount), 0) AS s FROM donations WHERE campaign_id = ? AND status = 'succeeded'`)
+        .get(campaignId) as {
         s: number;
       }
     ).s;
@@ -1157,20 +1419,32 @@ export class Store {
 
   /** Aggregated donation metrics (all amounts in MINOR units; only succeeded
    *  donations count toward money raised). The route converts to major units, joins
-   *  campaign titles and fills the month window for display. */
+   *  campaign titles and fills the month window for display.
+   *
+   *  Every `raised` figure is NET of refunds (`amount - refunded_amount`), so returning money
+   *  to a donor lowers what the masjid is told it raised. The COUNTS are deliberately gross:
+   *  a refunded donation was still a donation that arrived, and quietly deducting it from the
+   *  count would make the ledger (which still lists the row) disagree with the headline.
+   *  `totalRefunded` is reported separately so the difference is never a mystery. */
   metrics(): {
     totalRaised: number;
     count: number;
+    totalRefunded: number;
+    refundedCount: number;
     byCampaign: { campaignId: string; raised: number; count: number }[];
     monthly: { month: string; raised: number; count: number }[];
   } {
     const totals = this.db
-      .prepare(`SELECT COALESCE(SUM(amount), 0) AS s, COUNT(*) AS n FROM donations WHERE status = 'succeeded'`)
-      .get() as { s: number; n: number };
+      .prepare(
+        `SELECT COALESCE(SUM(amount - refunded_amount), 0) AS s, COUNT(*) AS n,
+                COALESCE(SUM(refunded_amount), 0) AS r, COALESCE(SUM(refunded_amount > 0), 0) AS rn
+         FROM donations WHERE status = 'succeeded'`,
+      )
+      .get() as { s: number; n: number; r: number; rn: number };
     const byCampaign = (
       this.db
         .prepare(
-          `SELECT campaign_id AS campaignId, COALESCE(SUM(amount), 0) AS raised, COUNT(*) AS count
+          `SELECT campaign_id AS campaignId, COALESCE(SUM(amount - refunded_amount), 0) AS raised, COUNT(*) AS count
            FROM donations WHERE status = 'succeeded' GROUP BY campaign_id`,
         )
         .all() as { campaignId: string; raised: number; count: number }[]
@@ -1178,12 +1452,19 @@ export class Store {
     const monthly = (
       this.db
         .prepare(
-          `SELECT strftime('%Y-%m', created_at) AS month, COALESCE(SUM(amount), 0) AS raised, COUNT(*) AS count
+          `SELECT strftime('%Y-%m', created_at) AS month, COALESCE(SUM(amount - refunded_amount), 0) AS raised, COUNT(*) AS count
            FROM donations WHERE status = 'succeeded' GROUP BY month`,
         )
         .all() as { month: string; raised: number; count: number }[]
     ).map((r) => ({ month: String(r.month), raised: Number(r.raised), count: Number(r.count) }));
-    return { totalRaised: Number(totals.s), count: Number(totals.n), byCampaign, monthly };
+    return {
+      totalRaised: Number(totals.s),
+      count: Number(totals.n),
+      totalRefunded: Number(totals.r),
+      refundedCount: Number(totals.rn),
+      byCampaign,
+      monthly,
+    };
   }
 
   // ── Tuition (Students-billing) payments ─────────────────────────────────────

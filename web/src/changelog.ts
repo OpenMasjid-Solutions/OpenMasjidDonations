@@ -14,15 +14,33 @@
  * This module is loaded on demand (a dynamic import when the dialog opens), so it never weighs on
  * the donation page — keep that in mind before importing it from anywhere eagerly. Add an entry as
  * part of the release runbook (CLAUDE.md §16), alongside the version bump.
+ *
+ * TWO SHAPES, ONE PER CHANNEL (see CLAUDE.md → Branching policy):
+ *  • On `dev` the first entry is `unreleased: true` — a running, properly DETAILED account of
+ *    everything that has landed since the last release, including the corrections and removals a
+ *    release note would leave out. It is what somebody on the Development channel needs to know
+ *    what changed under them.
+ *  • On `main` there is no unreleased entry, and a release carries ONLY the major changes — what a
+ *    masjid would actually notice. At release time you distil from the one to the other; you don't
+ *    move it wholesale.
+ * The `dev` → `main` merge conflicts here on purpose. Resolve it by taking main's shape.
  */
 export interface Release {
-  /** Semver, no leading "v" — matched against the running version to mark the current release. */
+  /** Semver, no leading "v" — matched against the running version to mark the current release.
+   *  For an unreleased entry this is the version being worked toward, and is never matched. */
   version: string;
   /**
    * ISO date (YYYY-MM-DD) the version was tagged. Kept as the record in source; the dialog doesn't
-   * show it, and neither does Kiosk's — a date tells a masjid nothing they need.
+   * show it, and neither does Kiosk's — a date tells a masjid nothing they need. Ignored (and shown
+   * as "not released yet") on an unreleased entry.
    */
   date: string;
+  /**
+   * Development-channel only: this work has NOT been released. The dialog labels it as such rather
+   * than letting it pose as a version, so a dev box never appears to be running a release that does
+   * not exist. Absent on every entry that reaches `main`.
+   */
+  unreleased?: boolean;
   /**
    * One note per change, in full sentences. `**bold**` marks the lead-in clause — what changed, in
    * one breath, before the detail behind it — and `` `code` `` renders as code. Nothing else is
@@ -33,6 +51,17 @@ export interface Release {
 }
 
 export const RELEASES: Release[] = [
+  {
+    version: '0.42.0',
+    date: '2026-08-13',
+    notes: [
+      '**You can now refund a donation from the panel.** Open any donation in the Donations tab and send back all of it or part of it, with a reason, and — if the supporter left an email — a note telling them it’s on its way. Refunded gifts are marked in the list and come off your totals, your charts and your appeal progress bars, so what you see raised is what you actually kept. A refund made in Stripe’s own dashboard finds its way here too.',
+      '**Monthly donors are emailed their own link to stop their payments.** When someone sets up a monthly gift they now get a confirmation of what they’ve arranged — the amount, the fund, the date of the first payment — with a link they can use at any time to stop it themselves. No account, no password, nobody to ring. The email asks them to keep it safe, since the link lives only there; if they lose it you can still stop the gift from the Monthly tab in a moment. You’re told whenever a donor uses their link, so a stopped gift is never something you discover a month later.',
+      '**Each appeal can now pay into its own Stripe account.** Zakat can settle somewhere separate from the general fund, and you choose it per appeal on the Campaigns tab — either an account set up in OpenMasjidOS or one whose keys are on this device. **Nothing changes unless you change it:** every appeal you already have carries on paying into exactly the account it always has. If an appeal’s chosen account ever becomes unavailable, that page stops taking cards and tells you plainly — it will never quietly send the money somewhere else instead.',
+      '**Your emailed receipts now actually look like yours.** The branded receipt you can design on the Thank-you tab was never being sent — donors got your card processor’s plain one instead. If you have receipts turned on, your own design goes out from now on.',
+      'Nothing you have set up needs redoing, and your donations, appeals and monthly plans are all exactly as they were.',
+    ],
+  },
   {
     version: '0.41.0',
     date: '2026-08-10',

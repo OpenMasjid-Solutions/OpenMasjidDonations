@@ -302,10 +302,16 @@ OpenMasjid Students → Settings → Payments**. Two reasons:
 - Students’ reconciliation safety net scans **that** account for `purpose=students-billing` PIs; a
   tuition PI charged on a different account would never be reconciled if our push call was missed.
 
-We already let the admin pick a vault account **per campaign** (`stripeAccountId`, chosen from
-`GET /api/fabric/stripe/accounts`). So: **for a `tuition` campaign, the admin selects the same account
-Students uses.** Surface a hint on the tuition-campaign editor: *“Use the same Stripe account as
-OpenMasjid Students.”*
+Since **v0.42.0** the admin really can pick an account **per campaign** — `campaigns.payment_account`,
+holding `fabric:<vault-id>` (offered from `GET /api/fabric/stripe/accounts`) or `local:<id>`. Before
+that this section described an intention rather than the code: a vaulted account applied to every
+campaign, so tuition could not be settled separately at all.
+
+So: **for a `tuition` campaign, the admin sets “Where this appeal’s money goes” to the same account
+Students uses.** The tuition-campaign editor says so. If that account later disappears, the tuition
+page REFUSES rather than falling back to a donations account — a school payment landing in the
+masjid’s general fund would be wrong twice over (wrong ledger, and invisible to Students’
+reconciliation, which scans that account for `purpose=students-billing` PIs).
 
 ---
 
