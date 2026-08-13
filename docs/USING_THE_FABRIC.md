@@ -1,95 +1,110 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <!-- Copyright (C) 2026 OpenMasjid-Solutions -->
 
-# How to use the OpenMasjidOS Fabric (Donations)
+# The OpenMasjidOS Fabric, as this app uses it
 
-The **Fabric** is the platform↔app integration layer. Everything here is **optional + backwards-
-compatible**: when the platform isn't present the app runs fully standalone (own login, own keys, own
-appearance). When it *is* present, prefer the Fabric. The canonical spec is OpenMasjidAPPS
-`docs/BUILDING_AN_APP.md` §7.
+The **Fabric** is the platform↔app integration layer. Every part of it is **optional and
+backwards-compatible**: with no platform present the app runs fully standalone — its own login, its
+own Stripe keys, its own appearance, its own tunnel. When the platform *is* present, prefer it. The
+canonical spec is OpenMasjidAPPS `docs/BUILDING_AN_APP.md` §7; this page records what Donations
+actually does.
 
 **Wire identifiers (never rename):** env `OPENMASJID_BASE_URL`, `OPENMASJID_APP_ID`,
 `OPENMASJID_APP_SECRET`; header `X-OpenMasjid-App-Secret`; cookie `omos_session`.
-**Golden rule:** read those env vars **every process start**, never persist them or anything fetched
-from the Fabric (keys, URLs) to `db.json` — the platform changes them across restarts/migrations.
 
-## Capabilities Donations should declare (`manifest.yaml`)
+**Golden rule:** read those env vars **every process start**, and never persist them — or anything
+fetched with them — to the data volume. The platform changes them across restarts and migrations, so
+a cached copy is how you brick a panel after a restore (see [`RESTORE_SSO_FIX.md`](RESTORE_SSO_FIX.md)).
+The one thing it *is* fine to persist is a non-secret **id**, such as which vault account was chosen.
+
+Everything below lives in [`server/src/fabric.ts`](../server/src/fabric.ts) unless noted. Every
+outbound call sets `redirect: 'error'` (so a redirect cannot walk us to some other internal host) and
+a 3–8 second `AbortController` timeout, and **never throws** — a Fabric failure must never be able to
+stop a donation.
+
+## What the manifest declares
 
 ```yaml
 sso: true            # sign in with the dashboard login
-notifications: true  # relay "new donation" alerts to the masjid's webhook
-stripe: true         # fetch shared Stripe keys from the OS vault  (v0.29.0+)
-domain: true         # learn the public URL for return/webhook/QR  (v0.30.0+)
-https: true          # Stripe needs a secure context
-# NO `settings:` block — install is one-click (no popup). The Stripe account is
-# chosen INSIDE the app (admin Payments screen), see §4.
+notifications: true  # relay "a donation was received" to the masjid's webhook
+https: true          # Stripe's Payment Element needs a secure context
+stripe: true         # fetch vaulted Stripe keys from the OS               (v0.16.0)
+domain: true         # learn our public URL + base path                     (v0.17.0)
+email: true          # send a donor a receipt through the OS provider       (v0.29.0)
+alerts:              # five declared ids, each routable to email/webhook    (v0.27.0)
+  - payment-failed | tuition-record-failed | donation-refunded | plan-stopped | test
+fabric:
+  consumes:
+    - students/billing   # tuition, via the app-to-app broker               (v0.26.0)
+# NO `settings:` block — install is one-click, with no dialog. Everything is
+# chosen inside the app.
 ```
 
-## 1. Single sign-on (already implemented — keep it)
+## 1. Single sign-on
 
-Forward the request's `omos_session` cookie to `${OPENMASJID_BASE_URL}/api/auth/session` with the
-app secret; a `true` mints a local admin session. See `server/src/fabric.ts`. **Resilience fix
-required** — never brick when the platform is unreachable: see `docs/RESTORE_SSO_FIX.md`.
+Forward the request's `omos_session` cookie (read **only** from the incoming `Cookie` header — never
+a query, header or body) to `GET ${OPENMASJID_BASE_URL}/api/auth/session` with the app secret. The
+platform is identity-bound and fails closed. On `authenticated: true` we mint our own short-lived
+local session (1 hour, against 30 days for a password login) so every other route stays a cheap
+synchronous cookie check; positive results are cached ~45 s.
 
-## 2. Appearance (already implemented — keep it)
+`probePlatform` returns `reachable` as well as `username`, and the difference matters: "you are not
+signed in" and "OpenMasjidOS is unreachable" need different screens, and conflating them is what
+locks an admin out after a restore.
 
-Match the dashboard's theme/wallpaper via the `#omos=` hash + `GET /api/public/appearance`.
+## 2. Appearance
 
-## 3. Notifications
+The dashboard appends `#omos=<base64url(JSON)>` on open; the web reads it, applies and persists it,
+then clears the hash. While embedded it polls `GET /api/public/appearance` — through **our** server
+(`/api/public/appearance` here relays it), because our page is HTTPS and the platform's endpoint is
+plain HTTP, so a direct browser fetch would be blocked as mixed content. The fragment is untrusted
+presentation input and is sanitised before use (`web/src/prefs.ts`, `Scene` in `web/src/ui.tsx`).
 
-Relay a "new donation of £50" alert: `POST ${OPENMASJID_BASE_URL}/api/fabric/notify` with the app
-secret + `{ text, title?, level? }`. Fails soft; never depend on it.
+## 3. Notifications and alerts — two different things
 
-## 4. Stripe keys from the OS vault — `stripe: true` (chosen IN-APP, no install setting)
+- **`POST /api/fabric/notify`** — the masjid's configured **webhook** only. Used for ordinary news:
+  "a donation of £50 was received".
+- **`POST /api/fabric/alert`** — a **declared** alert id. The admin chooses per alert, in
+  OpenMasjidOS → Settings → Alerts, whether it goes to email, webhook, both or nowhere. This is the
+  **only** way the app can reach the admin's own email address, which it never learns.
 
-The admin stores named Stripe accounts once in **Settings → Payments**. **Do NOT collect the account
-at install** (no `STRIPE_ACCOUNT` setting → no install popup). Instead, on your **admin Payments
-screen**, list the accounts and let the admin pick one, persist the chosen **id** in your own data,
-then fetch that account's keys:
+So an alert id must exist in `manifest.yaml` or the platform refuses it, and `disabled_by_admin` is a
+normal answer, not an error.
 
-```ts
-// 1) List accounts (no secrets) for your in-app picker:  { accounts: [{ id, label }] }
-const list = await (await fetch(`${config.omosBaseUrl}/api/fabric/stripe/accounts`,
-  { headers: { 'x-openmasjid-app-secret': config.omosAppSecret }, redirect: 'error' })).json();
+## 4. Stripe keys from the vault
 
-// 2) After the admin picks one (store `chosenId` in db.json), fetch ITS keys:
-//    { id, label, publishableKey, secretKey, webhookSecret }
-const acct = await (await fetch(
-  `${config.omosBaseUrl}/api/fabric/stripe?account=${encodeURIComponent(chosenId)}`,
-  { headers: { 'x-openmasjid-app-secret': config.omosAppSecret }, redirect: 'error' })).json();
-```
+See [`FABRIC_STRIPE_AND_DOMAIN.md`](FABRIC_STRIPE_AND_DOMAIN.md) — the account picker, the
+per-account cache, why a 429 must not be cached, and how per-appeal accounts resolve.
 
-Use `secretKey` for charges, `publishableKey` for the client, `webhookSecret` for signature checks.
-**Cache the keys in memory only** (never persist secretKey/webhookSecret). It's fine to persist the
-chosen account **id**. Keep your local Stripe fields as the standalone fallback (Fabric absent), and if
-no account is chosen yet, fall back to the only/first account (omit `?account=`).
+## 5. Public URL + base path
 
-## 5. Public URL + base path — `domain: true`
+Also in [`FABRIC_STRIPE_AND_DOMAIN.md`](FABRIC_STRIPE_AND_DOMAIN.md). The short version: read
+`basePath` from `GET /api/fabric/site`, never hardcode it, and strip the prefix before routing
+because Cloudflare forwards the full path. [`REMOTE_ACCESS_INGRESS.md`](REMOTE_ACCESS_INGRESS.md)
+covers the admin's side of it.
 
-Card flows need absolute, internet-reachable URLs (Stripe `success_url`/`cancel_url`, the webhook
-endpoint, QR codes). The OS serves every app under **one subdomain `omos`** at a **path the admin
-chooses** in OS → Settings → Remote access (defaults to the app id — e.g. they can set `donate`, giving
-`https://omos.example.org/donate`). **Don't assume the path; read `basePath`:**
+## 6. Email
 
-```ts
-// { enabled, domain, publicUrl, basePath }   e.g. publicUrl="https://omos.example.org/donations", basePath="/donations"
-const s = await (await fetch(`${config.omosBaseUrl}/api/fabric/site`,
-  { headers: { 'x-openmasjid-app-secret': config.omosAppSecret }, redirect: 'error' })).json();
-```
+`POST /api/fabric/email` with `{ to, subject, text, html? }`. The masjid sets up one provider (SMTP
+or Resend) once; this app never sees the credentials or the From address. `not_configured` is a
+normal answer — the donation is still recorded and thanked on screen, and Stripe's own receipt
+covers the donor.
 
-- `success_url = `${s.publicUrl}/thank-you``, Stripe webhook URL = `${s.publicUrl}/webhook`, QR → `s.publicUrl`.
-- When `enabled` is false (no remote access, or opened directly on the LAN), fall back to the request host.
+The subject is flattened of CR/LF before sending, because the platform turns it into a real mail
+header. Whether the platform *also* sanitises it independently is
+[`audit/ACTION_REQUIRED.md`](audit/ACTION_REQUIRED.md) §3a.
 
-**IMPORTANT — be base-path aware.** Cloudflare forwards the full path (it does **not** strip the
-prefix), so behind the tunnel your server receives requests under `basePath` (e.g. `/donations/...`).
-Mount your routes and emit asset/link URLs under `basePath` (set your SPA's base href / router
-basename from it). When `basePath` is `""`, serve at root as today. The admin's one-time Cloudflare
-setup (subdomain `omos`, path, Service `HTTP localhost:<port>`) is shown to them in
-**OpenMasjidOS → Settings → Remote access**.
+## 7. The app-to-app broker (tuition)
 
-## 6. Retire the self-managed Stripe + Cloudflare (after the Fabric paths are verified)
+`POST ${OPENMASJID_BASE_URL}/api/fabric/app/students/billing/<method>`, server→server with our
+per-app secret. The `consumes` grant here plus the target's matching `provides` are what let the OS
+broker route the call; without both, every call is `403 not_granted`. Fails soft in the strongest
+sense: any broker error hides the tuition campaign entirely and the donation site carries on.
+See [`STUDENTS_INTEGRATION.md`](STUDENTS_INTEGRATION.md).
 
-The app's own Stripe-account UI and Cloudflare-tunnel token become the **standalone fallback**; the
-admin no longer touches them when running under OpenMasjidOS. Don't delete them until confirmed.
+## What is deliberately still local
 
-See also `docs/RESTORE_SSO_FIX.md` (required sign-in lockout fix).
+The app's own **Cloudflare tunnel** and its own **Stripe accounts** are not dead code awaiting
+removal — they are the standalone path, and a masjid running this app without OpenMasjidOS depends on
+them. When embedded, the in-app tunnel is force-stopped at boot so two tunnels never race, and the
+local Stripe accounts sit behind the vault unless an appeal names one explicitly.

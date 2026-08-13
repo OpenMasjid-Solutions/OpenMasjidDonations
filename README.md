@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Copyright (C) 2026 OpenMasjid-Solutions -->
+
 <p align="center">
   <img src="assets/Donations - rounded corners.png" alt="OpenMasjidDonations" width="280"/>
 </p>
@@ -212,8 +215,9 @@ the app, so it works with no internet.
   at different content.
 - The admin password is stored as a **scrypt hash**; sessions are signed, HTTP-only,
   SameSite cookies that become `Secure` over HTTPS.
-- A full [security and code-health audit](docs/audit/) was carried out on 2026-08-03;
-  its report, remediation notes and findings are in the repo.
+- Full [security and code-health audits](docs/audit/) were carried out on 2026-08-03 and
+  2026-08-13 — the reports, the remediation notes, what was fixed and what is still open
+  are all in the repo rather than in someone's head.
 
 ---
 
@@ -367,7 +371,8 @@ docker build -t openmasjiddonations:dev .               # the whole container
 | [`docs/REMOTE_ACCESS_INGRESS.md`](docs/REMOTE_ACCESS_INGRESS.md) | Public access, tunnels and base paths |
 | [`docs/STUDENTS_INTEGRATION.md`](docs/STUDENTS_INTEGRATION.md) | The tuition flow and the billing contract |
 | [`docs/RESTORE_SSO_FIX.md`](docs/RESTORE_SSO_FIX.md) | Recovering admin access after a restore |
-| [`docs/audit/`](docs/audit/) | The 2026-08-03 security and code-health audit |
+| [`docs/audit/`](docs/audit/) | The security and code-health audits, and what's still open |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Setting up, building, testing, and the ground rules |
 
 This is an OpenMasjidOS **app**; the platform that runs it lives in
 [OpenMasjidOS](https://github.com/OpenMasjid-Solutions/OpenMasjidOS), and apps are listed in

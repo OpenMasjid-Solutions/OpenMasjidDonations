@@ -25,8 +25,17 @@ so it keeps working — just confirm the points below.
    endpoint** you register with Stripe, and QR codes — these must be the public `omos.<domain>/<path>`,
    not the LAN host, when remote access is on.
 3. **Secure context for Stripe:** Cloudflare terminates TLS, so the browser sees `https://` even though
-   the OS proxies to your container over HTTP — Stripe Elements works. Trust `X-Forwarded-Proto` for
-   any server-side "am I https" checks.
+   the OS proxies to your container over HTTP — Stripe Elements works.
+
+   On trusting `X-Forwarded-Proto`: this app reads it for exactly **one** decision — whether to put
+   `Secure` on the session cookie it is about to set (`secureForRequest` in `server/src/auth.ts`) —
+   and Fastify's `trustProxy` stays **off**. That narrow use is safe even unsanitised, because a
+   forged value can only ever *restrict* where the sender's own cookie is sent; there is no
+   cross-user effect and nothing to gain. Do **not** widen it to a rate-limit key or an access
+   decision: the box is also reachable directly on the LAN, where nothing sanitises the header, and
+   the limiters are keyed on the real TCP peer for that reason. (Getting a written guarantee from
+   the platform about which forwarded headers its ingress strips is
+   [`audit/ACTION_REQUIRED.md`](audit/ACTION_REQUIRED.md) §3b.)
 
 ## Acceptance test
 

@@ -140,18 +140,66 @@ export interface FabricEmailMessage {
 }
 
 /** Last outcome of a Fabric email attempt, so the admin UI can tell whether email is set up
- *  in OpenMasjidOS WITHOUT us sending a probe on every settings load. In-memory only. */
+ *  in OpenMasjidOS WITHOUT us sending a probe on every settings load.
+ *
+ *  Kept in memory AND mirrored to the data volume by the owner of the store (see `primeEmailStatus`
+ *  / `onEmailStatusChange`), because in-memory alone made this a fact the app could only ever
+ *  discover by accident and then forget on the next restart. */
 export type EmailStatus = 'unknown' | 'ok' | 'not_configured' | 'rate_limited' | 'error' | 'no-fabric';
 let lastEmailStatus: EmailStatus = 'unknown';
+let emailStatusSink: ((s: EmailStatus) => void) | null = null;
+
 export function emailStatus(): EmailStatus {
   return lastEmailStatus;
+}
+
+/** Restore the last known status at boot (from the data volume). Ignores junk and 'unknown'. */
+export function primeEmailStatus(s: string): void {
+  const known: EmailStatus[] = ['ok', 'not_configured', 'rate_limited', 'error', 'no-fabric'];
+  if ((known as string[]).includes(s)) lastEmailStatus = s as EmailStatus;
+}
+
+/** Register a persistence sink, called whenever the status changes. */
+export function onEmailStatusChange(fn: (s: EmailStatus) => void): void {
+  emailStatusSink = fn;
+}
+
+function setEmailStatus(s: EmailStatus): void {
+  if (s === lastEmailStatus) return;
+  lastEmailStatus = s;
+  try {
+    emailStatusSink?.(s);
+  } catch {
+    /* persistence is best-effort; never let it break a send */
+  }
+}
+
+/**
+ * Is it worth ATTEMPTING to send through the Fabric right now?
+ *
+ * True unless we hold positive evidence that email cannot work — the platform said `not_configured`,
+ * or there is no Fabric at all. Everything else (never tried, a timeout, a 500, a rate limit) is
+ * "we don't know", and the honest answer to "we don't know" is to try.
+ *
+ * This is the gate on suppressing Stripe's own receipt in favour of our branded one, and it used to
+ * demand a previous SUCCESS ('ok'). That was a closed loop: the only thing that ever set 'ok' was a
+ * successful send, and the only sends that happened were ones the gate had already allowed — so on a
+ * fresh container the branded receipt could never be sent at all, and a restart re-closed it.
+ *
+ * The failure mode this direction is bounded and self-healing: if email really is unconfigured, the
+ * FIRST donation after the admin turns receipts on loses its receipt (we suppressed Stripe's, ours
+ * failed), the platform tells us `not_configured`, that is persisted, and every donation after it
+ * falls back to Stripe's own receipt. One donation, once — against every donation, for ever.
+ */
+export function emailLikelyAvailable(): boolean {
+  return lastEmailStatus !== 'not_configured' && lastEmailStatus !== 'no-fabric';
 }
 
 /** Send one email through the Fabric. Returns {sent} / {sent:false, reason}. NEVER throws;
  *  NEVER logs the recipient or the body (only a status code on failure). */
 export async function fabricEmail(msg: FabricEmailMessage): Promise<{ sent: boolean; reason?: string }> {
   if (!config.omosBaseUrl || !config.omosAppSecret) {
-    lastEmailStatus = 'no-fabric';
+    setEmailStatus('no-fabric');
     return { sent: false, reason: 'no-fabric' };
   }
   if (!msg.to.trim() || !msg.subject.trim() || !msg.text.trim()) return { sent: false, reason: 'empty' };
@@ -168,21 +216,21 @@ export async function fabricEmail(msg: FabricEmailMessage): Promise<{ sent: bool
     });
     clearTimeout(t);
     if (!res.ok) {
-      lastEmailStatus = 'error';
+      setEmailStatus('error');
       return { sent: false, reason: `http_${res.status}` };
     }
     const j = (await res.json().catch(() => ({}))) as { sent?: boolean; reason?: string };
     if (j.sent === true) {
-      lastEmailStatus = 'ok';
+      setEmailStatus('ok');
       return { sent: true };
     }
     const reason = j.reason ?? 'unknown';
-    lastEmailStatus = reason === 'not_configured' ? 'not_configured' : reason === 'rate_limited' ? 'rate_limited' : 'error';
+    setEmailStatus(reason === 'not_configured' ? 'not_configured' : reason === 'rate_limited' ? 'rate_limited' : 'error');
     return { sent: false, reason };
   } catch (err) {
     // Reached-but-failed / unreachable — NOT proof it's unconfigured, so don't say so.
     log.debug(`Fabric email failed: ${err instanceof Error ? err.message : String(err)}`);
-    lastEmailStatus = 'error';
+    setEmailStatus('error');
     return { sent: false, reason: 'unreachable' };
   }
 }
@@ -315,12 +363,6 @@ export async function platformReachable(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** Returns the platform username if the request carries a session the platform confirms,
- *  or null otherwise. Thin wrapper over probePlatform for callers that only need identity. */
-export async function platformUser(cookieHeader: string | undefined): Promise<string | null> {
-  return (await probePlatform(cookieHeader)).username;
 }
 
 // ── Stripe via the Fabric (platform-vaulted keys) ───────────────────────────────

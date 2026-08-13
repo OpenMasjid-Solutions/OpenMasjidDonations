@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Copyright (C) 2026 OpenMasjid-Solutions -->
+
 # Architecture & decisions — OpenMasjid Donations
 
 This records the non-obvious decisions. The reference template is
@@ -67,17 +70,19 @@ must not be renamed.
   with the app secret and `{text, title?, level?}` — e.g. "A new donation of £50 was
   received." Never sees the webhook URL; fails soft.
 
-## Stripe (later slices)
+## Stripe — the two rules everything else hangs off
 
 - One-time donations must work with **no inbound webhook** (a masjid box is usually
   LAN-only): the server creates a PaymentIntent, the client confirms with the
   Payment Element, and on the donor's return the server **retrieves** the
   PaymentIntent to verify `succeeded` before recording it. Webhooks are an optional
-  enhancement (recurring `invoice.paid`, resilience) for when the app is public.
+  enhancement (recurring `invoice.paid`, refunds made in Stripe's dashboard,
+  resilience) for when the app is public — never a requirement. The renewal
+  reconciliation and the lost-donation sweep exist because of this rule.
 - The **secret key is server-side only** — never sent to the browser, never logged,
   never committed. The browser sees only the publishable key.
 
-## Build order (vertical slices)
+## Build order (vertical slices) — the original plan, all shipped
 
 1. **Scaffold**: boots, themed shell, `/healthz`. ✅
 2. **Platform SSO + theme + local-password fallback** (Fabric: SSO, notifications, appearance). ✅
@@ -97,9 +102,12 @@ must not be renamed.
    month, average gift, per-appeal breakdown, 6-month trend). ✅
 9. Cloudflare Tunnel helper (bundled `cloudflared`, in-app token, supervised) for
    public access — no port-forwarding. ✅
-9. Appearance/theming polish, animations, friendly errors.
-10. README/screenshots/docs; tag `v0.1.0`; add the `registry.yaml` entry to
-    OpenMasjidAPPS (move `donations` out of `coming_soon`).
+10. Appearance/theming polish, animations, friendly errors. ✅
+11. README/screenshots/docs; tag `v0.1.0`; add the `registry.yaml` entry to
+    OpenMasjidAPPS (move `donations` out of `coming_soon`). ✅
+
+Everything after this list — tuition, alerts, email receipts, monthly plan management,
+refunds, the donor stop link, per-appeal accounts — has its own section below, newest last.
 
 ## OpenMasjidOS Fabric: SSO, Stripe vault & restore resilience (v0.16.0)
 
@@ -272,9 +280,10 @@ credentials or the From address.
   inject markup; images are embedded only from an http(s) URL (an uploaded `/uploads/…` header image is
   resolved to the Fabric public URL, and dropped when the app isn't publicly reachable). Sent
   non-blocking on the donation's first success (the donor's thank-you isn't delayed). **Receipt
-  strategy:** Stripe's own `receipt_email` is suppressed **only** when our email is enabled *and*
-  confirmed working (`emailStatus()==='ok'`), so a donor never ends up with zero receipts — until email
-  is proven working, Stripe's receipt stays as the fallback; the state is self-correcting per donation.
+  strategy:** Stripe's own `receipt_email` is suppressed only when our email is enabled *and* we hold
+  no positive evidence that OpenMasjidOS email is unavailable (`emailLikelyAvailable()` — false only
+  for `not_configured` / `no-fabric`, and persisted to the data volume via `store.setEmailStatus` so a
+  restart doesn't forget). See *The receipt gate was a closed loop* below for why it is that way round.
   There's no OS "is email configured?" endpoint, so the admin UI shows the last send/test outcome and a
   **"send test"** button (admin-only) rather than probing.
 - **Admin alerts (`alerts:`).** Declared ids: **`payment-failed`** (Stripe rejected a payment *setup* —
@@ -607,14 +616,10 @@ how to stop". A payer who cannot stop a card mandate rings their bank instead, a
 Fabric Stripe account that chargeback lands on the whole platform. The admin's control surface is
 the letter's branding and the panel's own Stop button.
 
-**The `emailStatus()` gate is skipped for monthly, and that is a fix, not a shortcut.**
-`lastEmailStatus` is only ever written inside `fabricEmail`, which is only reached when a donation
-already owed a letter, which required `emailStatus() === 'ok'` — a closed loop that no fresh
-container can break, and one that a restart re-closes (changing remote access in OpenMasjidOS
-restarts the app). The gate exists to avoid suppressing Stripe's own receipt in favour of one we
-cannot deliver; on the monthly branch there is nothing to suppress, because `createSubscription`
-never sets `receipt_email`. So skipping it there risks no lost receipt. **The one-time branch still
-has the closed loop** — recorded as a separate defect, not fixed here.
+**The email-availability gate is skipped for monthly.** It exists to avoid suppressing Stripe's own
+receipt in favour of one we cannot deliver; on the monthly branch there is nothing to suppress,
+because `createSubscription` never sets `receipt_email`. So trying costs the donor nothing even when
+we believe email is down, and the outbox keeps trying for three days.
 
 Everything in the letter is a LOCAL fact (amount, first-payment date, fund, reference), so the
 outbox can re-render it three days later without a Stripe call. Card details and the next payment
@@ -815,3 +820,38 @@ vault account that lands on the whole platform.
   reference at new keys with no 404 to notice.
 - **Test-mode money is counted in the totals**, with the appeal badged `TEST` and the donor shown a
   `TEST MODE` notice. Excluding it would make the headline fall with no explanation.
+
+## The receipt gate was a closed loop (v0.42.0)
+
+A donation records, **once at intent**, which receipt it is owed:
+
+| `donations.receipt` | meaning |
+|---|---|
+| `stripe` | Stripe sends its own built-in receipt; we send nothing. |
+| `pending` | Stripe's receipt was suppressed; **we** owe a branded one (the outbox retries for 3 days). |
+| `sent` / `skipped` | delivered, or permanently un-sendable (no/invalid address, recipient rejected). |
+
+Deciding once is the point: re-evaluating at confirm was the original double/zero-receipt bug, because
+the answer could differ from the one that decided whether to suppress Stripe's.
+
+Going `pending` means switching off the receipt the donor would otherwise certainly have got, so it
+needs a reason to believe we can deliver our own. That gate used to be `emailStatus() === 'ok'` — and
+`'ok'` is set in exactly one place, inside `fabricEmail`, which is reached only when a donation
+already owes a letter, which required `'ok'`. **A closed loop.** On any fresh container the branded
+receipt (shipped in v0.29.0) could therefore never be sent at all, and a restart re-closed it —
+including the restart the app performs on itself when remote access changes in OpenMasjidOS.
+
+The gate is now `emailLikelyAvailable()`: true unless we hold **positive** evidence that email cannot
+work — the platform answered `not_configured`, or there is no Fabric. Everything else (never tried, a
+timeout, a 500, a rate limit) is "we don't know", and the honest response to not knowing is to try.
+The status is persisted (`store.getEmailStatus` / `setEmailStatus`, mirrored from `fabric.ts` through
+a small sink) so the negative survives a restart.
+
+**The failure this direction is bounded and self-healing.** If email really is unconfigured, the first
+donation after the admin turns receipts on loses its receipt — we suppressed Stripe's, ours failed —
+the platform tells us `not_configured`, that is written down, and every donation after it falls back
+to Stripe's own receipt. One donation, once, against every donation, for ever.
+
+Do not tighten this back to "a previous send succeeded". If a cheap authoritative "is email set up?"
+probe ever appears on the Fabric, that is the right way to close the remaining gap; a success
+requirement is not.

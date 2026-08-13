@@ -21,22 +21,26 @@
 > - `OPENMASJID_BASE_URL` / `OPENMASJID_APP_SECRET` are still read from env every start and
 >   never persisted (`server/src/config.ts`).
 >
-> **Fix #2 — Stripe via the Fabric.** `manifest.yaml` sets `stripe: true` and adds an
-> optional `STRIPE_ACCOUNT` install setting. The server fetches the vaulted keys
-> server-to-server (`server/src/fabric.ts` `fetchFabricStripe`, in-memory cache only, never
-> persisted), and `effectiveAccountFor` / `accountById` (`server/src/index.ts`) use the
-> Fabric account when it's configured, falling back to locally-entered keys when the Fabric
-> is absent or unreachable. Confirm-on-return resolves the account by the donation's
-> recorded id (never re-resolves), so a config/reachability change can't strand a payment.
-> The admin Payments screen shows "Connected through OpenMasjidOS" instead of asking for
-> keys. Cloudflare/domain is unchanged for now (still the app's own tunnel) — see Fix #2 below.
+> **Fix #2 — Stripe via the Fabric.** `manifest.yaml` sets `stripe: true`. The server fetches
+> the vaulted keys server-to-server (`server/src/fabric.ts` `fetchFabricStripe`, in-memory
+> cache only, never persisted), and `resolveAccountFor` / `accountById`
+> (`server/src/index.ts`) use the Fabric account when it's configured, falling back to
+> locally-entered keys when the Fabric is absent or unreachable. Confirm-on-return resolves
+> the account by the donation's recorded id (never re-resolves), so a config/reachability
+> change can't strand a payment. The admin Payments screen shows "Connected through
+> OpenMasjidOS" instead of asking for keys.
 >
-> Verified by `scratchpad/verify-restore-fabric.mjs` (unreachable-platform recovery,
-> reachable-platform setup refusal, SSO sign-in, Fabric-only campaign + payment readiness,
-> and "the Stripe secret never reaches any client").
+> **Superseded in two places since.** The `STRIPE_ACCOUNT` install setting this brief proposed
+> was never shipped — the manifest declares **no** `settings:` at all and the account is chosen
+> in-app (v0.19.0), which is what keeps install one-click. And the account resolver was
+> rewritten in **v0.42.0** so each appeal may name its own account; `effectiveAccountFor` no
+> longer exists. See `docs/ARCHITECTURE.md` → *Per-appeal Stripe accounts*.
+>
+> Cloudflare/domain was also taken over by the platform in v0.17.0 (`domain: true`); the app's
+> own tunnel is now only the standalone fallback. See `docs/REMOTE_ACCESS_INGRESS.md`.
 
 **Severity:** high (no way into the admin panel until fixed).
-**Where:** `server/src/index.ts` — `GET /api/session` (~line 154) and `POST /api/setup` (~line 179).
+**Where:** `server/src/index.ts` — `GET /api/session` and `POST /api/setup`.
 **Applies to:** any OpenMasjidOS-integrated app; the same trap exists in OpenMasjid Display.
 
 ---
@@ -70,9 +74,19 @@ complete **and** local setup is refused → bricked.
 
 ## Fix #1 — never let the panel get bricked (do this)
 
-1. **Allow the local-password recovery even when SSO is configured.** Drop the `if (ssoConfigured())
-   return 403` in `/api/setup`; keep the `if (admin exists) 409` guard. "Set a password instead"
-   then always works as the recovery; SSO remains the convenient default.
+> ⚠️ **Read this before the numbered list.** The original brief said "drop the `403` in
+> `/api/setup`" outright. **That is wrong and shipping it would be a permanent unauthenticated
+> takeover.** Under SSO the local admin is never set, so `hasAdmin()` stays false for ever and an
+> unguarded `/api/setup` never closes — anyone who can reach the box could claim the panel, the
+> Stripe keys and the donor ledger, at any time, for the life of the install. What actually shipped,
+> and what must stay, is the **narrower** guard in step 1 below: refuse only while the platform is
+> *reachable*. It is listed in `CLAUDE.md` §13 as a security invariant.
+
+1. **Allow the local-password recovery when — and only when — SSO cannot sign you in.** Keep the
+   `if (admin exists) 409` guard, and refuse the anonymous claim with a 403 whenever SSO is
+   configured **and `probePlatform()` says the platform is reachable**. Allow it when SSO is not
+   configured at all (standalone) or the platform is currently unreachable. That is both
+   un-brickable *and* closed to a passer-by on the LAN while the platform is up.
 2. **Surface platform reachability** in `/api/session` (`sso: { enabled, reachable, username }`) so
    the web app can show "Can't reach OpenMasjidOS — [Retry] or [Set a password to get in]" instead of
    a dead loop.
@@ -80,17 +94,24 @@ complete **and** local setup is refused → bricked.
    from `process.env` every start (your `config.ts` already does; keep it). The platform changes the
    base URL across restarts/migrations, so a cached copy would re-introduce this bug.
 
+The residual risk — that the escape hatch is open to anyone during a genuine platform outage — is
+recorded as DONATIONS-005 in [`audit/ACTION_REQUIRED.md`](audit/ACTION_REQUIRED.md) §4a, with a
+recommendation (make abuse loud rather than closing the hatch) awaiting a decision.
+
 ### Verify
 
 Run with `OPENMASJID_BASE_URL=http://10.255.255.1` (unreachable) + any `OPENMASJID_APP_SECRET` →
 you must still be able to get in via **"Set a password instead."**
 
-## Fix #2 — move Stripe (and Cloudflare) into the OS Fabric (recommended; the owner asked for this)
+## Fix #2 — move Stripe (and Cloudflare) into the OS Fabric
 
-Donations currently stores its **own** Stripe accounts and Cloudflare-tunnel token
-(`server/src/index.ts` ~line 331 Cloudflare, ~line 360 Stripe accounts). The platform now centralizes
-these so the admin configures them **once in OpenMasjidOS** and every app shares them — and they're
-backed up/migrated with the OS, not per-app.
+> **Done.** Kept here as the record of why. The current, accurate description is
+> [`FABRIC_STRIPE_AND_DOMAIN.md`](FABRIC_STRIPE_AND_DOMAIN.md) — read that instead of the sketch
+> below, which proposes a `STRIPE_ACCOUNT` install setting that was deliberately never shipped.
+
+At the time, Donations stored its **own** Stripe accounts and Cloudflare-tunnel token. The platform
+now centralizes both so the admin configures them **once in OpenMasjidOS** and every app shares them
+— and they're backed up/migrated with the OS, not per-app.
 
 **Stripe via the Fabric (available now — OpenMasjidOS v0.29.0):**
 

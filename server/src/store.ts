@@ -676,6 +676,19 @@ export class Store {
     this.setRaw('fabric_stripe_account', id);
   }
 
+  /** The last decisive outcome of a Fabric email send ('ok' / 'not_configured' / …).
+   *
+   *  Persisted only so the app does not forget, on every restart, whether the masjid's OpenMasjidOS
+   *  email provider works — which is what decides whether a donor's receipt may be a branded one of
+   *  ours (Stripe's own suppressed) or must be left to Stripe. Not a secret, not a setting: a cached
+   *  observation, and the live value in memory always wins. See fabric.ts `emailLikelyAvailable`. */
+  getEmailStatus(): string {
+    return this.getRaw('email_status') ?? '';
+  }
+  setEmailStatus(status: string): void {
+    this.setRaw('email_status', status);
+  }
+
   /** Cached Stripe Product id per account + mode (test/live), for recurring prices. */
   getStripeProduct(accountId: string, mode: string): string | null {
     return this.getRaw(`stripe_product:${accountId}:${mode}`);

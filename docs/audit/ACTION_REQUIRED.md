@@ -5,6 +5,20 @@
 
 From the 2026-08-03 security and code-health audit. Ordered by urgency.
 
+> ### Where this stands as of 2026-08-13 (the v0.42.0 sweep)
+>
+> | Item | Status |
+> |---|---|
+> | §0a three-decimal currencies (DONATIONS-001) | **Fixed and shipped** in v0.39.0. Steps 1–4 below are still yours if any masjid runs BHD/JOD/KWD/OMR/TND — the fix does not rewrite historical rows. |
+> | §0b lost one-time donations (DONATIONS-002) | **Fixed and shipped** in v0.39.0. The sweep runs every 10 minutes; expect the ledger to have grown. |
+> | §1 credentials to rotate | Still none. Re-checked on 2026-08-13. |
+> | §3c compose deviates from the spec (DONATIONS-049) | **Answered, not changed.** The deviations are deliberate and now documented once, with reasons, in [`../ARCHITECTURE.md`](../ARCHITECTURE.md) → *Where this app intentionally differs*; `CLAUDE.md` §10 was rewritten to describe the shipped files instead of contradicting them. The spec had drifted, not the app. |
+> | §4f no CSP | **Still open.** Unchanged reasoning. |
+> | §4d root container · §4e digest-pinned base images · §4h session revocation | **Still open**, all needing a real container start or an auth-model change. |
+> | §4a `/api/setup` during an outage · §4b limiters behind the ingress · §4c anonymous de-anonymisation | **Still open** — these are the three decisions in §4 that are genuinely yours, and none has been made. |
+>
+> The 2026-08-13 sweep's own findings are in [`AUDIT_2026-08-13.md`](AUDIT_2026-08-13.md).
+
 ---
 
 ## 0. READ FIRST — money may have been mischarged

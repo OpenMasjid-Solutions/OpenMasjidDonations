@@ -1,100 +1,67 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <!-- Copyright (C) 2026 OpenMasjid-Solutions -->
 
-# Adopt the OS Fabric for Stripe + public URL (stop managing your own)
+# Vaulted Stripe keys and the public URL
 
-> **Status: IMPLEMENTED.** Stripe-via-Fabric shipped in **v0.16.0**; the public-URL /
-> base-path capability (`domain: true`) shipped in **v0.17.0**. For `domain`: `manifest.yaml`
-> sets `domain: true`; the server fetches `GET /api/fabric/site` (`server/src/fabric.ts`
-> `fetchFabricSite`, cached/last-good/fail-soft, never persisted) and is **base-path aware** —
-> Fastify `rewriteUrl` strips the admin-chosen prefix (e.g. `/donate`) that Cloudflare
-> forwards, and `index.html` is served with an injected `<base href>` + `window.__OMOS_BASE__`
-> (Vite `base:'./'`). The web reads the base (`web/src/base.ts`) and prefixes API/nav/asset
-> URLs; share links, QR codes and the Stripe webhook URL use the Fabric `publicUrl`. The
-> in-app Cloudflare tunnel remains only as the **standalone fallback**. Verified end-to-end
-> against the real built UI by `scratchpad/verify-domain.mjs`.
+> **Status: shipped.** Stripe-via-Fabric in **v0.16.0**, the account picker in **v0.19.0**, the
+> public-URL / base-path capability (`domain: true`) in **v0.17.0**, per-appeal accounts in
+> **v0.42.0**. This page is a short record of *what the app does and why*; the original
+> implementation brief it replaced had drifted far enough to be misleading (it still proposed an
+> install setting that was never shipped, and pointed at line numbers that had moved by hundreds).
 
-**Status (original brief):** ready to integrate. Platform support is live — **Stripe vault (OpenMasjidOS v0.29.0)**
-and **Cloudflare Tunnel / remote access (v0.30.0)**.
-**Why:** the admin now configures Stripe **once** in OpenMasjidOS (Settings → Payments) and runs the
-tunnel/domain **once** (Settings → Remote access). Every app shares them via the Fabric — so the
-admin never re-enters keys per app, and the values are backed up / migrated with the platform. The
-Donations app currently stores its **own** Stripe accounts (`server/src/index.ts` ~line 360) and its
-**own** Cloudflare token (~line 331); both should move to the Fabric, keeping the local versions only
-as a **standalone fallback** (when the app runs without OpenMasjidOS).
+The problem both capabilities solve is the same one: a masjid should configure a thing **once, in
+OpenMasjidOS**, and every app should share it — so keys are never re-pasted per app, and they are
+backed up and migrated with the platform rather than stranded on one app's data volume.
 
-> Keep all existing behaviour working standalone. The rule is: **if the Fabric is present, prefer it;
-> otherwise use your own local config.** Never persist Fabric-fetched secrets/URLs to `db.json`.
+## Stripe — `stripe: true`
 
----
+The admin stores named Stripe accounts once in **OpenMasjidOS → Settings → Payments**. This app:
 
-## 1. Stripe — `stripe: true`
+1. lists them for its own Payments screen — `GET /api/fabric/stripe/accounts`, returning
+   `{ accounts: [{ id, label }] }` and **never** keys;
+2. remembers which one the admin picked (the **id**, which is not a secret, in `kv`);
+3. fetches that account's keys when it needs them — `GET /api/fabric/stripe?account=<id>` →
+   `{ id, label, publishableKey, secretKey, webhookSecret }`.
 
-**Manifest:** add `stripe: true` (the platform issues your per-app `OPENMASJID_APP_SECRET`). You also
-already set `https: true` — keep it. Add an install setting so the admin picks **which** named account
-this app uses:
+Both calls are server→server with `X-OpenMasjid-App-Secret`, `redirect: 'error'`, and a 4-second
+timeout. See `server/src/fabric.ts` (`fetchFabricStripeAccounts`, `fetchFabricStripeDetailed`).
 
-```yaml
-# manifest.yaml
-stripe: true
-settings:
-  - key: STRIPE_ACCOUNT
-    label: Which Stripe account (name it in OpenMasjidOS → Settings → Payments)
-    type: text
+Four rules, each with a failure behind it:
+
+- **The keys are cached in memory and never written to the data volume.** A persisted copy would
+  survive a restore onto a new machine and permanently shadow the real vault account.
+- **There is no `STRIPE_ACCOUNT` install setting.** An earlier draft of this document proposed one;
+  it was never shipped, because the manifest declaring *any* `settings:` block turns a one-click
+  install into a dialog. The account is chosen inside the app instead.
+- **A non-ok response is split by status.** `404`/`403` is the platform answering "no such account"
+  and is cached; `429`/`5xx`/a transport failure is *no information*, so we serve the last good copy
+  (10 minutes) and do not cache. Conflating them turns one rate-limited request into a donation
+  outage — the Fabric budget is shared with every other app on the box.
+- **Local keys remain the standalone fallback**, and since v0.42.0 an appeal may name either kind
+  explicitly. See `docs/ARCHITECTURE.md` → *Per-appeal Stripe accounts*.
+
+## Public URL + base path — `domain: true`
+
+Card flows need absolute, internet-reachable URLs: the webhook endpoint the masjid registers with
+Stripe, QR codes for the door, and the stop link in a monthly donor's email. Ask the platform rather
+than guessing from a `Host` header (which is attacker-controlled, and absent in a background job):
+
+```
+GET /api/fabric/site  →  { enabled, domain, publicUrl, basePath }
 ```
 
-**Backend — fetch the keys instead of reading your own store when the Fabric is present:**
+`basePath` is the **admin-chosen** first path segment (default the app id, but they may set
+`donate`) — read it, never hardcode it. Cloudflare and the OS front door forward the **full** path
+without stripping the prefix, so the server is base-path aware: Fastify's `rewriteUrl` strips it
+before routing, and `index.html` is served with an injected `<base href>` plus
+`window.__OMOS_BASE__` for the web app (`web/src/base.ts`). When `enabled` is false the app falls
+back to its own Cloudflare tunnel, and failing that reports no public address at all — which callers
+must handle honestly rather than emit a LAN URL a stranger cannot resolve.
 
-```ts
-// server→server. Returns { id, label, publishableKey, secretKey, webhookSecret }.
-async function fabricStripe() {
-  if (!config.omosBaseUrl || !config.omosAppSecret) return null; // standalone → use local store
-  const r = await fetch(
-    `${config.omosBaseUrl}/api/fabric/stripe?account=${encodeURIComponent(process.env.STRIPE_ACCOUNT ?? '')}`,
-    { headers: { 'x-openmasjid-app-secret': config.omosAppSecret }, redirect: 'error' },
-  );
-  if (!r.ok) return null;
-  return r.json(); // cache in memory briefly; DO NOT write to db.json
-}
-```
+## See also
 
-Use these keys for charges (`secretKey`), the client (`publishableKey`), and webhook signature
-verification (`webhookSecret` — your existing `constructWebhookEvent(...)` at ~line 812). Where you
-read your local account today, try `fabricStripe()` first and fall back to the local account.
-
-## 2. Public URL — `domain: true`
-
-Card flows need **absolute** URLs that work from outside the LAN: Stripe `success_url` / `cancel_url`,
-the **public webhook endpoint** you register with Stripe, and QR codes to the donation page. Ask the
-platform instead of guessing the host:
-
-```yaml
-# manifest.yaml
-domain: true
-```
-
-```ts
-// → { enabled, domain, publicUrl }  e.g. publicUrl = "https://omos.example.org/donations"
-async function publicBase(req) {
-  if (config.omosBaseUrl && config.omosAppSecret) {
-    const r = await fetch(`${config.omosBaseUrl}/api/fabric/site`,
-      { headers: { 'x-openmasjid-app-secret': config.omosAppSecret }, redirect: 'error' });
-    if (r.ok) { const s = await r.json(); if (s.enabled && s.publicUrl) return s.publicUrl; }
-  }
-  return originFromRequest(req); // fallback: build from the incoming request host (today's behaviour)
-}
-```
-
-Then `success_url = `${base}/thank-you``, the Stripe webhook URL = `${base}/webhook`, QR target = `base`.
-
-## 3. Retire the self-managed copies (later)
-
-Once the Fabric paths are in and tested, you can drop the app's own **Stripe account UI** and
-**Cloudflare token UI** — or leave them as the standalone fallback. Don't remove them until the Fabric
-versions are confirmed working on a real OpenMasjidOS install.
-
-## Also read
-
-- `docs/RESTORE_SSO_FIX.md` in this repo — the **sign-in lockout** fix (required; same class of bug).
-- OpenMasjidAPPS `docs/BUILDING_AN_APP.md` §7 — the canonical Fabric contract for `stripe` + `domain`,
-  and the **Restore & migration resilience (REQUIRED)** rules (read env at runtime, never persist it).
+- [`USING_THE_FABRIC.md`](USING_THE_FABRIC.md) — every Fabric capability this app uses.
+- [`REMOTE_ACCESS_INGRESS.md`](REMOTE_ACCESS_INGRESS.md) — the single Cloudflare route, and the
+  502 that a wrong Service Type causes.
+- [`RESTORE_SSO_FIX.md`](RESTORE_SSO_FIX.md) — the sign-in lockout this work grew out of.
+- OpenMasjidAPPS `docs/BUILDING_AN_APP.md` §7 — the canonical Fabric contract.

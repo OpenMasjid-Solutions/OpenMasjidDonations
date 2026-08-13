@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- Copyright (C) 2026 OpenMasjid-Solutions -->
+
 # CLAUDE.md — OpenMasjidDonations
 
 > This file is the single source of truth for the **OpenMasjidDonations** app. Read it fully before writing any code. When in doubt, follow this document, then the two references in §2, over your own assumptions. If something is ambiguous, ask before guessing.
@@ -74,7 +77,14 @@ The remaining gap is small and self-healing: between the push and the build goin
 
 **Every push to `dev` that touches anything outside `paths-ignore` needs a fresh `-dev.N`** — including a workflow-only change. The build republishes whatever version the manifest says, so reusing `N` would quietly replace the contents of an already-published tag and leave every masjid on that version with no update to find.
 
-No `changelog.ts` entry for a dev build — that file is the "What's new" list of *releases*, and the entry is written when the work ships to stable.
+**`web/src/changelog.ts` carries an `Unreleased` entry on `dev`, and never on `main`.** That file is the "What's new" list a masjid reads, and the two channels want different things from it:
+
+- On **`dev`**, the first entry is `{ version: 'Unreleased', unreleased: true, … }` — a running, *properly detailed* account of what has landed since the last release. Not just the headline features: the security fixes, the corrections, the removals. It is what somebody on the Development channel needs in order to know what changed under them, and the working notes the release entry is later distilled from. Add to it as part of the same commit as the work; it needs no version bump of its own.
+- On **`main`**, there is no `Unreleased` entry at all, and the release entry carries **only the major changes** — what a masjid would actually notice. Detail that matters to a developer and not to a treasurer belongs on `dev` and in `docs/`.
+
+At release time you therefore *distil*, you don't move: write the `X.Y.Z` entry from the `Unreleased` notes keeping only what is major, and leave `dev`'s `Unreleased` to be emptied and started again for the next cycle. The `dev` → `main` merge will conflict on this file; resolving it means **taking `main`'s shape** (release entry, no `Unreleased`) and letting `dev` keep its own.
+
+`Release.unreleased` is what makes this safe to ship: the dialog renders that entry as "Unreleased — on the Development channel" instead of pretending to be a version, so a dev box never claims to be running a release that does not exist.
 
 `.github/workflows/build-image.yml` decides the channel from the git ref, not the event, so a manual run on `dev` can never publish `:latest`. Every dev build also gets an immutable `:dev-<12-char sha>` tag — `:dev` means "newest", `:dev-<sha>` identifies exactly which commit a box is running, which is what makes a bad dev build diagnosable and rollback-able despite the moving tag.
 
@@ -121,7 +131,7 @@ You are building an OpenMasjidOS app. Two repositories define how that is done. 
 ## 4. Scope
 
 ### ✅ In scope (v1.0)
-- **Public donation site** (no login): one or more donation pages/appeals, each with title, rich content, images, **preset amounts + a custom amount**, one-time and **monthly recurring** options, optional **cover-the-fees** and **Gift Aid** (UK) toggles, branded with the masjid's name/logo/colours.
+- **Public donation site** (no login): one or more donation pages/appeals, each with title, rich content, images, **preset amounts + a custom amount**, one-time and **monthly recurring** options, an optional **cover-the-fees** toggle, branded with the masjid's name/logo/colours.
 - **Card payments via Stripe**, on-brand (Stripe **Payment Element**, embedded), with a clean success/thank-you page and optional emailed receipt.
 - **Admin panel** (login-protected): create/edit/reorder/delete donation pages; rich-text + image editor; manage preset amounts; theme options (light/dark, accent, logo, wallpaper); Stripe configuration; **donations log + simple stats** (totals, by appeal, recent, CSV export).
 - **Startup configuration:** receive masjid details from the platform profile (see §6); accept Stripe keys + currency (via install settings and/or in the admin).
@@ -135,7 +145,8 @@ You are building an OpenMasjidOS app. Two repositories define how that is done. 
 - Modifying the OpenMasjidOS platform or the OpenMasjidAPPS contract.
 
 ### 🔭 Later (design for, don't build now)
-- Additional payment providers; donor accounts; recurring-donation management portal for donors; multi-currency per appeal; webhook-driven recurring receipts when the box is publicly reachable.
+- Additional payment providers; donor accounts; multi-currency per appeal; webhook-driven recurring receipts when the box is publicly reachable.
+- **Gift Aid (UK) — half-built, and be honest about it.** The data model carries the flag (`campaigns.gift_aid`, `donations.gift_aid`, and a `giftAid` value in the Stripe metadata), but **nothing collects the declaration** — no UK-taxpayer confirmation, no name-and-home-address capture — and neither the admin form nor the donor page exposes the toggle at all. So it is a column, not a feature. Do not describe it as shipped (the README correctly doesn't), and do not delete the column: the shape is right and the missing half is the declaration form. See `docs/ARCHITECTURE.md` → Build order, item 6.
 
 ---
 
@@ -172,11 +183,15 @@ Declare the fields the app needs via **`uses_profile`** in `manifest.yaml`. The 
 **Be resilient:** if any `MASJID_*` var is absent (the platform's central-profile feature is still being finalised), fall back to values the admin enters in-app. **Never hard-fail because a profile var is missing.** Admin-entered values, once set, take precedence and persist to the data volume.
 
 ### Stripe configuration
-Stripe keys + currency may arrive two ways; support both, with the data-volume copy as the source of truth:
-1. **Install settings** (optional, via `manifest.yaml` `settings`): `STRIPE_PUBLISHABLE_KEY` (text), `STRIPE_SECRET_KEY` (password), `STRIPE_WEBHOOK_SECRET` (password, optional), `CURRENCY` (text/select, default from `MASJID_CURRENCY`).
-2. **In the admin panel** — a "Connect Stripe" / payment-settings screen. This keeps install one-click (like Display) and lets the masjid set or rotate keys without reinstalling.
+**`manifest.yaml` declares NO `settings:` block** — install is genuinely one-click, with no dialog. Everything is chosen inside the app, and Stripe keys reach it three ways:
 
-Rules: the **secret key is stored server-side only** (in the SQLite config on the data volume, tight file perms), **never sent to the browser**, **never logged**. Show a clear **"TEST MODE"** badge when a `sk_test_`/`pk_test_` key is in use. The site refuses to show the donate button until a valid publishable+secret pair is configured, with a friendly "Donations aren't set up yet" message for visitors and a clear setup prompt for the admin.
+1. **The OpenMasjidOS vault** (`stripe: true`, the normal case when embedded). The admin sets Stripe up once in OpenMasjidOS → Settings → Payments; the app lists the accounts on its own Payments screen (`GET /api/fabric/stripe/accounts`) and fetches the chosen one's keys server-to-server. Those keys are held **in memory only** and never written to the data volume, so they track the vault across a restore.
+2. **Keys typed into the admin panel** — the standalone path, stored in SQLite on the data volume.
+3. **Environment variables** (`STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `CURRENCY`), read by `config.ts` as **first-run seeds only**. They are vestigial — no manifest setting produces them and the platform never injects them — but `docker-compose.yml` still references them, so an operator running the container by hand can use them. Once the admin saves a value in-app it wins.
+
+Since **v0.42.0 each appeal may name its own account** (`campaigns.payment_account`), so a Zakat page can settle somewhere separate from the general fund; `''` means "follow the site default", which is exactly the pre-v0.42.0 behaviour. See §13 and `docs/ARCHITECTURE.md` → Per-appeal Stripe accounts.
+
+Rules: the **secret key is stored server-side only**, **never sent to the browser**, **never logged**. Show a clear **"TEST MODE"** badge when a `sk_test_`/`pk_test_` key is in use — on the donor page as well as the panel. The site refuses to show the donate button until a valid publishable+secret pair is configured, with a friendly "Donations aren't set up yet" message for visitors and a clear setup prompt for the admin.
 
 ---
 
@@ -186,22 +201,28 @@ Rules: the **secret key is stored server-side only** (in the SQLite config on th
 - **Amounts:** **preset (static) buttons + a custom amount field**, both clearly shown; sensible min/max; currency from config. (This is the core "custom and static amounts" requirement.)
 - **Checkout (embedded, on-brand):** use **Stripe Payment Element**. Server creates a **PaymentIntent** (one-time) or a **Subscription** (monthly) with the secret key; client confirms with the publishable key. Keep the donor on the masjid's branded page.
 - **Cover-the-fees:** optional toggle so the donor can add the processing fee and the masjid receives the full intended amount. Compute transparently and show the donor the total.
-- **Gift Aid (UK, optional per appeal):** if enabled, collect the declaration (UK taxpayer confirmation + name + home address) and store it with the donation for the masjid's records.
-- **After paying:** a warm thank-you page; an **optional email receipt** (use Stripe's receipt emails, or send via configured SMTP if present — keep it optional and graceful if no mail is configured). Record the donation locally for the admin log.
+- **Gift Aid (UK):** not built — see §4 "Later". The flag exists in the data model and nothing collects a declaration.
+- **After paying:** a warm thank-you page; an **optional email receipt** through the OpenMasjidOS email provider (`email: true`), so the app never sees the masjid's mail credentials. Graceful when email isn't set up: the donation is still recorded and thanked on screen, and Stripe's own receipt is used instead. Record the donation locally for the admin log.
 - **Trust:** the payment area should feel secure and professional (clear amounts, Stripe's lock/badging, no jarring layout shift). It must be fast on a Raspberry Pi.
 
 ---
 
 ## 8. The admin panel
 
-Login-protected (platform SSO when embedded; local password fallback). Sections:
-- **Appeals** — list, create, edit (rich content + image upload), reorder, activate/deactivate, delete.
-- **Appearance** — light/dark/follow-system, accent colour, masjid logo, wallpaper; live preview; matches the dashboard theme when launched from OpenMasjidOS.
-- **Payments** — Stripe keys, currency, cover-the-fees default, Gift Aid default, test/live indicator, optional webhook secret + the webhook URL to paste into Stripe (only relevant if publicly exposed).
-- **Donations** — a log of received donations (amount, appeal, date, donor name/email if given, one-time/recurring, status), totals and simple stats (this period, by appeal), and **CSV export**.
-- **About** — version, links, and the **AGPL "Source code"** link to this repo.
+Login-protected (platform SSO when embedded; local password fallback). **Eight tabs** behind a bottom dock, as shipped — keep this list and the README's table in step:
 
-Uploaded images and all settings/records live on the data volume (`/opt/openmasjid/apps/donations/data`). Validate and constrain uploads (type, size).
+- **Overview** — total raised, this month, count, live appeals, average gift, per-appeal breakdown, 6-month trend.
+- **Campaigns** — list, create, edit (content + image upload), reorder, activate/deactivate, delete; live preview; presets/min/max/goal, monthly option, fee rule, widget, and **which Stripe account this appeal pays into**.
+- **Donations** — the ledger (amount, appeal, date, donor if given, one-time/recurring, status, refund state), a per-donation detail window with that donor's history, **refunds** (full or part, with a reason and an optional donor email), and **CSV export**.
+- **Monthly** — every recurring plan, its live Stripe state and payment history, and pause/resume/stop/end-date controls.
+- **Thank-you** — the on-screen thank-you and the emailed receipt's design, with "send me a test".
+- **Large gifts** — the threshold, wording and QR image for the bank-transfer suggestion.
+- **Payments** — Stripe accounts (local and vaulted), the site default, currency, test/live indicator, and the optional per-account webhook URL.
+- **Settings** — masjid details, appearance, notifications, email receipts on/off, public access.
+
+Plus a guided first-run setup, and an account menu carrying the version, **"What's new"**, and the AGPL **"Source code"** link to this repo.
+
+Uploaded images and all settings/records live on the data volume (`/data` in the container — see §10). Validate and constrain uploads (type, size).
 
 ---
 
@@ -210,55 +231,41 @@ Uploaded images and all settings/records live on the data volume (`/opt/openmasj
 - Use the official **`stripe`** Node SDK (server) and **`@stripe/stripe-js`** + **`@stripe/react-stripe-js`** (client). Pin versions and a fixed Stripe **API version**.
 - **One-time:** create a PaymentIntent server-side (amount in the smallest currency unit, correct currency, metadata: appeal id, gift-aid, cover-fees). Confirm with Payment Element. On return, **retrieve** the PaymentIntent server-side to verify `succeeded` before recording — never trust the client's word.
 - **Recurring (monthly):** create a Stripe **Customer + Subscription** (or a Checkout Session in `subscription` mode). Ongoing charge confirmation ideally uses the `invoice.paid` **webhook**, which requires public ingress — so treat ongoing recurring tracking as best-effort and document the dependency. Creating the subscription works fine on a LAN (outbound only).
-- **Idempotency:** use idempotency keys on PaymentIntent/Subscription creation to avoid duplicates on ret␣ies.
-- **Webhooks (optional):** if `STRIPE_WEBHOOK_SECRET` is set, expose `/api/stripe/webhook`, **verify the signature**, and handle `payment_intent.succeeded`, `checkout.session.completed`, `invoice.paid`. If not set, the app relies on the retrieve-on-return flow.
+- **Idempotency:** use idempotency keys on PaymentIntent/Subscription creation to avoid duplicates on retries. A **refund**'s key is *derived* — `refund:<pi>:<already-refunded>:<amount>` — not random, so a double-clicked button gives the money back once while a genuine second part-refund of the same size still goes through.
+- **Webhooks (optional, per account):** `POST /api/stripe/webhook/:accountId`, gated on that account having a webhook secret, signature **always verified**. Handles `payment_intent.succeeded`, `invoice.paid` / `invoice.payment_succeeded` (renewals only) and `charge.refunded` (which is how a refund made in the masjid's own Stripe dashboard reaches this app's totals). Without a webhook the app relies on retrieve-on-return plus the renewal reconciliation and the lost-donation sweep, which is the supported LAN configuration.
 - **Amounts & currency:** always compute in integer minor units server-side; never trust client-sent amounts beyond appeal min/max validation. Default currency from `MASJID_CURRENCY`.
 - **Rate-limit** the donation-creation and webhook endpoints. Validate all inputs (zod).
 
 ---
 
-## 10. Manifest, compose & registry (follow APP_MANIFEST_SPEC + Display)
+## 10. Manifest, compose & registry
 
-**`manifest.yaml`** (root of this repo) — fields per the spec:
-```yaml
-id: donations
-name: OpenMasjid Donations
-tagline: Take card donations on your masjid's network with Stripe
-category: donations
-version: 0.1.0
-author: hasan-ismail
-license: AGPL-3.0
-icon: icon.svg
-screenshots:
-  - screenshots/1.png
-  - screenshots/2.png
-uses_profile: [name, address, email, phone, website, currency, timezone, language]
-settings:
-  - { key: STRIPE_PUBLISHABLE_KEY, label: Stripe publishable key, type: text,     required: false, description: "Starts with pk_. You can also set this inside the app." }
-  - { key: STRIPE_SECRET_KEY,      label: Stripe secret key,      type: password, required: false, description: "Starts with sk_. Stored on your device, never shared." }
-  - { key: STRIPE_WEBHOOK_SECRET,  label: Stripe webhook secret,  type: password, required: false, description: "Optional. Only needed if you expose donations publicly." }
-  - { key: CURRENCY,               label: Currency,               type: text,     required: false, description: "ISO code, e.g. GBP. Defaults to your masjid currency." }
-ports:
-  - { container: 8080, label: Donations site, default_host: 7870 }
-resources:
-  memory_hint: 128M
-  cpu_hint: 0.25
-  storage_hint: 200M
-  arch: [amd64, arm64]
-```
-(Keep install settings optional so install stays one-click; Stripe can be configured in-app.)
+> **The files on disk are the specification; this section describes them.** `manifest.yaml` and `docker-compose.yml` are read verbatim by the OpenMasjidAPPS catalog, and both **deliberately deviate from APP_MANIFEST_SPEC where Display and the platform actually differ from it** (the §2 prime directive). Those deviations are enumerated once, with reasons, in `docs/ARCHITECTURE.md` → *Where this app intentionally differs from the platform contract / Display*. Read that before "fixing" either file to match the spec — the last audit raised the mismatch as DONATIONS-049 and the answer was that the spec had drifted, not the app.
 
-**`docker-compose.yml`** — obey the spec's conventions exactly: required labels `com.openmasjid.app: donations`, `com.openmasjid.service: <name>`, `com.openmasjid.managed: "true"`; do **not** set a top-level `name:` (platform uses project `omos-donations`); map the platform-assigned port `"${OMOS_HOST_PORT_8080:-7870}:8080"`; bind the data volume under `/opt/openmasjid/apps/donations/data`; `restart: unless-stopped`; `env_file` the platform `.env`; **no** `privileged`, **no** docker.sock, **no** `network_mode: host`/`pid: host`; `cap_drop: [ALL]`; run as a **non-root** user; `read_only` root fs + `tmpfs` for `/tmp` where possible. The server listens on container port **8080** (non-root friendly). Copy Display's compose as the starting point and adapt.
+**`manifest.yaml`** — as shipped: `id: donations`, `author: OpenMasjid-Solutions`, `license: AGPL-3.0-only`, `icon: icon.svg`, `screenshots: [screenshots/1.svg]`, a long `description`, and the capability flags `sso`, `notifications`, `https`, `stripe`, `domain`, `email`, plus `alerts:` (five declared ids) and `fabric.consumes: [students/billing]`.
+
+Three absences are deliberate and each is load-bearing:
+
+- **No `settings:`** — install is one-click with no dialog (§6).
+- **No `uses_profile` / no `MASJID_*` dependency** — the platform injects no masjid profile. Those env vars are read as optional first-run seeds and nothing hard-fails without them.
+- **No `resources:` / no `default_host`** — the platform assigns the host port itself.
+
+**`docker-compose.yml`** — one service, `image:` pinned per channel (see the Branching policy), `restart: unless-stopped`, an `environment:` block that **must** reference every `${VAR}` the platform injects (compose `--env-file` only does substitution — an unreferenced var never reaches the container), a **named volume** `data:/data`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, `tmpfs: [/tmp]`, and a static `"7870:8080"` mapping. **Never** `privileged`, the docker socket, `network_mode: host` or `pid: host`. No top-level `name:` (the project is `omos-donations`).
+
+Known gap, recorded not hidden: the container still **runs as root** and the root filesystem is not `read_only`. Both need an entrypoint that chowns the volume plus one real container start to prove the database is still writable — see `docs/audit/ACTION_REQUIRED.md` §4d.
+
+**Registry.** The app is listed in OpenMasjidAPPS `registry.yaml` with `ref:` (the stable `vX.Y.Z` tag, plus an immutable `commit:`) and `dev_ref: dev`. Updating that entry is the last step of the release runbook (§16).
 
 ---
 
 ## 11. Tech stack (match Display)
 
-- **TypeScript everywhere.** `strict` on, no `any` without a justifying comment.
-- **`server/`** — Node 20+ + **Fastify** REST API (WebSocket only if you actually need live updates; donations probably don't). **better-sqlite3** for storage. **`stripe`** SDK. **scrypt** (Node built-in, N=2^16) for the fallback admin password — no external crypto dependency. Validate input with **zod**.
-- **`web/`** — **React + Vite + TypeScript + Tailwind**, **shadcn/ui** components, **Motion** for animation, **lucide-react** icons, **@stripe/react-stripe-js** for the Payment Element. One app serving the public site and the `/admin` panel.
+- **TypeScript everywhere.** `strict` on, plus `noUnusedLocals`/`noUnusedParameters`; no `any` without a justifying comment.
+- **`server/`** — **Node 22** (what the image runs) + **Fastify 5**. **better-sqlite3** for storage. **`stripe`** SDK (the API version is pinned by the SDK version in `package.json` — we never pass `apiVersion`, so it cannot silently drift). **scrypt** (Node built-in, N=2^16) for the fallback admin password — no external crypto dependency. Validate every external input with **zod**. No WebSockets: nothing here needs a live channel.
+- **`web/`** — **React 18 + Vite + TypeScript**, styled with **Display's own design tokens** (`tokens.css`, `glass.css`, copied verbatim so the app matches the live dashboard) plus **Tailwind utilities only, preflight off**, mapped onto those CSS variables. **Motion** for animation, **lucide-react** icons, **qrcode.react** for share codes, **@stripe/react-stripe-js** for the Payment Element. No component library — there is no shadcn/ui here and adding one would fight the tokens. One app serving the public site and the `/admin` panel.
+- **Tests** are `node --test` with `tsx`, listed explicitly in `server/package.json`'s `test` script. **A new `*.test.ts` file must be added to that list or it silently never runs.**
 - **One container** via a multi-stage **Dockerfile** (build web, build server, final runtime serves the web build + API), exactly like Display. `docker compose up -d` runs it.
-- Keep it **lean and Pi-friendly**; lazy-load the admin bundle so the donor page stays light.
+- Keep it **lean and Pi-friendly**; lazy-load the admin bundle, the donor stop page and the release notes so the donation page stays light.
 
 ---
 
@@ -279,8 +286,8 @@ Match the OpenMasjid family — the polish must equal Display and the dashboard.
 - Stripe **secret key server-side only**; never to the client, never logged, never committed. Publishable key is the only key the browser sees.
 - **Never handle raw card data** — Stripe Elements only (PCI SAQ-A).
 - **Verify Stripe webhook signatures**; verify payment status by server-side **retrieve**, never by trusting client claims.
-- Admin behind auth (platform SSO server-to-server, verified with the platform — never trust the browser — with a local argon2 password fallback). Sessions: signed, HTTP-only, SameSite cookies.
-- **Rate-limit** donation creation and webhook endpoints; validate/limit uploads; sanitise rich content to prevent stored XSS on the public page.
+- Admin behind auth (platform SSO server-to-server, verified with the platform — never trust the browser — with a local **scrypt** password fallback). Sessions: signed, HTTP-only, SameSite=Lax cookies that gain `Secure` when the request arrived over TLS.
+- **Rate-limit** donation creation, monthly sign-ups, the webhook, the tuition lookup, the donor stop link and every outbound platform call; validate/limit uploads (raster only — never SVG, which can carry script and is served from our own origin); render all user-supplied text as React nodes, never `dangerouslySetInnerHTML`.
 - Least-privilege container (per §10). Outbound HTTPS to Stripe only; assume no inbound by default.
 - Note for admins (in docs): taking donations from outside the masjid network means exposing the app publicly — recommend doing so only behind HTTPS (e.g. the platform's remote-access/tunnel helper).
 
@@ -294,6 +301,9 @@ Match the OpenMasjid family — the polish must equal Display and the dashboard.
 - **Tuition `record-payment` MUST carry the per-child `students[]` split for picked months (v0.34.0):** Students books a tuition charge as one ledger row **per child**, taken from `students[]` if sent and otherwise **derived** by walking the *family's* open invoices oldest-due-first — a derivation that **ignores `allocations`** (the provider parses that field and drops it). Sending only `allocations` therefore credits whichever child owns the family's oldest bill, not the child whose month the parent ticked: money stays in the family but the wrong child's invoice is paid down. Derive the split server-side from the session's ticked invoices (`computeTuitionAmount`), persist it (`student_payments.students_split`) so the outbox retry books it identically, and omit it only for "pay the full balance" (there the derived split is the same answer). It must sum to `amountCents` exactly or Students returns 422 — if any invoice lacks a `studentId`, send no split rather than a partial one.
 - **Tuition lookup is the v2 (PIN-free) flow (contract §11.0, provider 0.39.0):** `lookup` takes the **Student ID alone** at `"v": 2` — a v1 `{name, pin}` body **400s**, so it cannot half-work. `identify` must be called first and the parent must confirm the echoed name *before* `lookup` runs: that confirmation is the safeguard that replaced the PIN. `identify` and `lookup` share ONE per-peer rate-limit bucket (as the provider shares one per-code bucket) so switching endpoints can't launder attempts, and both are uniform on not-found (unknown / withdrawn / locked / payments-off are indistinguishable — no enumeration oracle). `info`, `record-payment` and `check` are unchanged and deliberately still send `"v": 1`: never migrate the money path as a side effect of a lookup change.
 - **Monthly plans act only on subscriptions WE created, and their catch-up may only add real money (v0.38.0):** the plans index is the LOCAL `donations` rows (`recurring = 1` + a `subscription_id`), and **every plan write path — admin *or donor* —** resolves the id through that index before touching Stripe: the `/api/admin/plans…` list and all four write routes, **and the donor's own `/api/public/plan/{lookup,cancel}` (v0.42.0), which must use `findSeed(planSeeds(), …)` and NOT `getDonationBySubscription` — the latter lacks the `recurring = 1 AND subscription_id <> ''` filter that makes the index trustworthy.** That donor path is unauthenticated (a 128-bit token emailed to the donor), so it must also never reach `syncPlan` — that helper lists invoices and INSERTs donation rows, and its only guard is a `Sec-Fetch-Site` check that cannot hold for a link in an email, so a mail scanner's prefetch would drive writes against the masjid's Stripe account. Read state with `fetchPlanState` alone, and never write an audit line with `audit(req, …)` there (its actor falls back to `local admin`, which would file a donor's cancellation as the masjid's own action). Never widen it to `subscriptions.list`: a Fabric-vaulted Stripe account is **shared** with the platform's other apps, so that would show (and let an admin cancel) another app's subscriptions, and it is also the mechanism that keeps tuition out (tuition is written to `student_payments`, never `donations` — structurally absent, not filtered). Renewal **reconciliation** may only INSERT a donation for a **paid** invoice, keyed on its PaymentIntent (UNIQUE = idempotent), stamped with the date the money actually arrived; never for a failed/open one, and it must stay **silent** (no receipt email, no `notify`) — it is a catch-up, not an event. Abandoned monthly sign-ups (a `/intent` row whose card was never entered) may only be **hidden after** a sync that was allowed to reconcile — never filtered out of the index that *feeds* the sync, because a first payment that succeeded but was never confirmed looks identical locally and reconciliation is the only thing that can rescue it. And `cancel_at_period_end` is not a "take one more payment" option (Stripe raises no further invoice) — never reintroduce it as one.
+- **Refunds: Stripe owns how much is left, and nothing is written until it confirms (v0.42.0).** A refund is recorded as an **amount** (`donations.refunded_amount`), never as a status — `status` stays the *payment's* outcome, because the money really did arrive and a status cannot express a part refund. Every money figure the masjid sees is therefore `amount - refunded_amount`. The route must **read the charge from Stripe first** and sync our row to it before deciding anything: a masjid can refund from Stripe's own dashboard and a LAN-only box may never see the `charge.refunded` webhook, so our row is not evidence. `setDonationRefund` is monotonic and clamped to `amount`, which is what makes a replayed or out-of-order webhook harmless. The idempotency key is **derived** (`refund:<pi>:<already>:<amount>`), never random. And the account is resolved by the id **recorded on the donation** (`accountById`), never by the campaign's current choice — money taken on account A is refunded on account A for ever.
+- **Per-appeal Stripe accounts: an existing appeal's destination depends only on data that existed before the upgrade (v0.42.0).** `campaigns.payment_account` defaults to `''` with **no backfill and no inference** from `stripe_account_id`, and the `''` branch of `resolveAccountFor` is the pre-v0.42.0 resolver verbatim — the globally-chosen vault account when configured, else the campaign's legacy local account read *straight from the local table*, not through the widened `accountById`. An explicit choice is **honoured or refused**, never substituted: an unresolvable or unparseable reference stops that appeal taking cards rather than quietly settling elsewhere (`fabric:` with an empty id would reach the platform as `?account=` omitted, which it answers with its **first** account, and the ledger would then record the substitute's id — nothing would look wrong). `accountById` is **bounded by `store.knownAccountIds()`**: `/api/stripe/webhook/:accountId` is unauthenticated by necessity, so without the bound a stranger could name arbitrary accounts and make us fetch each from the platform vault. A vault account must **never** be written into `stripe_accounts` (local resolves first, so a stale copy would shadow the real one for ever). And `fetchFabricStripeDetailed` must keep splitting non-ok by status — 404/403 is an answer worth caching, 429/5xx is *no information* and must serve the last-good copy, or one throttled request becomes a donation outage and the reboot watcher restarts a box mid-donation.
+- **Suppressing Stripe's receipt requires believing we can send our own (v0.42.0).** `receipt` is decided ONCE at intent and never re-evaluated at confirm (re-deciding was the double/zero-receipt bug). Going branded suppresses Stripe's built-in receipt, so it is gated on `emailLikelyAvailable()` — true unless we hold *positive* evidence email cannot work (`not_configured` / `no-fabric`), persisted across restarts via `store.setEmailStatus`. It must **not** be tightened back to "a previous send succeeded": that was a closed loop (only a permitted send could set `'ok'`, and only `'ok'` permitted a send) which made the branded receipt unsendable on every fresh container. The monthly setup letter deliberately bypasses this gate *and* the receipts toggle — there is no Stripe receipt to suppress on that branch, and that letter carries the donor's only self-service way to stop a charge on their card.
 
 ---
 
@@ -306,29 +316,35 @@ Match the OpenMasjid family — the polish must equal Display and the dashboard.
 
 ---
 
-## 15. Build & run (mirror Display)
+## 15. Build & run
+
+Node 22 (what the image uses).
+
 ```bash
-# server (API + Stripe + storage)
+# server (API + Stripe + storage). `build` is tsc; `test` is node --test via tsx.
 cd server && npm install && npm run build && npm test
 
-# web (donor site + admin)
+# web (donor site + admin). `build` runs tsc --noEmit, then vite build.
 cd web && npm install && npm run build
 
 # everything together (Docker; also what the App Store runs)
 docker compose up -d
 ```
-For local dev: run the server, run `cd web && npm run dev` (Vite proxies `/api` to the server). Use Stripe **test keys** and Stripe's test cards; optionally `stripe listen` to forward webhooks to localhost while developing the optional webhook path.
+
+Two extra scripts exist and are worth knowing: `server/npm run dev` (tsx watch) and `server/npm run typecheck` (tsc --noEmit, the fast inner loop).
+
+For local dev run the server on :8080 and `cd web && npm run dev` on :5173 (Vite proxies `/api` to the server). Use Stripe **test keys** and Stripe's test cards; the app shows a **TEST MODE** badge whenever one is in use. Optionally `stripe listen` to forward webhooks to localhost while developing the optional webhook path.
 
 ---
 
 ## 16. CI & versioning
 - **Check `README.md` still describes the app when you ship a user-visible feature.** It is the first thing anyone sees, and nothing else in this runbook forces it to be touched — which is exactly how it once drifted to describing v0.13.0 while the app was at v0.40.0. Deliberately it carries **no** version number or test count (the release badge and the changelog cover that), so only a real feature change should require an edit: a new admin tab, a new donor-facing capability, a new platform integration.
-- **Add a `web/src/changelog.ts` entry with every release** — it's what the "What's new" item in the account menu shows. Plain, non-technical, what changed *for the masjid*; same voice as the App Store note in OpenMasjidAPPS `registry.yaml`, since they see both. It is loaded on demand, so never import it eagerly (that would put admin-only text in the donation page's bundle).
-- **`VERSION`** file at the root is the single source of truth; stamp it into the build.
-- **Semver, `0.x` = pre-release.** Start at `0.1.0`. Tag releases `vX.Y.Z`.
+- **Add a `web/src/changelog.ts` entry with every release** — it's what the "What's new" item in the account menu shows. Plain, non-technical, what changed *for the masjid*; same voice as the App Store note in OpenMasjidAPPS `registry.yaml`, since they see both. **Only the major changes go in a release entry**; the running detail lives in `dev`'s `Unreleased` entry — see the Branching policy. It is loaded on demand, so never import it eagerly (that would put admin-only text in the donation page's bundle).
+- **The version lives in FOUR files and they must agree**: `manifest.yaml` `version:` (the one CI reads and the catalog publishes), `server/package.json`, `web/package.json`, and the image tag in `docker-compose.yml`. There is deliberately **no `VERSION` file** (see `docs/ARCHITECTURE.md`); the server reports its version by reading the `package.json` shipped beside the runtime.
+- **Semver, `0.x` = pre-release.** Tag releases `vX.Y.Z`.
 - **GitHub Actions:** on a `v*` tag, build the multi-arch (amd64 + arm64) image and **push to GHCR** with the version tag (mirror Display's workflow). Then the app is added/updated in OpenMasjidAPPS `registry.yaml` with the new `ref`.
 - **Two channels.** The same workflow also publishes the moving `:dev` (+ immutable `:dev-<sha>`) pair from the `dev` branch. Stable tags come only from `main`/`v*`. See **Branching policy** at the top of this file — a release is the *only* thing that moves `main`, and only on Hasan's explicit "merge to main".
-- **On `dev`, the manifest `version:` is the last release, not the dev build.** It is bumped at release time, so a dev box reports the previous version while running newer code. Deliberate: bumping it on `dev` would make every `dev` → `main` merge conflict on that line, and a version number is meaningless on a moving channel. Use the `:dev-<sha>` tag to identify a dev build.
+- **A push to `dev` that touches only documentation needs no version bump.** `build-image.yml`'s `paths-ignore` covers `**/*.md`, `docs/**`, `screenshots/**`, `LICENSE` and `docker-compose.yml`, so those pushes publish nothing and there is no tag to collide with. Anything else — including a workflow-only change — needs a fresh `-dev.N`.
 
 ---
 
@@ -340,7 +356,7 @@ Builds via the documented commands and `docker compose up -d`; `tsc`/lint clean;
 ## 18. Working agreement for Claude (the coding agent)
 - **First, read the three repos** (OpenMasjidOS, OpenMasjidAPPS, OpenMasjidDisplay). Treat Display as the template and APP_MANIFEST_SPEC.md as the contract. When this file and Display's real code disagree, follow Display and flag it.
 - Build in **vertical slices**, each end-to-end (server + web + theme):
-  1. Repo scaffold: `server/` + `web/` + `Dockerfile` + `docker-compose.yml` + `manifest.yaml` + `icon.svg` + `LICENSE` (AGPL-3.0) + `VERSION` + CI, copying Display's structure; container boots and serves an empty themed shell + `/healthz`.
+  1. Repo scaffold: `server/` + `web/` + `Dockerfile` + `docker-compose.yml` + `manifest.yaml` + `icon.svg` + `LICENSE` (AGPL-3.0) + CI, copying Display's structure; container boots and serves an empty themed shell + `/healthz`.
   2. **Platform SSO + theme** (server-to-server) with local-password fallback — port Display's mechanism.
   3. Admin **Payments** screen + Stripe config (env + in-app), test-mode badge, "not set up yet" states.
   4. **Appeals** model + admin CRUD with rich content + image upload (SQLite + data volume).

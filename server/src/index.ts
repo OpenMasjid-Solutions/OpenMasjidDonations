@@ -17,10 +17,10 @@ import fastifyMultipart from '@fastify/multipart';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify, rid, RESERVED_SLUGS, parsePaymentAccount } from './store';
+import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
-import { notify, probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
+import { notify, probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
   REFUND_REASONS,
@@ -115,6 +115,11 @@ async function main(): Promise<void> {
   const loginLimiter = new LoginLimiter();
   const tunnel = new TunnelManager();
 
+  // Whether the masjid's OpenMasjidOS email provider works is something we can only learn by
+  // sending — so remember it across restarts rather than rediscovering it at a donor's expense.
+  primeEmailStatus(store.getEmailStatus());
+  onEmailStatusChange((s) => store.setEmailStatus(s));
+
   // Baseline fingerprint of the OpenMasjidOS Fabric config (Stripe account + remote-access
   // site). The watcher (started after listen) compares this over time and restarts the app
   // when the admin changes Stripe/remote-access IN OPENMASJIDOS, so the new config applies
@@ -163,8 +168,28 @@ async function main(): Promise<void> {
     if (!body) return done(null, undefined);
     try {
       done(null, JSON.parse(body as string));
-    } catch (e) {
-      done(e as Error, undefined);
+    } catch {
+      // Unreadable JSON is the CLIENT's mistake, and every route in this app answers one with a
+      // friendly 400 — but the parser was the one place that didn't, because a parser error never
+      // reaches `setErrorHandler`. Fastify serialises it itself, so whatever we throw here goes on
+      // the wire raw: a bare SyntaxError became `500 {"message":"Unexpected token n in JSON…"}`,
+      // and adding a `statusCode` only got the number right while still emitting Fastify's own
+      // `"error":"Bad Request"` — which is the exact field the web reads to decide what to show.
+      //
+      // So flag it and let the hook below refuse it through the normal reply path. It must NOT be
+      // swallowed as "no body" and left to the routes: `RefundBody.safeParse(req.body ?? {})`
+      // succeeds on an empty object and means "refund everything left", so unreadable JSON would
+      // become a full refund.
+      (req as unknown as { badJson?: boolean }).badJson = true;
+      done(null, undefined);
+    }
+  });
+
+  // `preValidation` runs after parsing and before every route's own preHandler, so a body we
+  // couldn't read is refused once, here, and no handler ever sees the request.
+  app.addHook('preValidation', async (req, reply) => {
+    if ((req as unknown as { badJson?: boolean }).badJson) {
+      return reply.code(400).send({ error: 'Please check the details and try again.' });
     }
   });
 
@@ -913,7 +938,17 @@ async function main(): Promise<void> {
   });
   app.delete('/api/admin/stripe-accounts/:id', { preHandler: requireAdmin }, async (req, reply) => {
     const res = store.deleteStripeAccount((req.params as { id: string }).id);
-    if (!res.ok) return reply.code(409).send({ error: 'A campaign uses this account. Reassign or delete those campaigns first.' });
+    // The two refusals are different problems with different fixes, and telling an admin to
+    // "reassign the campaigns" when there are none left just sends them looking for something that
+    // isn't there. Money already taken is the one that can never be resolved by editing a campaign.
+    if (!res.ok) {
+      return reply.code(409).send({
+        error:
+          res.reason === 'has-payments'
+            ? 'Donations were taken through this account, so it has to stay — removing it would leave those payments with no way to be refunded, and any monthly plans on it with no way to be stopped.'
+            : 'A campaign pays into this account. Point those campaigns somewhere else (or delete them) first.',
+      });
+    }
     audit(req, 'stripe.account.delete', (req.params as { id: string }).id, 'removed a Stripe account');
     return { data: { ok: true } };
   });
@@ -2088,8 +2123,11 @@ async function main(): Promise<void> {
     }
     // Reject non-finite/non-integer/out-of-range amounts (zod already requires > 0).
     if (!Number.isInteger(baseMinor) || baseMinor < 1) return reply.code(400).send({ error: 'Please choose a valid amount.' });
-    // Stripe rejects very small charges; enforce a floor (~0.50 in 2-decimal currencies).
-    const floor = currencyDecimals(currency) === 0 ? 50 : 50;
+    // Stripe rejects very small charges; enforce a floor of roughly half a major unit, on the
+    // right scale for the currency. (This was a ternary whose two branches were both 50 — so a
+    // three-decimal currency's floor was 0.050 KWD, about 13 US cents, well under anything Stripe
+    // will take. Zero-decimal is deliberately 50 whole units, e.g. ¥50: half a yen does not exist.)
+    const floor = currencyDecimals(currency) === 3 ? 500 : 50;
     if (baseMinor < floor) return reply.code(400).send({ error: 'That amount is too small.' });
     // …and a sane ceiling (Stripe's per-charge max is 99,999,999 minor units).
     if (baseMinor > 99_999_999) return reply.code(400).send({ error: 'That amount is too large.' });
@@ -2129,23 +2167,25 @@ async function main(): Promise<void> {
     // the confirm/outbox send stays consistent with whether we suppressed Stripe's own receipt:
     //   • branded → suppress Stripe's built-in receipt + we send our branded one (receipt:'pending').
     //   • else    → let Stripe send its receipt; we send nothing (receipt:'stripe') → no double.
-    // We only go branded when the OS email is CONFIRMED working (emailStatus 'ok'), so a donor is
-    // never left with zero receipts because email wasn't set up; a transient failure after that is
-    // covered by the retry outbox. (Not re-evaluated at confirm — that was the double/zero bug.)
-    const branded = store.getEmailReceipt().enabled && ssoConfigured() && emailStatus() === 'ok';
+    // We go branded when the admin has asked for it and we hold no evidence that OpenMasjidOS email
+    // is unavailable (`emailLikelyAvailable`, which is persisted across restarts). It used to demand
+    // a previous SUCCESS, which was a closed loop that made the branded receipt unsendable on any
+    // fresh container — see the note on that function. (Not re-evaluated at confirm — that was the
+    // double/zero bug; a transient failure after this point is covered by the retry outbox.)
+    const branded = store.getEmailReceipt().enabled && ssoConfigured() && emailLikelyAvailable();
     // A MONTHLY donation always owes its donor the "your monthly donation is set up" letter, and it
-    // is gated on NEITHER the receipt toggle nor emailStatus. Both exclusions are deliberate:
+    // is gated on NEITHER the receipt toggle nor our belief about whether email works. Both
+    // exclusions are deliberate:
     //
     //  • Not the receipt toggle (which is off by default), because this letter is the donor's only
     //    self-service way out of a recurring charge on their card. A masjid should not be able to
     //    withhold that by leaving a receipts checkbox alone — and on a shared Fabric Stripe account
     //    a payer who cannot stop a mandate rings their bank instead, which costs everybody.
-    //  • Not emailStatus(), because that gate cannot be satisfied on a fresh container: it only ever
-    //    becomes 'ok' inside fabricEmail, which is only reached when a donation already owed a
-    //    letter — a closed loop, and one a restart re-closes (changing remote access in
-    //    OpenMasjidOS restarts us). It exists to avoid suppressing Stripe's own receipt in favour of
-    //    one we cannot deliver; on the monthly branch there is nothing to suppress, because
-    //    createSubscription never sets receipt_email. So skipping it here risks no lost receipt.
+    //  • Not emailLikelyAvailable(), because that gate exists only to avoid suppressing Stripe's own
+    //    receipt in favour of one we cannot deliver — and on this branch there is nothing to
+    //    suppress, since createSubscription never sets receipt_email. Trying costs a donor nothing
+    //    even when we believe email is down, and the outbox keeps trying for three days, so a masjid
+    //    that fixes their email provider that week still gets the letter out.
     //
     // Recorded ONCE, here, as receipt:'pending' — never re-decided at confirm (that was the
     // double/zero bug) — and the row's own `recurring` flag is what later picks the letter.
@@ -2298,6 +2338,9 @@ async function main(): Promise<void> {
 
   /** Resolve a stop-link token to one of OUR monthly plans, or null. Uniform on every failure. */
   const resolvePlanToken = (token: string): PlanSeed | null => {
+    // Shape first, so a flood of junk from a link scanner is refused without touching the database
+    // at all. Every real token is 32 lowercase hex characters (store.planLinkToken).
+    if (!looksLikePlanToken(token)) return null;
     const subscriptionId = store.planLinkSubscription(token);
     if (!subscriptionId) return null;
     const seed = findSeed(planSeeds(), subscriptionId);
