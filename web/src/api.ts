@@ -536,6 +536,50 @@ export const createIntent = (
 export const confirmDonation = (body: { paymentIntentId: string; slug: string; token?: string }) =>
   request<ConfirmResponse>('/api/public/confirm', { method: 'POST', body: JSON.stringify(body) });
 
+// ── A monthly donor's own "stop these payments" page (/stop/<token>) ─────────
+// The donor is emailed this link when their gift is set up; the token is the only credential, so
+// it authorises exactly two things — read this description, and stop the payments. Both are POSTs
+// with the token in the BODY: no GET may mutate (link-preview bots follow GET links), and it keeps
+// the token out of URL logs.
+
+/** What a donor may be told about their own monthly gift. Deliberately thin — the token can be
+ *  forwarded or sit in a shared inbox, so there is no donor name, no email, no card and no ids. */
+export interface PublicPlan {
+  /** The short reference also printed in their email, so the masjid can find it if they ring up. */
+  reference: string;
+  /** What is taken each time (major units), in the currency it is charged in. */
+  amount: number;
+  currency: string;
+  /** 'Monthly', 'Every 3 months', … or '' when we couldn't read it from Stripe. */
+  frequency: string;
+  campaignTitle: string;
+  /** Relative path to the campaign's donation page ('/zakat'), or '' if it's gone/hidden. */
+  campaignPath: string;
+  masjidName: string;
+  masjidLogo: string;
+  contactEmail: string;
+  contactPhone: string;
+  contactWebsite: string;
+  status: 'active' | 'paused' | 'past_due' | 'unpaid' | 'incomplete' | 'trialing' | 'canceled' | 'unknown';
+  /** The status in plain warm words — show this, never `status`. */
+  statusLabel: string;
+  /** '' = we are not saying (unknown, paused, or finished). Never a guessed date. */
+  nextPaymentAt: string;
+  /** False when Stripe couldn't be read on this request — the page says so and offers a retry. */
+  live: boolean;
+  /** Is there anything left to stop? */
+  canStop: boolean;
+}
+export interface PublicPlanStopped extends PublicPlan {
+  stopped: true;
+  /** True when it had already finished before they pressed — so we say "already stopped". */
+  alreadyOver: boolean;
+}
+export const lookupPlan = (token: string) =>
+  request<PublicPlan>('/api/public/plan/lookup', { method: 'POST', body: JSON.stringify({ token }) });
+export const stopPlan = (token: string) =>
+  request<PublicPlanStopped>('/api/public/plan/cancel', { method: 'POST', body: JSON.stringify({ token }) });
+
 // ── Tuition (Students billing) — the `tuition` campaign flow ─────────────────
 // Contract students/billing v2: the parent types a Student ID (no PIN), `identify` echoes the
 // child's name back for confirmation, and only then does `lookup` reveal the balances.

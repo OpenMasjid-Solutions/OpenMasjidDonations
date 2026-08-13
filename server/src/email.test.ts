@@ -7,7 +7,7 @@
 // images/links are emitted.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderReceipt, renderRefundNotice, fillVars, type ReceiptTemplate, type ReceiptContext, type RefundContext } from './email';
+import { renderReceipt, renderRefundNotice, renderMonthlySetup, fillVars, type ReceiptTemplate, type ReceiptContext, type RefundContext, type MonthlySetupContext } from './email';
 
 const TPL: ReceiptTemplate = {
   subject: 'Your donation receipt — {masjid}',
@@ -199,5 +199,112 @@ test('receipt and refund notice share one layout, so a donor reads the same lett
   const b = renderRefundNotice('', RCTX).html;
   for (const marker of ['max-width:540px', 'border-radius:14px', 'Sent by OpenMasjid Donations · Secured by Stripe']) {
     assert.ok(a.includes(marker) && b.includes(marker), `both must use "${marker}"`);
+  }
+});
+
+// ── Monthly plan set up ───────────────────────────────────────────────────────
+// This letter is the donor's ONLY self-service route out of a recurring charge on their card, so
+// three properties are locked here and nowhere else:
+//
+//  1. THE LINK SURVIVES. It must appear in both the HTML and the plain-text part, and in the text
+//     part it must sit on its own line with no trailing punctuation — a full stop folded into a URL
+//     by a mail client is a dead link and a donor who can't stop their payments.
+//  2. THE NO-LINK VARIANT IS COMPLETE. A LAN-only masjid has no public address, and the letter must
+//     then tell the donor to get in touch rather than print a URL they cannot reach.
+//  3. NOTHING INJECTS. The masjid's own accent/logo and the DONOR's name (unauthenticated) both
+//     reach the markup, and the subject becomes an SMTP header at the platform (DONATIONS-023).
+const MCTX: MonthlySetupContext = {
+  name: 'Yusuf',
+  amountText: '£25.00',
+  monthlyAmountText: '£25.00',
+  firstPaymentDate: 'Aug 3, 2026, 6:03 PM UTC',
+  stopUrl: 'https://masjid.example.org/donate/stop/0123456789abcdef0123456789abcdef',
+  campaignTitle: 'Zakat',
+  masjidName: 'An-Noor',
+  masjidLogo: '',
+  paymentMethod: 'Visa •••• 4242',
+  reference: '0065A17F',
+  contactEmail: 'info@annoor.org',
+  contactPhone: '718-555-5839',
+  contactWebsite: 'https://annoor.org',
+};
+
+test('monthly letter: says what was set up, with the figures a donor recognises', () => {
+  const r = renderMonthlySetup('', MCTX);
+  assert.equal(r.subject, 'Your monthly donation to An-Noor is set up');
+  assert.ok(r.html.includes('Your monthly donation is set up'));
+  for (const s of ['Monthly amount', '£25.00', 'First payment', 'Zakat', '0065A17F']) {
+    assert.ok(r.html.includes(s), `html should contain "${s}"`);
+  }
+  assert.ok(r.html.includes('every month until you decide to stop'));
+});
+
+test('monthly letter: the stop link is in BOTH parts, and alone on its own text line', () => {
+  const r = renderMonthlySetup('', MCTX);
+  assert.ok(r.html.includes(`href="${MCTX.stopUrl}"`), 'html must link it');
+  assert.ok(r.html.includes('Stop these payments'));
+  // The URL must also be readable as text in the HTML, for a client that strips the button.
+  assert.ok(r.html.split(MCTX.stopUrl).length - 1 >= 2, 'href AND visible text');
+  const line = r.text.split('\n').find((l) => l.includes('/stop/'));
+  assert.equal(line, MCTX.stopUrl, 'the text part must carry the URL alone, with nothing appended');
+});
+
+test('monthly letter: tells them to keep it, and why', () => {
+  const r = renderMonthlySetup('', MCTX);
+  for (const part of [r.html, r.text]) {
+    assert.ok(/Keep this email/.test(part), 'must ask them to keep it');
+    assert.ok(/only works from here/.test(part), 'must say why it matters');
+    assert.ok(/contact us/.test(part), 'and must name the fallback if they lose it');
+  }
+});
+
+test('monthly letter: with NO public address there is no link, but there is still a way out', () => {
+  const r = renderMonthlySetup('', { ...MCTX, stopUrl: '' });
+  assert.ok(!r.html.includes('Stop these payments'), 'no button');
+  assert.ok(!r.html.includes('/stop/'), 'and no URL anywhere');
+  assert.ok(!r.text.includes('/stop/'));
+  assert.ok(/get in touch/.test(r.html), 'it must still tell them how to stop it');
+  assert.ok(!/Keep this email/.test(r.html), 'and must not ask them to keep an email with no link in it');
+  // The figures are unchanged — the letter is still their confirmation.
+  assert.ok(r.html.includes('£25.00') && r.html.includes('Zakat'));
+});
+
+test('monthly letter: a non-https stop URL is dropped rather than linked', () => {
+  for (const bad of ['javascript:alert(1)', 'http://x.example/stop/a" onmouseover="evil()', 'ftp://x/y']) {
+    const r = renderMonthlySetup('', { ...MCTX, stopUrl: bad });
+    assert.ok(!r.html.includes('onmouseover'), 'no attribute break-out');
+    assert.ok(!r.html.includes('javascript:'), 'no javascript: href');
+    assert.ok(!r.html.includes('Stop these payments'), `"${bad}" must fall back to the no-link letter`);
+  }
+  // A plain http URL on a private host is still a URL we were given deliberately — but safeUrl
+  // allows http, so assert the ONE thing that matters: it is escaped into the href.
+  const okHttp = renderMonthlySetup('', { ...MCTX, stopUrl: 'http://192.168.1.9:7870/stop/abc' });
+  assert.ok(okHttp.html.includes('href="http://192.168.1.9:7870/stop/abc"'));
+});
+
+test('SECURITY: the monthly subject cannot carry an injected email header (DONATIONS-023)', () => {
+  const evil = 'Ahmed\r\nBcc: attacker@evil.example\r\n\r\nInjected body';
+  const { subject } = renderMonthlySetup('', { ...MCTX, name: evil, masjidName: evil });
+  assert.ok(!/[\r\n]/.test(subject), `subject must be one line, got ${JSON.stringify(subject)}`);
+  assert.ok(!/\u2028|\u2029|\v|\f|\0/.test(subject));
+});
+
+test('SECURITY: a donor name with HTML is escaped in the monthly letter', () => {
+  const r = renderMonthlySetup('', { ...MCTX, name: '<img src=x onerror=alert(1)>' });
+  assert.ok(!r.html.includes('<img src=x onerror'));
+  assert.ok(r.html.includes('&lt;img src=x onerror=alert(1)&gt;'));
+});
+
+test('SECURITY: the monthly letter accent takes a hex colour or the default, never CSS', () => {
+  assert.ok(renderMonthlySetup('#D4AF37', MCTX).html.includes('#D4AF37'));
+  const bad = renderMonthlySetup('red;}body{display:none', MCTX).html;
+  assert.ok(bad.includes('#1FA37A'));
+  assert.ok(!bad.includes('display:none'));
+});
+
+test('all three letters share one layout', () => {
+  const htmls = [renderReceipt(TPL, CTX).html, renderRefundNotice('', RCTX).html, renderMonthlySetup('', MCTX).html];
+  for (const marker of ['max-width:540px', 'border-radius:14px', 'Sent by OpenMasjid Donations · Secured by Stripe']) {
+    for (const h of htmls) assert.ok(h.includes(marker), `every letter must use "${marker}"`);
   }
 });

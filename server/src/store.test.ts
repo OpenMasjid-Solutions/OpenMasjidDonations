@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { Store } from './store';
+import { Store, looksLikePlanToken } from './store';
 
 function fresh(): Store {
   return new Store(':memory:');
@@ -484,4 +484,68 @@ test('refunds: the running total is clamped to the amount charged (never negativ
 
 test('refunds: an unknown PaymentIntent is a no-op, not a crash', () => {
   assert.equal(fresh().setDonationRefund('pi_never_existed', 100, '2026-08-10T00:00:00.000Z'), null);
+});
+
+// ── The monthly donor's stop link ─────────────────────────────────────────────
+// The token in that link is the app's only unauthenticated destructive capability, so:
+//
+//  1. It must be STABLE. The letter carrying it is rendered up to three times for one donation (the
+//     donor's confirm, the receipt outbox for up to three days, the lost-donation sweep) and every
+//     render must produce the same URL — a fresh token per render would leave whichever letter
+//     actually arrived pointing at a dead link.
+//  2. It must be UNGUESSABLE and shape-checked before it ever reaches SQLite.
+//  3. A blank subscription id must never mint one, or every one-off donation would collapse onto a
+//     single token.
+
+test('stop link: the same subscription always gets the SAME token', () => {
+  const s = fresh();
+  const a = s.ensurePlanLink('sub_A');
+  assert.ok(looksLikePlanToken(a), `expected 32 hex chars, got ${a}`);
+  assert.equal(s.ensurePlanLink('sub_A'), a, 're-rendering the letter must not re-mint');
+  assert.equal(s.ensurePlanLink('sub_A'), a);
+});
+
+test('stop link: different subscriptions get different tokens, and resolve back correctly', () => {
+  const s = fresh();
+  const a = s.ensurePlanLink('sub_A');
+  const b = s.ensurePlanLink('sub_B');
+  assert.notEqual(a, b);
+  assert.equal(s.planLinkSubscription(a), 'sub_A');
+  assert.equal(s.planLinkSubscription(b), 'sub_B');
+});
+
+test('stop link: a blank subscription id mints nothing', () => {
+  const s = fresh();
+  assert.equal(s.ensurePlanLink(''), '');
+  // …and the table stays empty, so no one-off donation can ever share a link.
+  assert.equal(s.planLinkSubscription('0'.repeat(32)), '');
+});
+
+test('stop link: an unknown or malformed token resolves to nothing, and is refused by shape first', () => {
+  const s = fresh();
+  s.ensurePlanLink('sub_A');
+  for (const bad of ['', 'nope', '0123456789abcdef', 'g'.repeat(32), '0'.repeat(31), '0'.repeat(33), 'ABCDEF0123456789ABCDEF0123456789']) {
+    assert.equal(looksLikePlanToken(bad), false, `${bad} must fail the shape check`);
+    assert.equal(s.planLinkSubscription(bad), '', `${bad} must not resolve`);
+  }
+  assert.equal(s.planLinkSubscription('0'.repeat(32)), '', 'a well-shaped but unknown token resolves to nothing');
+});
+
+test('stop link: tokens are 128 bits of hex and do not repeat', () => {
+  const s = fresh();
+  const seen = new Set<string>();
+  for (let i = 0; i < 200; i++) {
+    const t = s.ensurePlanLink(`sub_${i}`);
+    assert.ok(looksLikePlanToken(t));
+    assert.ok(!seen.has(t), 'a collision would let one donor stop another donor’s gift');
+    seen.add(t);
+  }
+});
+
+test('stop link: the row SURVIVES the plan ending, so an old link reads "already stopped"', () => {
+  // Nothing in the app deletes these rows. A donor clicking a link months later must land on a page
+  // that explains, not a frightening "this link doesn't work".
+  const s = fresh();
+  const t = s.ensurePlanLink('sub_GONE');
+  assert.equal(s.planLinkSubscription(t), 'sub_GONE');
 });

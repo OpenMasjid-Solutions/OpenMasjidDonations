@@ -474,6 +474,16 @@ function ThankYou({ result, campaign }: { result: ConfirmResponse; campaign: Pub
         <>
           <p className="donate-desc">{message}</p>
           {result.recurring && <p className="donate-desc"><b>This is a monthly donation</b> — it'll repeat automatically until you cancel.</p>}
+          {/* Careful wording: ConfirmResponse carries no "was the email sent" signal (the send is
+              fire-and-forget with a retry outbox behind it), so this must not promise delivery —
+              and it names the fallback in the same breath, so a donor whose email never arrives
+              still knows exactly what to do. */}
+          {result.recurring && (
+            <p className="donate-desc muted">
+              Keep an eye out for our email: it has everything about the gift, and a link you can use to stop the payments
+              yourself at any time. If it doesn’t arrive, just contact us and we’ll stop them for you whenever you ask.
+            </p>
+          )}
         </>
       ) : result.status === 'processing' ? (
         <p className="donate-desc">Your payment is processing. You’ll receive confirmation shortly, in shā’ Allah.</p>

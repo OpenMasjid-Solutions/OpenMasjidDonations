@@ -580,3 +580,115 @@ guard forbids. If it ever matters it needs its own deliberate change, not a wide
 `/api/admin/donations/:id/refund` refuses a `tuition` campaign outright. A tuition payment
 lives in `student_payments` and never in `donations` (§13 route isolation), so no such row should
 exist — but refunding one from this side would leave the school's ledger claiming it was paid.
+
+## The monthly donor's own stop link (v0.42.0)
+
+A donor who sets up a monthly gift is emailed a letter confirming it, carrying a link to
+`https://<public>/stop/<token>` where they can stop the payments themselves — no sign-in, nobody to
+phone. This is the app's **only unauthenticated destructive capability**, so most of the design is
+about keeping it narrow.
+
+### The letter
+
+Sent when the FIRST payment succeeds, never at intent — an abandoned monthly checkout leaves a
+`donations` row behind (that is what `isAbandonedSeed` exists for) and must not be written to.
+
+It reuses the existing receipt lifecycle rather than inventing a second one: `receipt = 'pending'`
+means "we owe this donor a letter", and `sendDonationReceipt` picks WHICH letter from the row's own
+`recurring` flag — the monthly setup letter, or the plain receipt. So the retry outbox, the
+lost-donation sweep and the `sent`/`skipped` states all work unchanged, there is exactly one owed
+letter per donation, and no new double-send hole. `recurring` is immutable on the row, so every
+render (confirm, outbox three days later, sweep) picks the same letter.
+
+**No admin toggle, deliberately.** Not the receipt toggle (off by default — the donor's only exit
+would be off by default), and not a new one, whose honest label would be "don't tell monthly donors
+how to stop". A payer who cannot stop a card mandate rings their bank instead, and on a shared
+Fabric Stripe account that chargeback lands on the whole platform. The admin's control surface is
+the letter's branding and the panel's own Stop button.
+
+**The `emailStatus()` gate is skipped for monthly, and that is a fix, not a shortcut.**
+`lastEmailStatus` is only ever written inside `fabricEmail`, which is only reached when a donation
+already owed a letter, which required `emailStatus() === 'ok'` — a closed loop that no fresh
+container can break, and one that a restart re-closes (changing remote access in OpenMasjidOS
+restarts the app). The gate exists to avoid suppressing Stripe's own receipt in favour of one we
+cannot deliver; on the monthly branch there is nothing to suppress, because `createSubscription`
+never sets `receipt_email`. So skipping it there risks no lost receipt. **The one-time branch still
+has the closed loop** — recorded as a separate defect, not fixed here.
+
+Everything in the letter is a LOCAL fact (amount, first-payment date, fund, reference), so the
+outbox can re-render it three days later without a Stripe call. Card details and the next payment
+date are deliberately absent for that reason.
+
+### The token
+
+32 lowercase hex characters (128 bits), in `plan_links(token PRIMARY KEY, subscription_id NOT NULL
+UNIQUE CHECK(length > 0), created_at)`. Hex rather than base64url because mail clients mangle case
+and `-_`; the entropy is the defence, because a per-peer rate limit cannot be (behind the platform's
+ingress every remote donor shares one bucket — DONATIONS-009).
+
+Stored **plaintext**. Hashing would mean the letter could never be rendered twice, and it is rendered
+up to three times for one donation — so a hash would either mail no link or re-mint one and silently
+kill the link already in the donor's inbox. It would also buy little: the session secret lives in the
+same file and mints admin session cookies, so anyone who can read this table can already reach the
+panel's own Stop button. `ensurePlanLink` is get-or-create for the same reason, and a token is minted
+only when there is a public URL to put it in.
+
+Rows are **kept after a plan ends**, so an old link reads "these payments have already stopped"
+rather than a frightening "this link doesn't work". A stale forwarded token is harmless precisely
+because stopping is all it can ever do.
+
+### The two routes, and five things that must not change
+
+`POST /api/public/plan/lookup` and `POST /api/public/plan/cancel`, token in the **body**:
+
+1. **Never `syncPlan`.** It lists invoices and INSERTs donation rows, and its only guard
+   (`ownPageFetch`, a `Sec-Fetch-Site` check) is structurally unusable for a link in an email — a
+   corporate mail scanner's prefetch would otherwise drive writes against the masjid's Stripe
+   account. Use `fetchPlanState` alone: one subscription read, no invoices, no reconciliation, no
+   cache write. (Cancel *deletes* the `planCache` entry, so the admin's Monthly tab doesn't show
+   "Active" for 60 seconds after a donor stops.)
+2. **Resolve through the local recurring index** (`findSeed(planSeeds(), …)`), exactly as the admin
+   write routes do — the v0.38.0 invariant, now covering a fifth writer. `getDonationBySubscription`
+   is not good enough: it lacks the `recurring = 1 AND subscription_id <> ''` filter.
+3. **POST only, token in the body.** A GET that mutates is fired by every link-preview bot that
+   touches the email; keeping the token out of the API URL also keeps it out of access logs. The
+   page URL itself is unavoidably in the masjid's own Cloudflare logs — which is why the token
+   authorises so little. `referrer-policy: no-referrer` (already global) stops it leaking onward.
+4. **Every failure is the same 404** — unknown token, malformed token, no local row, a tuition
+   campaign — so nothing is an oracle. Both routes are `no-store, private`.
+5. **A fixed audit actor.** `audit(req, …)` reads the admin session and falls back to
+   `local admin`, which would file a donor's cancellation as the masjid's own action in the one log
+   they trust. It writes `store.recordAudit` with `'the donor, from their email link'`, and a
+   `plan-stopped` alert — for an unauthenticated destructive write with no undo, the masjid hearing
+   about it *is* the compensating control.
+
+Cancel is **idempotent**: a finished plan is a success, not an error. Stripe refuses to cancel a
+canceled subscription and `cancelPlan` would report that as "we couldn't reach Stripe" — which a
+donor double-clicking would hit every time.
+
+### What the donor is told
+
+Amount, frequency, fund, reference, next payment (omitted, never guessed, when unknown), status,
+and the masjid's name/logo/contact details. **Never** the donor's name or email, the card, any
+Stripe or internal id, or any payment history — the token can be forwarded, sit in a shared family
+inbox, or be pasted into a support ticket.
+
+### When there is no public URL
+
+The letter still goes, with no link and the "get in touch and we'll stop it for you" wording —
+mirroring `resolveEmailImage`, which omits rather than fabricates a host. Never a LAN URL. On a
+LAN-only box (the default posture) the panel is the real cancel mechanism; on a standalone non-SSO
+box no letter is sent at all, because `fabricEmail` goes through the platform. `publicBaseUrl()`
+also refuses the app's OWN tunnel hostname under SSO, where that tunnel is force-stopped at boot but
+its stored `enabled` flag stays true — a link to a host nothing is listening on is worse than none,
+and worst of all in an email to a stranger.
+
+### Routing
+
+`/stop/<token>` is two segments, and `parseCampaignPath` is anchored to one — so it can never be
+mistaken for a campaign, and `stop` is deliberately **not** added to `RESERVED_SLUGS`. Reserving it
+would buy only the bare `/stop` and would pay for it with `migrateCampaignSlugs` silently renaming
+any existing campaign slugged `stop` on the next boot, breaking a link a masjid may have printed. A
+bare or truncated `/stop` gets its own "this link looks incomplete" page, and the not-yet-onboarded
+redirect to `/admin` explicitly excludes it — that `location.replace` would destroy the only copy of
+the token. The page is its own lazy chunk (~8.7 kB, no Stripe.js).

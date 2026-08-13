@@ -275,6 +275,22 @@ export function campaignToken(): string {
   return crypto.randomBytes(5).toString('hex'); // 10 hex chars
 }
 
+/** The token in a monthly donor's "stop these payments" link — 128 bits, as 32 lowercase hex
+ *  characters.
+ *
+ *  Hex, not base64url, and deliberately: this string is retyped, forwarded and line-wrapped by mail
+ *  clients, and `-`/`_`/mixed case are exactly what those mangle. It is the ONLY thing standing
+ *  between a stranger and stopping somebody's donation, so the entropy is the defence (a rate limit
+ *  cannot be, because behind the platform's ingress every remote visitor shares one bucket —
+ *  DONATIONS-009). 2^128 makes guessing hopeless. */
+export function planLinkToken(): string {
+  return crypto.randomBytes(16).toString('hex');
+}
+/** Shape check before any lookup, so a junk path can be refused without touching the database. */
+export function looksLikePlanToken(v: string): boolean {
+  return /^[0-9a-f]{32}$/.test(v);
+}
+
 /** Make a URL-safe slug from a title (kebab-case, alnum + dashes). */
 export function slugify(s: string): string {
   const out = s
@@ -405,6 +421,28 @@ export class Store {
         detail TEXT NOT NULL DEFAULT ''
       );
       CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
+
+      -- The "stop these payments" link a monthly donor is emailed. One token per Stripe
+      -- subscription; the token IS the credential, so it is the primary key and the lookup is a
+      -- single indexed probe.
+      --
+      -- Stored in PLAINTEXT, on purpose. Hashing it would mean the letter could never be rendered
+      -- twice — and it is rendered up to three times for one donation (the donor's own confirm, the
+      -- receipt outbox for up to three days, and the lost-donation sweep) — so a hash would either
+      -- mail no link or re-mint one and silently kill the link already sitting in the donor's inbox.
+      -- Nor would hashing buy much: the session_secret lives in this same file and mints admin
+      -- session cookies, so anyone who can read this table can already reach the panel's own Stop
+      -- button. (No backticks in here: this DDL is a JS template literal.)
+      --
+      -- CHECK(...) because a blank subscription_id would collapse every one-off donation onto one
+      -- token; UNIQUE so re-rendering the letter always produces the SAME link. Rows are KEPT after
+      -- a plan ends, so a donor clicking an old link reads "these payments have already stopped"
+      -- rather than a frightening "this link doesn't work".
+      CREATE TABLE IF NOT EXISTS plan_links (
+        token TEXT PRIMARY KEY,
+        subscription_id TEXT NOT NULL UNIQUE CHECK(length(subscription_id) > 0),
+        created_at TEXT NOT NULL
+      );
     `);
     // Tighten file perms where the OS supports it (secrets + admin hash live here).
     //
@@ -1124,6 +1162,45 @@ export class Store {
         unknown
       >[]
     ).map((r) => this.rowToDonation(r));
+  }
+
+  // ── The monthly donor's "stop these payments" link ──────────────────────────
+  /** The token for this subscription's stop link, minting one on first need.
+   *
+   *  GET-OR-CREATE, and that is the whole point: the letter carrying this link is rendered up to
+   *  three times for one donation (the donor's own confirm, the receipt outbox retrying for up to
+   *  three days, and the lost-donation sweep), and every render must produce the SAME URL. Minting a
+   *  fresh token per render would leave whichever letter actually arrived pointing at a dead link.
+   *
+   *  Returns '' for a blank subscription id (a one-off donation has no plan to stop). */
+  ensurePlanLink(subscriptionId: string): string {
+    if (!subscriptionId) return '';
+    const read = (): string => {
+      const r = this.db.prepare('SELECT token FROM plan_links WHERE subscription_id = ?').get(subscriptionId) as { token: string } | undefined;
+      return r?.token ?? '';
+    };
+    const existing = read();
+    if (existing) return existing;
+    const token = planLinkToken();
+    try {
+      this.db.prepare('INSERT INTO plan_links (token, subscription_id, created_at) VALUES (?, ?, ?)').run(token, subscriptionId, new Date().toISOString());
+      return token;
+    } catch {
+      // Lost the UNIQUE race with a concurrent render — the other one wrote a token, so use theirs
+      // rather than failing the letter.
+      return read();
+    }
+  }
+
+  /** The subscription a stop-link token belongs to, or '' when the token is unknown.
+   *
+   *  Shape-checked first so a junk path never reaches SQLite. Note this deliberately says nothing
+   *  about whether the plan is one of OURS or still running — the caller must resolve it through the
+   *  local recurring-donations index (see plans.ts groupPlanSeeds) before acting on it. */
+  planLinkSubscription(token: string): string {
+    if (!looksLikePlanToken(token)) return '';
+    const r = this.db.prepare('SELECT subscription_id FROM plan_links WHERE token = ?').get(token) as { subscription_id: string } | undefined;
+    return r?.subscription_id ?? '';
   }
 
   // ── Audit log (append-only) ─────────────────────────────────────────────────

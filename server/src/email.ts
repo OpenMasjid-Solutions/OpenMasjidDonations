@@ -228,6 +228,108 @@ export interface RefundContext extends Omit<ReceiptContext, 'datePaid'> {
   full: boolean;
 }
 
+// ── Monthly plan set up ───────────────────────────────────────────────────────
+
+/** Everything the "your monthly donation is set up" letter needs.
+ *
+ *  Every figure here is a LOCAL fact — what the donor agreed to, when the first payment landed,
+ *  which fund, the reference. Nothing needs a Stripe call, and that is deliberate: this letter is
+ *  re-rendered by the receipt outbox up to three days later, so a field that needed live Stripe
+ *  state (the next payment date, the card) would either block the retry or print a stale promise. */
+export interface MonthlySetupContext extends Omit<ReceiptContext, 'datePaid'> {
+  /** The recurring amount, already formatted — `amountText` is the same figure for a monthly gift. */
+  monthlyAmountText: string;
+  /** When the first payment went through, formatted for reading. */
+  firstPaymentDate: string;
+  /** The absolute https URL of the donor's own stop page, or '' when this masjid has no public
+   *  address. '' is a REAL case (a LAN-only box) and switches the letter to the "get in touch and
+   *  we'll stop it for you" wording — never a link to a host the reader cannot resolve. */
+  stopUrl: string;
+}
+
+/** The letter a monthly donor gets once their first payment has gone through: what they set up, and
+ *  how to stop it themselves.
+ *
+ *  Deliberately NOT admin-editable. It is the donor's only self-service route out of a recurring
+ *  card charge, so its wording is not something a masjid should be able to weaken by accident — and
+ *  a link is not a thing to hand to a template engine. The masjid's branding (logo, accent, contact
+ *  details) still carries through, so it reads as their letter.
+ *
+ *  The URL is linkified HERE, through the same `safeUrl` allowlist as every other link in this file,
+ *  and escaped into both the href and the visible text — so even though the caller builds it, no
+ *  value of it can break out of the markup. */
+export function renderMonthlySetup(accentRaw: string, ctx: MonthlySetupContext): RenderedEmail {
+  const accent = resolveAccent(accentRaw);
+  const masjid = ctx.masjidName.trim();
+  const vars = { name: ctx.name, amount: ctx.monthlyAmountText, campaign: ctx.campaignTitle, masjid };
+  const stop = safeUrl(ctx.stopUrl);
+
+  const subject = (oneLine(fillVars(masjid ? 'Your monthly donation to {masjid} is set up' : 'Your monthly donation is set up', vars)) || 'Your monthly donation is set up').slice(0, 200);
+  const heading = 'Your monthly donation is set up';
+  const opening = fillVars(
+    'Assalāmu ʿalaykum {name}, and jazākAllāhu khayran. Your first payment has gone through, and from now on {amount} will go to {masjid} every month until you decide to stop.',
+    vars,
+  );
+  // Two endings, because a masjid with no public address cannot offer a link that would work.
+  const howToStop = stop
+    ? 'If you ever want to stop it, you can do that yourself with the link below — there is nothing to sign in to and nobody to phone.'
+    : 'Whenever you’d like to stop it, or change anything about it, just get in touch using the details at the bottom of this email and we’ll take care of it for you.';
+  const paragraph = `${opening} ${howToStop}`;
+  const keepSafe =
+    'Keep this email if you can — that link only works from here, and it’s the one way to stop the payments yourself. ' +
+    'If you lose it, no problem at all: contact us using the details below and we’ll stop them for you.';
+  const closing = 'Nothing else is needed from you. Your payment will simply arrive each month, and we’ll be grateful for every one of them.';
+
+  // ── Plain-text part ──
+  // The URL goes on a line of its OWN with no trailing punctuation, so no mail client folds a full
+  // stop into the link and breaks it.
+  const lines = [
+    heading,
+    '',
+    paragraph,
+    '',
+    `Monthly amount: ${ctx.monthlyAmountText}`,
+    ctx.firstPaymentDate ? `First payment:  ${ctx.firstPaymentDate}` : '',
+    ctx.campaignTitle ? `Fund:           ${ctx.campaignTitle}` : '',
+    ctx.reference ? `Reference:      ${ctx.reference}` : '',
+    '',
+    ...(stop ? ['Stop these payments:', stop, '', keepSafe, ''] : []),
+    closing,
+    '',
+    ...contactTextLines(masjid, ctx),
+  ];
+  const text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+
+  // ── HTML part (everything escaped) ──
+  const details = [
+    row('Monthly amount', ctx.monthlyAmountText, { bold: true, first: true }),
+    ctx.firstPaymentDate ? row('First payment', ctx.firstPaymentDate) : '',
+    ctx.campaignTitle ? row('Fund', ctx.campaignTitle) : '',
+    ctx.reference ? row('Reference', ctx.reference) : '',
+  ].join('');
+  const stopBlock = stop
+    ? `<div style="margin:18px 0 0;text-align:center">
+        <a href="${escapeHtml(stop)}" style="display:inline-block;padding:11px 20px;border-radius:9px;background:${escapeHtml(accent)};color:#ffffff;font-size:15px;font-weight:600;text-decoration:none">Stop these payments</a>
+        <div style="margin-top:10px;font-size:12px;word-break:break-all;color:#7a8892">${escapeHtml(stop)}</div>
+        <p style="margin:14px 0 0;font-size:13px;line-height:1.6;color:#42535c;text-align:start">${escapeHtml(keepSafe)}</p>
+      </div>`
+    : '';
+  const html = shell({
+    accent,
+    header: headerBlock(safeUrl(ctx.masjidLogo), masjid),
+    refLine: refBlock('Monthly gift', ctx.reference),
+    heading,
+    bodyHtml: escapeHtml(paragraph).replace(/\n/g, '<br>'),
+    details,
+    // The stop block and the closing line ride with the contact footer so the shell keeps its
+    // single details table — the link belongs BELOW the figures it refers to.
+    contactLine: `${stopBlock}<p style="margin:18px 0 14px;font-size:13px;line-height:1.6;color:#7a8892">${escapeHtml(closing)}</p>${contactBlocks(accent, masjid, ctx).contactLine}`,
+    websiteLine: contactBlocks(accent, masjid, ctx).websiteLine,
+  });
+
+  return { subject, text, html };
+}
+
 /** The refund notice sent to a donor, when the admin chooses to tell them.
  *
  *  Deliberately NOT admin-editable, unlike the receipt. A refund is a factual notice about

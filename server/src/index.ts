@@ -21,7 +21,7 @@ import { Store, slugify, rid, RESERVED_SLUGS } from './store';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { notify, probePlatform, fetchFabricStripe, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus } from './fabric';
-import { renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
+import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
   REFUND_REASONS,
   createRefund,
@@ -94,6 +94,12 @@ import {
 const log = makeLog('main');
 
 const LOOPBACK_RE = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[?::1)/i;
+
+/** Deliberately loose "could this be posted to at all" check — one @, a dot after it, no spaces.
+ *  Not a validator (nothing short of sending is), just enough to refuse a value we would certainly
+ *  fail to deliver. Shared by the intent handler and the send path so a donation that PASSES the
+ *  monthly check can never then be found unsendable. */
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 /** Friendly money string for a minor-unit amount, e.g. "£50.00". */
 function formatMoney(minor: number, currency: string): string {
@@ -559,15 +565,43 @@ async function main(): Promise<void> {
     return { data: { ...ld, threshold: toMajorCur(ld.threshold) } };
   });
 
+  // ── Our public address ──────────────────────────────────────────────────────
+  /** The https base at which this app is reachable from OUTSIDE the masjid's network, with the
+   *  tunnel path prefix already on it (e.g. "https://omos.example.org/donate"), or '' when there
+   *  is no public route to us at all.
+   *
+   *  Two ways in, in priority order, mirroring what the admin panel does for share links and the
+   *  Stripe webhook URL:
+   *   1. the OpenMasjidOS Cloudflare tunnel (manifest `domain: true`) — the platform reverse-proxies
+   *      by first path segment and keeps the full path, so `publicUrl` already includes our prefix;
+   *   2. the app's OWN Cloudflare tunnel, which is the standalone fallback.
+   *
+   *  '' is a meaningful answer and callers must handle it: a LAN address is useless in an email or
+   *  to somebody at home, so anything donor-facing must say something honest instead of linking to
+   *  a host the reader cannot resolve. NOT the request host — this is used from background jobs
+   *  that have no request, and a Host header is attacker-controlled anyway. */
+  const publicBaseUrl = (): string => {
+    // Under OpenMasjidOS the platform owns remote access and this app's OWN tunnel is force-stopped
+    // at boot (see the `tunnel.stop()` below) — but the stored `enabled` flag stays true from
+    // whenever it was configured. So the in-app hostname must NOT be considered here: it would hand
+    // out a link to a host nothing is listening on, which is worse than no link, and worst of all in
+    // an email to a stranger that we cannot take back.
+    if (ssoConfigured()) return cachedFabricSite().publicUrl;
+    const t = store.getTunnel();
+    return t.enabled && t.publicHostname ? `https://${t.publicHostname}` : '';
+  };
+
   // ── Emailed donation receipt (via the OpenMasjidOS Fabric email provider) ────
   // Resolve the header image to an ABSOLUTE url an email client can load: an http(s) URL is
   // used as-is; an uploaded /uploads/… file only works when the app is publicly reachable, so
-  // we prefix the Fabric public URL and drop it otherwise (the email just has no image).
+  // we prefix our public base and drop it otherwise (the email just has no image).
   const resolveEmailImage = (image: string): string => {
     const v = (image ?? '').trim();
     if (/^https?:\/\//i.test(v)) return v;
     if (/^\/uploads\//.test(v)) {
-      const pub = cachedFabricSite().publicUrl;
+      // Via publicBaseUrl, so a STANDALONE masjid running the app's own tunnel gets its logo in
+      // emails too — before this it only worked under the platform's tunnel.
+      const pub = publicBaseUrl();
       return pub ? `${pub}${v}` : '';
     }
     return '';
@@ -607,15 +641,44 @@ async function main(): Promise<void> {
     };
   };
 
-  /** Render + send a donor's branded receipt for a donation. Returns whether it {sent} and
-   *  whether a failure is worth a {retry} (transient/system) vs permanent (no/invalid email, or
-   *  the provider rejected the recipient). NEVER throws. Does NOT re-check the enabled toggle —
-   *  the CALLER gates on the donation's recorded decision (receipt==='pending'). */
+  /** The absolute URL of a monthly donor's own "stop these payments" page, or '' when this masjid
+   *  has no public address at all.
+   *
+   *  A token is minted only when there is somewhere for it to point — no public route means no row,
+   *  rather than a table full of links nobody can use. The mint is get-or-create, so re-rendering
+   *  the letter (the outbox retries for up to three days) always yields the SAME link. */
+  const planStopUrl = (subscriptionId: string): string => {
+    if (!subscriptionId) return '';
+    const base = publicBaseUrl();
+    if (!base) return '';
+    const token = store.ensurePlanLink(subscriptionId);
+    return token ? `${base}/stop/${token}` : '';
+  };
+
+  /** Render + send the one letter a donation owes its donor, and say whether a failure is worth a
+   *  {retry} (transient/system) vs permanent (no/invalid email, or the provider rejected the
+   *  recipient). NEVER throws. Does NOT re-check any toggle — the CALLER gates on the donation's
+   *  recorded decision (receipt==='pending').
+   *
+   *  WHICH letter is chosen from the donation ROW, never from a live setting: a recurring donation
+   *  gets the "your monthly donation is set up" letter (which carries the payment details AND the
+   *  donor's stop link), a one-off gets the receipt. `recurring` is immutable on the row, so every
+   *  render — the donor's own confirm, the outbox three days later, the lost-donation sweep — picks
+   *  the same one, which is exactly the property the `receipt` column exists to protect. */
   const sendDonationReceipt = async (don: Donation): Promise<{ sent: boolean; retry: boolean }> => {
     const addr = (don.donorEmail || '').trim();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) return { sent: false, retry: false }; // no/invalid email → never sendable
+    if (!EMAIL_RE.test(addr)) return { sent: false, retry: false }; // no/invalid email → never sendable
     try {
-      const rendered = renderReceipt(store.getEmailReceipt(), receiptContext(don));
+      const base = receiptContext(don);
+      const rendered =
+        don.recurring && don.subscriptionId
+          ? renderMonthlySetup(store.getEmailReceipt().accent, {
+              ...base,
+              monthlyAmountText: base.amountText,
+              firstPaymentDate: fmtReceiptDate(don.createdAt),
+              stopUrl: planStopUrl(don.subscriptionId),
+            })
+          : renderReceipt(store.getEmailReceipt(), base);
       const res = await fabricEmail({ to: addr, subject: rendered.subject, text: rendered.text, html: rendered.html });
       if (res.sent) return { sent: true, retry: false };
       return { sent: false, retry: res.reason !== 'bad_recipient' }; // bad recipient is permanent; everything else retries
@@ -1028,7 +1091,7 @@ async function main(): Promise<void> {
    *  moment; a refund notice that silently arrives three days late is worse than none.) */
   const sendRefundNotice = async (don: Donation, refundedNowMinor: number, full: boolean): Promise<{ sent: boolean; reason: string }> => {
     const addr = (don.donorEmail || '').trim();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) return { sent: false, reason: 'no-email' };
+    if (!EMAIL_RE.test(addr)) return { sent: false, reason: 'no-email' };
     if (!ssoConfigured()) return { sent: false, reason: 'no-fabric' };
     try {
       const base = receiptContext(don);
@@ -1850,6 +1913,13 @@ async function main(): Promise<void> {
     if (monthly && (!donorName.trim() || !donorEmail.trim())) {
       return reply.code(400).send({ error: 'Please add your name and email — both are required for a monthly donation.' });
     }
+    // …and for a monthly gift the address must be one we could actually post to. Before this a
+    // single mistyped character passed, and the letter that goes to it now carries the donor's own
+    // link for stopping the payments — so a typo would mail that capability to a stranger and leave
+    // the real donor with no way out but ringing the masjid (or their bank).
+    if (monthly && !EMAIL_RE.test(donorEmail.trim())) {
+      return reply.code(400).send({ error: 'Please check your email address — we send your monthly donation details there.' });
+    }
     // A monthly intent is five persistent Stripe objects, not one. Checked here — after the campaign
     // and amount are known but BEFORE anything is created at Stripe — so a burst can't bloat the
     // masjid's account (DONATIONS-010). The general 30/min intent limit above still applies too.
@@ -1869,7 +1939,25 @@ async function main(): Promise<void> {
     // never left with zero receipts because email wasn't set up; a transient failure after that is
     // covered by the retry outbox. (Not re-evaluated at confirm — that was the double/zero bug.)
     const branded = store.getEmailReceipt().enabled && ssoConfigured() && emailStatus() === 'ok';
-    const stripeReceiptEmail = branded ? undefined : donorEmail.trim() || undefined;
+    // A MONTHLY donation always owes its donor the "your monthly donation is set up" letter, and it
+    // is gated on NEITHER the receipt toggle nor emailStatus. Both exclusions are deliberate:
+    //
+    //  • Not the receipt toggle (which is off by default), because this letter is the donor's only
+    //    self-service way out of a recurring charge on their card. A masjid should not be able to
+    //    withhold that by leaving a receipts checkbox alone — and on a shared Fabric Stripe account
+    //    a payer who cannot stop a mandate rings their bank instead, which costs everybody.
+    //  • Not emailStatus(), because that gate cannot be satisfied on a fresh container: it only ever
+    //    becomes 'ok' inside fabricEmail, which is only reached when a donation already owed a
+    //    letter — a closed loop, and one a restart re-closes (changing remote access in
+    //    OpenMasjidOS restarts us). It exists to avoid suppressing Stripe's own receipt in favour of
+    //    one we cannot deliver; on the monthly branch there is nothing to suppress, because
+    //    createSubscription never sets receipt_email. So skipping it here risks no lost receipt.
+    //
+    // Recorded ONCE, here, as receipt:'pending' — never re-decided at confirm (that was the
+    // double/zero bug) — and the row's own `recurring` flag is what later picks the letter.
+    const owesMonthlyLetter = monthly && ssoConfigured();
+    const owesLetter = branded || owesMonthlyLetter;
+    const stripeReceiptEmail = owesLetter ? undefined : donorEmail.trim() || undefined;
     let clientSecret = '';
     let paymentIntentId = '';
     let subscriptionId = '';
@@ -1912,7 +2000,7 @@ async function main(): Promise<void> {
       paymentIntentId,
       recurring: monthly,
       subscriptionId,
-      receipt: branded ? 'pending' : 'stripe',
+      receipt: owesLetter ? 'pending' : 'stripe',
     });
     return {
       data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency, recurring: monthly },
@@ -1976,6 +2064,160 @@ async function main(): Promise<void> {
         recurring: don.recurring,
       },
     };
+  });
+
+  // ── The monthly donor's own "stop these payments" page (no login) ────────────
+  //
+  // A monthly donor is emailed a link to /stop/<token> when their gift is set up. The token is the
+  // only credential, so this is the app's one unauthenticated destructive capability, and it is
+  // deliberately narrow: it can STOP a plan and read a short description of it. Nothing else.
+  //
+  // Five things here are load-bearing. Removing any of them reopens something real:
+  //
+  //  1. IT NEVER GOES THROUGH syncPlan(). That helper lists invoices and INSERTs donation rows, and
+  //     its only guard is `ownPageFetch` (a Sec-Fetch-Site check) which is structurally unusable for
+  //     a link posted in an email. A corporate mail scanner pre-fetching the page would otherwise
+  //     drive writes against the masjid's Stripe account. We call fetchPlanState directly: one
+  //     subscription read, no invoice list, no reconciliation, no cache write.
+  //  2. THE PLAN IS RESOLVED THROUGH THE LOCAL RECURRING INDEX (findSeed/planSeeds), exactly as the
+  //     four admin write routes are. That is the v0.38.0 invariant — a Fabric-vaulted Stripe account
+  //     is SHARED with the platform's other apps, so a subscription id must be proved to be one WE
+  //     created before we act on it. `getDonationBySubscription` is NOT good enough: it lacks the
+  //     `recurring = 1 AND subscription_id <> ''` filter that makes the index trustworthy.
+  //  3. THE TOKEN TRAVELS IN THE BODY, and cancelling is a POST. A GET that mutates would be fired
+  //     by every link-preview bot that touches the email; keeping the token out of the API URL also
+  //     keeps it out of the masjid's Cloudflare access logs (the page URL itself is unavoidably in
+  //     them, which is why the token authorises so little).
+  //  4. EVERY FAILURE IS THE SAME 404 — unknown token, malformed token, no local row, a tuition
+  //     campaign — so nothing here is an oracle, mirroring /w/:slug.
+  //  5. THE AUDIT LINE IS WRITTEN WITH A FIXED ACTOR. `audit(req, …)` reads the admin session and
+  //     falls back to 'local admin', which would file a donor's cancellation as the masjid's own
+  //     action in the one log they trust.
+  const PLAN_TOKEN_MISS = 'This link doesn’t work any more.';
+
+  // ONE bucket shared by both routes, sized generously on purpose. Behind the platform's ingress or
+  // the Cloudflare tunnel the peer is the PROXY, so every remote donor shares this bucket
+  // (DONATIONS-009) — a tight cap would 429 honest donors trying to stop their own payments, which
+  // is the one thing this page must never do. The 128-bit token is the defence against guessing;
+  // this only stops a flood from becoming outbound Stripe calls.
+  const planLinkRateOk = makeRateLimiter(120);
+
+  /** Resolve a stop-link token to one of OUR monthly plans, or null. Uniform on every failure. */
+  const resolvePlanToken = (token: string): PlanSeed | null => {
+    const subscriptionId = store.planLinkSubscription(token);
+    if (!subscriptionId) return null;
+    const seed = findSeed(planSeeds(), subscriptionId);
+    if (!seed) return null;
+    // Defence in depth: a tuition campaign has no donation rows at all (§13 route isolation), so it
+    // cannot reach this — but if one ever did, a parent must not be able to stop a school's billing
+    // from a donation link.
+    if (store.getCampaign(seed.campaignId)?.type === 'tuition') return null;
+    return seed;
+  };
+
+  /** What a donor may be told about their own plan.
+   *
+   *  Deliberately thin. The token can be forwarded, sit in a shared family inbox, or be pasted into
+   *  a support ticket, so this carries nothing that would identify the donor to a reader who is not
+   *  them, and nothing that widens what the token can do: no donor name, no email, no card, no
+   *  Stripe or internal ids, no payment history, no totals. Everything left is either the reader's
+   *  own arrangement or already public on the masjid's donation page. */
+  const publicPlanView = (seed: PlanSeed, state: PlanState | null) => {
+    const c = store.getCampaign(seed.campaignId);
+    const m = store.getMasjid();
+    const currency = (state?.currency || seed.currency || cur()).toUpperCase();
+    const amountMinor = state && state.amountMinor != null ? state.amountMinor : seed.amountMinor;
+    const st = state ? friendlyStatus(state.status, state.paused) : ({ status: 'unknown', label: 'Not known' } as const);
+    return {
+      reference: donationRef(seed.firstDonationId),
+      amount: toMajor(amountMinor, currency),
+      currency,
+      frequency: frequencyLabel(state?.interval ?? '', state?.intervalCount ?? 0),
+      campaignTitle: c?.title ?? '',
+      // A relative path, so "go to the donation page" works on the LAN and behind the tunnel alike
+      // (the client adds the base path). '' when the campaign has since been deleted.
+      campaignPath: c && c.active ? `/${c.slug}` : '',
+      masjidName: m.name || '',
+      masjidLogo: m.logo || '',
+      contactEmail: m.email || '',
+      contactPhone: m.phone || '',
+      contactWebsite: m.website || '',
+      status: st.status,
+      statusLabel: st.label,
+      // '' means "we are not saying" — never a guessed or stale date. The page omits the row.
+      nextPaymentAt: state ? isoFromUnix(nextPaymentUnix(state)) : '',
+      /** False only when we could not read Stripe on this request; the page then says so. */
+      live: state !== null,
+      /** Is there anything left to stop? A finished plan shows the "already stopped" state instead. */
+      canStop: st.status !== 'canceled',
+    };
+  };
+
+  const PlanTokenBody = z.object({ token: z.string().min(1).max(80) });
+
+  /** Read one plan by its emailed token. A POST, not a GET, so the token stays out of URLs. */
+  app.post('/api/public/plan/lookup', async (req, reply) => {
+    reply.header('cache-control', 'no-store, private, max-age=0').header('pragma', 'no-cache');
+    if (!planLinkRateOk(peerOf(req))) return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
+    const parsed = PlanTokenBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(404).send({ error: PLAN_TOKEN_MISS });
+    const seed = resolvePlanToken(parsed.data.token);
+    if (!seed) return reply.code(404).send({ error: PLAN_TOKEN_MISS });
+    // One outbound Stripe read, and only for the subscription itself. Never syncPlan (see (1)).
+    const acct = await accountById(seed.stripeAccountId);
+    const state = acct?.secretKey ? await fetchPlanState(acct.secretKey, seed.subscriptionId) : null;
+    return { data: publicPlanView(seed, state) };
+  });
+
+  /** Stop the plan. Idempotent: a plan that has already finished is a SUCCESS, not an error. */
+  app.post('/api/public/plan/cancel', async (req, reply) => {
+    reply.header('cache-control', 'no-store, private, max-age=0').header('pragma', 'no-cache');
+    if (!planLinkRateOk(peerOf(req))) return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
+    const parsed = PlanTokenBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(404).send({ error: PLAN_TOKEN_MISS });
+    const seed = resolvePlanToken(parsed.data.token);
+    if (!seed) return reply.code(404).send({ error: PLAN_TOKEN_MISS });
+    const acct = await accountById(seed.stripeAccountId);
+    if (!acct?.secretKey) {
+      // The masjid's keys have gone from this device. Nothing we can do, and "try again" would be a
+      // lie — point them at the people who can.
+      return reply.code(502).send({ error: 'We can’t stop these payments from here just now. Please contact the masjid and they’ll stop them for you.' });
+    }
+
+    // Read first, so an already-finished plan is answered rather than thrown at. Stripe refuses to
+    // cancel a canceled subscription, and cancelPlan would report that as "we couldn't reach
+    // Stripe" — which a donor double-clicking the button would hit every single time.
+    const before = await fetchPlanState(acct.secretKey, seed.subscriptionId);
+    const alreadyOver = before ? planIsOver(before) : false;
+    if (!alreadyOver && !(await cancelPlan(acct.secretKey, seed.subscriptionId))) {
+      return reply.code(502).send({ error: 'We couldn’t stop these payments just now, so nothing has changed. Please try again in a moment.' });
+    }
+
+    if (!alreadyOver) {
+      // The admin's Monthly tab caches live plan state for 60 seconds; without this it would show
+      // "Active" for a minute after the donor stopped it.
+      planCache.delete(seed.subscriptionId);
+      // A fixed actor, never actorOf(req) — see (5). No token, ever (store.recordAudit's own rule).
+      store.recordAudit('plan.stop', {
+        actor: 'the donor, from their email link',
+        subject: seed.subscriptionId,
+        detail: 'a monthly donor stopped their own plan',
+      });
+      // An unauthenticated destructive action with no undo: the masjid hearing about it IS the
+      // compensating control, so this is an alert (their own email/webhook, their choice of channel)
+      // rather than a silent log line. No donor name or address — the masjid can find the plan by
+      // its reference in the Monthly tab.
+      const camp = store.getCampaign(seed.campaignId);
+      void fabricAlert(
+        'plan-stopped',
+        'A monthly donation was stopped',
+        `A donor stopped their monthly donation of ${formatMoney(seed.amountMinor, seed.currency)} to “${camp?.title ?? 'your masjid'}” using the link in their email. Nothing more will be taken from their card. Reference ${donationRef(seed.firstDonationId)}.`,
+        'info',
+      ).catch(() => {});
+    }
+
+    const after = await fetchPlanState(acct.secretKey, seed.subscriptionId);
+    return { data: { ...publicPlanView(findSeed(planSeeds(), seed.subscriptionId) ?? seed, after), stopped: true, alreadyOver } };
   });
 
   // ── Tuition (Students billing) — a `tuition` campaign is a shell around OpenMasjid ──
