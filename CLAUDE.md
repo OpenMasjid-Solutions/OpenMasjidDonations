@@ -32,7 +32,7 @@ If it prints anything else, `git checkout dev` first. If you are on `main`, you 
 2. **Never commit to `main`.** Not for a hotfix, not for a typo, not for a one-line docs fix, not because something is urgent. There is no exception that does not start with Hasan saying so.
 3. **Never merge, rebase onto, cherry-pick into, or fast-forward `main` autonomously.** Not even when `dev` is green and `main` is behind. Being obviously-correct is not authorisation.
 4. **`main` moves only on the explicit words "push to main"** (or "merge to main") from Hasan. Nothing else counts — not "ship it", not "release it", not approving a diff, not merging a PR into `dev`. If you think a release is due, *say so and wait*.
-5. **That push is a release.** When told, do the full runbook in **§16.1**, whose step order is load-bearing: bump the version, **let CI publish the image, commit the digest, and only then tag** — and open a **pull request** against the catalog's `dev`, never a push to the catalog's `main`.
+5. **That push is a release.** When told, do the full runbook in **§16.1**, whose step order is load-bearing: bump the version, let CI publish the image, commit the `@sha256` digest, and **tag the digest-pin commit — not the commit before it.** Then open a **pull request** against the catalog's `dev`, never a push to the catalog's `main`.
 6. **Restore the pinned image line when merging to `main`.** On `dev`, `docker-compose.yml` points at the moving `:dev` tag with no digest. `main` must always carry `:<version>@sha256:<digest>`. A merge that carries the `:dev` line into `main` would point every stable install at a development build — check this line explicitly, every time.
 
 ### After every push to `dev`, ask (required)
@@ -360,9 +360,32 @@ For local dev run the server on :8080 and `cd web && npm run dev` on :5173 (Vite
 1. **Bump `manifest.yaml`** to the release version (plus both `package.json` files, and the image tag in `docker-compose.yml`).
 2. **Let CI build and publish the image.** Wait for it to go green.
 3. **Commit `docker-compose.yml` with the published image's `@sha256` digest.**
-4. **Tag *that* commit** — `git tag -a vX.Y.Z` on the digest-pin commit from step 3.
+4. **Tag the digest-pin commit — not the commit before it.** `git tag -a vX.Y.Z` on the step-3 commit itself. The tag goes on the commit that *contains* the `@sha256`, never on the merge commit that precedes it.
 
-> **Do not tag before step 3.** A tag placed on the merge commit carries the *previous* release's digest (or none at all), so anyone pinning your tag ships the wrong code under the new version number. **This has already happened twice** — and a third time on **v0.42.0**, where the tag landed on the merge and the digest pin went in the commit after it. Check with `git show vX.Y.Z:docker-compose.yml | grep image:` before you push the tag: it must already carry `@sha256:`.
+> ### Tag the digest-pin commit, not the commit before it
+>
+> This is the single most-repeated mistake in this repo's release history, so it gets its own box.
+>
+> The merge commit and the digest-pin commit look interchangeable — the merge is where the version number changes, so it feels like "the release". It is not. **A tag on the merge commit names a `docker-compose.yml` that carries the *previous* release's digest, or no digest at all**, so anyone pinning your tag ships the wrong code under the new version number.
+>
+> ```bash
+> # WRONG — the tag names the merge; the digest lands in the NEXT commit
+> git merge --no-ff dev && git tag -a v0.12.0 && <CI publishes> && git commit -m "digest-pin"
+>
+> # RIGHT — the digest is already in the commit the tag names
+> git merge --no-ff dev && <CI publishes> && git commit -m "digest-pin" && git tag -a v0.12.0
+> ```
+>
+> **Verify before pushing the tag — it takes one command and there is no excuse for skipping it:**
+>
+> ```bash
+> git show vX.Y.Z:docker-compose.yml | grep image:   # MUST already contain @sha256:
+> git rev-list -n1 vX.Y.Z                            # MUST equal the digest-pin commit
+> ```
+>
+> If the tag is already pushed and wrong, **do not paper over it in the catalog PR**: `git tag -f` it onto the digest-pin commit, force-push the tag, and say so — or, if the tag cannot be moved, pin the correct `commit:` in the PR *and* flag in the PR description that `ref:` and `commit:` disagree and why.
+>
+> **This has already happened twice** — and a third time on **v0.42.0**, where the tag landed on the merge commit (compose reading a bare `:0.42.0`) and the digest pin went into the commit after it. Only the registry's `commit:` pointing at the right SHA kept masjids fetching correct content.
 
 ### Step 2 — a PR against the catalog's `dev`
 
