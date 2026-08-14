@@ -32,7 +32,7 @@ If it prints anything else, `git checkout dev` first. If you are on `main`, you 
 2. **Never commit to `main`.** Not for a hotfix, not for a typo, not for a one-line docs fix, not because something is urgent. There is no exception that does not start with Hasan saying so.
 3. **Never merge, rebase onto, cherry-pick into, or fast-forward `main` autonomously.** Not even when `dev` is green and `main` is behind. Being obviously-correct is not authorisation.
 4. **`main` moves only on the explicit words "push to main"** (or "merge to main") from Hasan. Nothing else counts — not "ship it", not "release it", not approving a diff, not merging a PR into `dev`. If you think a release is due, *say so and wait*.
-5. **That push is a release.** When told, do the full runbook in §16: bump `manifest.yaml` + both `package.json` files, add the `web/src/changelog.ts` entry, merge `dev` into `main`, tag `vX.Y.Z`, let CI publish the stable image, digest-pin `docker-compose.yml`, then update the OpenMasjidAPPS `registry.yaml` entry.
+5. **That push is a release.** When told, do the full runbook in **§16.1**, whose step order is load-bearing: bump the version, **let CI publish the image, commit the digest, and only then tag** — and open a **pull request** against the catalog's `dev`, never a push to the catalog's `main`.
 6. **Restore the pinned image line when merging to `main`.** On `dev`, `docker-compose.yml` points at the moving `:dev` tag with no digest. `main` must always carry `:<version>@sha256:<digest>`. A merge that carries the `:dev` line into `main` would point every stable install at a development build — check this line explicitly, every time.
 
 ### After every push to `dev`, ask (required)
@@ -122,8 +122,11 @@ You are building an OpenMasjidOS app. Two repositories define how that is done. 
   ```yaml
   - id: donations
     repo: OpenMasjid-Solutions/OpenMasjidDonations
-    ref: v0.1.0
+    ref: vX.Y.Z          # the human label
+    commit: <40-char SHA> # what is actually fetched
+    dev_ref: dev          # the development channel, tracked automatically
   ```
+  That entry is changed **only by a pull request against the catalog's `dev` branch** — see **§16.1**. Never a push to the catalog's `main`.
 - Container image published to **GHCR** (match Display's naming convention, e.g. `ghcr.io/openmasjid-solutions/openmasjiddonations:<version>`). Confirm Display's exact image path and mirror it.
 
 ---
@@ -254,7 +257,7 @@ Three absences are deliberate and each is load-bearing:
 
 Known gap, recorded not hidden: the container still **runs as root** and the root filesystem is not `read_only`. Both need an entrypoint that chowns the volume plus one real container start to prove the database is still writable — see `docs/audit/ACTION_REQUIRED.md` §4d.
 
-**Registry.** The app is listed in OpenMasjidAPPS `registry.yaml` with `ref:` (the stable `vX.Y.Z` tag, plus an immutable `commit:`) and `dev_ref: dev`. Updating that entry is the last step of the release runbook (§16).
+**Registry.** The app is listed in OpenMasjidAPPS `registry.yaml` with `ref:` (the stable `vX.Y.Z` tag) plus the `commit:` that is actually fetched, and `dev_ref: dev`. That entry is changed by **a pull request against the catalog's `dev`** — the last step of the release runbook, **§16.1**. A catalog maintainer, not us, moves the catalog's `main`.
 
 ---
 
@@ -342,9 +345,52 @@ For local dev run the server on :8080 and `cd web && npm run dev` on :5173 (Vite
 - **Add a `web/src/changelog.ts` entry with every release** — it's what the "What's new" item in the account menu shows. Plain, non-technical, what changed *for the masjid*; same voice as the App Store note in OpenMasjidAPPS `registry.yaml`, since they see both. **Only the major changes go in a release entry**; the running detail lives in `dev`'s `Unreleased` entry — see the Branching policy. It is loaded on demand, so never import it eagerly (that would put admin-only text in the donation page's bundle).
 - **The version lives in FOUR files and they must agree**: `manifest.yaml` `version:` (the one CI reads and the catalog publishes), `server/package.json`, `web/package.json`, and the image tag in `docker-compose.yml`. There is deliberately **no `VERSION` file** (see `docs/ARCHITECTURE.md`); the server reports its version by reading the `package.json` shipped beside the runtime.
 - **Semver, `0.x` = pre-release.** Tag releases `vX.Y.Z`.
-- **GitHub Actions:** on a `v*` tag, build the multi-arch (amd64 + arm64) image and **push to GHCR** with the version tag (mirror Display's workflow). Then the app is added/updated in OpenMasjidAPPS `registry.yaml` with the new `ref`.
-- **Two channels.** The same workflow also publishes the moving `:dev` (+ immutable `:dev-<sha>`) pair from the `dev` branch. Stable tags come only from `main`/`v*`. See **Branching policy** at the top of this file — a release is the *only* thing that moves `main`, and only on Hasan's explicit "merge to main".
+- **GitHub Actions:** builds the multi-arch (amd64 + arm64) image and pushes it to GHCR. Both channels publish the exact `manifest.yaml` version as an immutable tag; only the moving alias differs (`:latest` for stable, `:dev` for development). The channel is decided by the git **ref**, not the event, so a manual run on `dev` can never publish `:latest`.
+- **Two channels.** The same workflow publishes the moving `:dev` (+ immutable `:dev-<sha>`) pair from the `dev` branch. Stable comes only from `main`/`v*`. See **Branching policy** at the top of this file — a release is the *only* thing that moves `main`, and only on Hasan's explicit "merge to main".
 - **A push to `dev` that touches only documentation needs no version bump.** `build-image.yml`'s `paths-ignore` covers `**/*.md`, `docs/**`, `screenshots/**`, `LICENSE` and `docker-compose.yml`, so those pushes publish nothing and there is no tag to collide with. Anything else — including a workflow-only change — needs a fresh `-dev.N`.
+
+---
+
+## 16.1 Getting a stable release into the OpenMasjidOS catalog
+
+**You cannot push to the catalog's `main`. Stable moves only through a catalog release, run by a catalog maintainer.** This section is the whole job; do not improvise around it.
+
+### Step order in THIS repo — the order is the point
+
+1. **Bump `manifest.yaml`** to the release version (plus both `package.json` files, and the image tag in `docker-compose.yml`).
+2. **Let CI build and publish the image.** Wait for it to go green.
+3. **Commit `docker-compose.yml` with the published image's `@sha256` digest.**
+4. **Tag *that* commit** — `git tag -a vX.Y.Z` on the digest-pin commit from step 3.
+
+> **Do not tag before step 3.** A tag placed on the merge commit carries the *previous* release's digest (or none at all), so anyone pinning your tag ships the wrong code under the new version number. **This has already happened twice** — and a third time on **v0.42.0**, where the tag landed on the merge and the digest pin went in the commit after it. Check with `git show vX.Y.Z:docker-compose.yml | grep image:` before you push the tag: it must already carry `@sha256:`.
+
+### Step 2 — a PR against the catalog's `dev`
+
+Open a pull request against **`OpenMasjid-Solutions/OpenMasjidAPPS`, base branch `dev`, never `main`.** Change **only this app's own entry** in `registry.yaml` — never another app's, never `catalog.json`:
+
+```yaml
+  - id: donations
+    ref: v0.12.0        # the tag you just published — the human label
+    commit: <40-char SHA of the tagged commit>
+```
+
+**`commit:` is what actually gets fetched; `ref:` is only the human label.** Get it with:
+
+```bash
+git rev-list -n1 v0.12.0
+```
+
+If you followed the step order above, `ref` and `commit` are the same commit. **If they are not, pin the commit that has the correct digest** — the fetched content matters more than the label — and say so in the PR, because it means the tag is wrong and wants moving.
+
+### Step 3 — stop
+
+**A catalog maintainer runs the release that moves `main`.** Do not commit to the catalog's `main`, and **do not merge the catalog's `dev` into its `main`**: the two branches legitimately hold different builds of `catalog.json`, and merging them corrupts the stable column. Open the PR, say it is ready, and wait.
+
+### The dev channel needs none of this
+
+`dev_ref: dev` tracks this repo's `dev` branch automatically and the catalog rebuilds hourly, so **a dev build never needs a catalog PR**. Just keep the prerelease version (`X.Y.Z-dev.N`) and the version-tagged image current, and make sure **the image is published before the catalog can read the version that names it**.
+
+That last clause is the one thing our current flow only approximates. Version and compose move in ONE commit (see *Publishing a dev build*), so between the push and the build going green (~10 min) the tip of `dev` names a tag that does not exist yet; an hourly-cron rebuild landing in that window offers an image that cannot be pulled. It fails visibly and the post-publish `repository_dispatch` corrects it. If that window ever needs closing properly, the fix is to publish first via `workflow_dispatch` and push the bump after — not to split the commit, which breaks the dispatch (see the reasoning under *Publishing a dev build*).
 
 ---
 
@@ -365,5 +411,5 @@ Builds via the documented commands and `docker compose up -d`; `tsc`/lint clean;
   7. **Recurring (monthly)** subscriptions (+ optional webhook path).
   8. Donations log + stats + CSV export.
   9. Appearance/theming polish, animations, empty/edge states, friendly errors.
-  10. README.md (user-facing, in Display's style), screenshots, docs/ARCHITECTURE.md; tag `v0.1.0`; add the `registry.yaml` entry to OpenMasjidAPPS.
+  10. README.md (user-facing, in Display's style), screenshots, docs/ARCHITECTURE.md; tag `v0.1.0`; open a catalog PR for the `registry.yaml` entry (§16.1).
 - **Never** put the Stripe secret in the client or logs. **Never** assume inbound webhooks for the core flow. Ask before adding heavy dependencies or deviating from the contract.
