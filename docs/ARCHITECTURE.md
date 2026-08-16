@@ -855,3 +855,81 @@ to Stripe's own receipt. One donation, once, against every donation, for ever.
 Do not tighten this back to "a previous send succeeded". If a cheap authoritative "is email set up?"
 probe ever appears on the Fabric, that is the right way to close the remaining gap; a success
 requirement is not.
+
+## WhatsApp: an admin channel, deliberately (v0.43.0)
+
+The masjid installs the OpenWA gateway and links **their own** phone number in OpenMasjidOS. We POST
+`/api/fabric/whatsapp`; the platform sends. We never see the gateway, its credentials, or the number.
+
+### Why it carries admin notifications and not donor receipts
+
+The platform's alerts matrix has no WhatsApp column for an app, on the reasoning that it routes to
+the admin's one number while an app's messages are generally for donors — so "which events, and to
+whom" is a setting in the app. In Donations that setting resolves the other way: **the recipients are
+the masjid's own people.**
+
+That is not a smaller version of the donor feature; it is a different one, and it is the reason
+nothing in this app collects a donor's phone number. A donation page asks for as little as it can —
+name and email are already optional — and a phone number is the field most likely to make someone
+abandon a gift. It would also put us one bug away from messaging a stranger on an unofficial client
+that gets numbers banned for exactly that.
+
+### Additive, never load-bearing
+
+Every event that can go out over WhatsApp already goes out by email or webhook through the alerts
+matrix. WhatsApp is a **second copy** on a channel the masjid chose, so:
+
+- the send is fire-and-forget and never blocks a donor, a payment or a receipt;
+- a failure is logged at warn and dropped — the alert that did go out is unaffected;
+- nothing auth-critical rides on it, ever. It is an unofficial client whose number can be restricted
+  or banned without notice, and email has a real provider behind it.
+
+### `queued` is not `sent`, and the pacing is why
+
+Ban risk attaches to the **number**, not to whoever sent a message — so one platform-wide queue paces
+every app at once: randomised 6–20s gaps, per-recipient cooldowns, hourly and daily caps, a warm-up
+ramp for a freshly linked number, and quiet hours that queue rather than drop. A success is
+`202 {queued:true}` and there is no delivery receipt.
+
+The panel therefore says **"Queued ✓ — … it may take a few minutes to arrive"** after a test, never
+"Sent". An admin told "sent" who then watches a silent phone concludes the feature is broken, when
+the truth is that it is working exactly as designed.
+
+The shared daily cap is also why the "a donation was received" event has a **`minAmount` floor**
+(default 0 = every donation, but prominent in the UI). A busy Friday of small gifts would otherwise
+spend the masjid's entire allowance on good news and push the refund and payment-failure messages —
+the ones that need someone to act — behind hours of queue.
+
+### One recipient per call, and never a client-chosen target
+
+The platform takes one `to` **or** one `group` per call and 400s on both or neither. The array it
+does not accept is the point: the API shape is the first place a cold blast is discouraged, and a
+cold blast is the single most reliable way to get a masjid's number banned. We loop, and the queue
+paces the loop.
+
+- **Numbers** go through `toWhatsAppDigits`, which mirrors the platform's own `toDigits`: strip to
+  digits, require 8–15, and **refuse a number with no country code rather than guessing one.**
+  "07700900123" is a real number in the UK and a different real number elsewhere; prefixing our guess
+  would send a masjid's donation figures to a stranger. The admin is told to add the code instead.
+- **Groups** come only from `GET /api/fabric/whatsapp/groups` — the ones the *platform* admin
+  approved for this app, never the gateway's own list, which would name every group the masjid's
+  phone is in, the imam's family chat included. The id is re-verified against that list before it is
+  saved, because the platform's 403 for an unapproved id would otherwise arrive silently at send
+  time, long after the admin left the screen believing it was set up.
+
+### Three wire details that fail silently
+
+Found by reading `packages/core/src/api/fabric.ts` rather than the summary this was built from, and
+each one would have left a feature that looks correct and never messages anybody. All three are
+pinned by `whatsapp.test.ts`:
+
+| | The trap |
+|---|---|
+| `/groups` | Returns **`{ groups: [...] }`**, not a bare array. Parsed as an array it yields nothing, and the admin concludes no groups were approved. |
+| `reason` | Always a word, never `null`; **`"ready"`** is what available looks like. Treating a null reason as "available" inverts the check. |
+| `media` | **Absent means no.** An older platform omits it entirely. |
+
+The availability probe is cached for a minute so the Settings screen is cheap, but an **outage is
+never cached** — one dropped packet would otherwise hide the feature from the admin for a full
+minute — and `?refresh=1` forces a re-probe, which is what the admin presses after linking the phone,
+when watching the answer change is the whole point.

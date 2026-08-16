@@ -172,6 +172,57 @@ export const EMAIL_RECEIPT_DEFAULT: EmailReceipt = {
   accent: '',
 };
 
+/** Which donation events go out over WhatsApp, and to whom.
+ *
+ *  An ADMIN channel: `numbers` are the masjid's own people, entered by the admin on our Settings
+ *  screen, and `groupId` is a group the platform admin approved for this app. **No donor is ever
+ *  messaged** — we never collect a donor's phone number at all. The platform's alerts matrix has no
+ *  WhatsApp column for an app precisely so that this choice lives here.
+ *
+ *  Additive, never a replacement: every one of these events already goes out by email/webhook, and
+ *  WhatsApp being off (or unavailable, or banned) must change nothing about that. */
+export interface WhatsAppSettings {
+  enabled: boolean;
+  /** Digits only, country code included (see toWhatsAppDigits). Capped — see MAX_WHATSAPP_NUMBERS. */
+  numbers: string[];
+  /** An approved group id, or ''. Its label is cached alongside only so the panel can name it
+   *  without a platform round-trip; the live list is always authoritative. */
+  groupId: string;
+  groupLabel: string;
+  events: {
+    donation: boolean;
+    refund: boolean;
+    planStopped: boolean;
+    paymentFailed: boolean;
+    tuitionFailed: boolean;
+  };
+  /** Don't announce a gift below this, in MINOR units. 0 = announce every one.
+   *
+   *  Exists because of the pacing: the platform spaces messages 6–20s apart under hourly and daily
+   *  caps shared with every other app, so a busy Friday of £2 gifts would fill the masjid's whole
+   *  budget and push the messages that matter behind hours of quiet hours. */
+  minAmount: number;
+}
+
+/** A partial update. `events` is itself partial, so a form may send one toggle without having to
+ *  restate the other four (and so a future event can be added without an old client clearing it). */
+export type WhatsAppPatch = Partial<Omit<WhatsAppSettings, 'events'>> & { events?: Partial<WhatsAppSettings['events']> };
+
+/** More than a handful of recipients is a broadcast list, and every extra number multiplies the
+ *  queue cost of a single donation. The admin's own people, not a mailing list. */
+export const MAX_WHATSAPP_NUMBERS = 5;
+
+export const WHATSAPP_DEFAULT: WhatsAppSettings = {
+  enabled: false,
+  numbers: [],
+  groupId: '',
+  groupLabel: '',
+  // Off by default, every one. A masjid opting into WhatsApp has not thereby asked for a message
+  // per donation — that is the one most likely to exhaust the number's daily budget.
+  events: { donation: false, refund: false, planStopped: false, paymentFailed: false, tuitionFailed: false },
+  minAmount: 0,
+};
+
 export interface Donation {
   id: string;
   campaignId: string;
@@ -687,6 +738,41 @@ export class Store {
   }
   setEmailStatus(status: string): void {
     this.setRaw('email_status', status);
+  }
+
+  /** WhatsApp admin-notification settings. Never holds a donor's number — see WhatsAppSettings. */
+  getWhatsApp(): WhatsAppSettings {
+    const s = this.getJson<WhatsAppSettings>('whatsapp');
+    const e = (s.events ?? {}) as Partial<WhatsAppSettings['events']>;
+    return {
+      enabled: s.enabled ?? WHATSAPP_DEFAULT.enabled,
+      // Re-clamped on read as well as write: the cap is a safety property, and a row written by an
+      // older build (or restored from a backup) must not be able to exceed it.
+      numbers: (Array.isArray(s.numbers) ? s.numbers : []).filter((n) => typeof n === 'string').slice(0, MAX_WHATSAPP_NUMBERS),
+      groupId: s.groupId ?? '',
+      groupLabel: s.groupLabel ?? '',
+      events: {
+        donation: e.donation ?? false,
+        refund: e.refund ?? false,
+        planStopped: e.planStopped ?? false,
+        paymentFailed: e.paymentFailed ?? false,
+        tuitionFailed: e.tuitionFailed ?? false,
+      },
+      minAmount: Math.max(0, Math.round(s.minAmount ?? 0)),
+    };
+  }
+
+  setWhatsApp(patch: WhatsAppPatch): WhatsAppSettings {
+    const cur = this.getWhatsApp();
+    const merged: WhatsAppSettings = {
+      ...cur,
+      ...clean(patch),
+      events: { ...cur.events, ...clean(patch.events ?? {}) },
+    };
+    merged.numbers = merged.numbers.slice(0, MAX_WHATSAPP_NUMBERS);
+    merged.minAmount = Math.max(0, Math.round(merged.minAmount));
+    this.setRaw('whatsapp', JSON.stringify(merged));
+    return merged;
   }
 
   /** Cached Stripe Product id per account + mode (test/live), for recurring prices. */

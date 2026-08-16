@@ -5,7 +5,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.43.0-dev.1
+version: 0.43.0-dev.2
 author: OpenMasjid-Solutions
 license: AGPL-3.0-only
 icon: icon.svg
@@ -86,6 +86,20 @@ fabric:
 # app (admin toggle + editable receipt) and fail-soft: if email isn't set up ("not_configured")
 # we simply don't email and still record the donation + show the on-screen thank-you.
 email: true
+# Opt into Fabric WhatsApp (platform v0.51.0+): the masjid installs the OpenWA gateway and links
+# THEIR OWN number in OpenMasjidOS; we POST /api/fabric/whatsapp and the platform does the sending.
+# We never see the gateway, its credentials, or which number is linked.
+#
+# In this app WhatsApp is an ADMIN channel: the masjid enters the number(s) — or picks an approved
+# group — on our own Settings screen, and chooses which donation events go out. We never collect a
+# phone number from a donor and never message one.
+#
+# Two rules that shape every use of it here. The API returns 202 {queued:true} and NEVER "sent":
+# ban risk attaches to the NUMBER, so the platform paces everything (randomised 6–20s gaps, hourly
+# and daily caps, quiet hours that defer for hours). And nothing auth-critical may ride on it — it
+# is an unofficial client whose number can be restricted at any time, so email and the alert
+# channels stay the fallback and this is only ever additive.
+whatsapp: true
 # Admin alerts (platform v0.41.0+): each declared type gets a granular Email/Webhook on-off in
 # OpenMasjidOS → Settings → Alerts (the admin picks the channel — we never do). We fire one with
 # POST /api/fabric/alert. Fail-soft on `disabled_by_admin`. (No `reader-offline` here — this is a

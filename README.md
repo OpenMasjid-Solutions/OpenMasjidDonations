@@ -144,7 +144,7 @@ Eight tabs behind a login, with a bottom dock like the rest of the family:
 | **Thank-you** | Write the on-screen thank-you, and design the emailed receipt — subject, heading, body, accent — with a **"send me a test"** |
 | **Large gifts** | The threshold, your wording, and the QR image for the bank-transfer suggestion |
 | **Payments** | **Several Stripe accounts** — add, edit, test the keys and remove accounts whose keys live on this device, and pick which **vaulted OpenMasjidOS account** is the default for the site. Any appeal can then be pointed at a different one, so Zakat and general funds settle separately; the currency; a clear **TEST MODE** badge; and the optional per-account webhook with the URL to paste into Stripe |
-| **Settings** | **Your masjid** (name, address, email, phone, website, currency) · **Appearance** (light/dark/follow-system, accent, logo, wallpaper, or mirror the dashboard) · **Notifications** · **Email receipts** on/off · **Public access** via a Cloudflare Tunnel |
+| **Settings** | **Your masjid** (name, address, email, phone, website, currency) · **Appearance** (light/dark/follow-system, accent, logo, wallpaper, or mirror the dashboard) · **Notifications** · **Email receipts** on/off · **WhatsApp** notifications to your own number or an approved group · **Public access** via a Cloudflare Tunnel |
 
 Plus a **guided first-run setup**, a top-right account menu (theme · settings · sign
 out) with a live clock, and a **What's new** dialog that tells you what changed after
@@ -162,6 +162,13 @@ the app, so it works with no internet.
   Payments, fetched server-to-server and never stored here, or paste keys into the app.
 - **Email without credentials.** Receipts go out through the platform's email provider,
   so this app never sees your mail password or From address.
+- **WhatsApp, to the people who look after the money.** If your masjid runs the WhatsApp
+  gateway in OpenMasjidOS, you can have a message sent to your own number — or an approved
+  group — when a donation arrives, when one is refunded, when a monthly donor stops theirs,
+  or when donations stop working. You choose which. **Donors are never messaged and this app
+  never asks them for a phone number**; messages are queued and spaced out to keep your
+  number safe, so they arrive within minutes rather than instantly, and your email and
+  webhook alerts carry on exactly as before.
 - **Notifications and alerts.** A relay for "a donation was received", plus five
   alerts you can route to email or a webhook: **a payment couldn't be started**, **a
   tuition payment wasn't recorded**, **a donation was refunded**, **a monthly donation

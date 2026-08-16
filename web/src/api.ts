@@ -332,6 +332,52 @@ export type EmailReceiptPatch = Partial<Pick<EmailReceipt, 'enabled' | 'subject'
 export const getEmailReceipt = () => request<EmailReceipt>('/api/admin/email-receipt');
 export const saveEmailReceipt = (patch: EmailReceiptPatch) =>
   request<EmailReceipt>('/api/admin/email-receipt', { method: 'PUT', body: JSON.stringify(patch) });
+
+// ── WhatsApp (admin notifications through OpenMasjidOS) ─────────────────────────
+/** Which of the platform's four situations we're in. Each needs a different sentence, and a
+ *  different person to go and fix it — so never collapse them into "not working". */
+export type WhatsAppReason = 'ready' | 'not-configured' | 'not-linked' | 'unreachable' | 'not-allowed' | 'unknown';
+
+export interface WhatsAppStatus {
+  available: boolean;
+  reason: WhatsAppReason;
+  media: boolean;
+  maxMediaBytes: number;
+}
+
+export interface WhatsAppGroup {
+  id: string;
+  /** The admin's own nickname for the group, not its WhatsApp subject. Show it as-is. */
+  label: string;
+}
+
+export interface WhatsAppSettings {
+  enabled: boolean;
+  /** Digits only, country code included. Never a donor's number — this app doesn't collect one. */
+  numbers: string[];
+  groupId: string;
+  groupLabel: string;
+  events: { donation: boolean; refund: boolean; planStopped: boolean; paymentFailed: boolean; tuitionFailed: boolean };
+  /** MAJOR units across the API, like every other amount. 0 = tell me about every donation. */
+  minAmount: number;
+  status: WhatsAppStatus;
+  maxNumbers: number;
+}
+
+export type WhatsAppPatch = Partial<Omit<WhatsAppSettings, 'events' | 'status' | 'maxNumbers'>> & {
+  events?: Partial<WhatsAppSettings['events']>;
+};
+
+/** `refresh` re-probes the platform instead of using its 60-second cache — what the admin presses
+ *  after linking their phone, when seeing the answer change is the entire point. */
+export const getWhatsApp = (refresh = false) =>
+  request<WhatsAppSettings>(`/api/admin/whatsapp${refresh ? '?refresh=1' : ''}`);
+export const saveWhatsApp = (patch: WhatsAppPatch) =>
+  request<WhatsAppSettings>('/api/admin/whatsapp', { method: 'PUT', body: JSON.stringify(patch) });
+export const getWhatsAppGroups = () => request<{ groups: WhatsAppGroup[] }>('/api/admin/whatsapp/groups');
+/** Queues one real message. Resolves on QUEUED, never on delivered — there is no receipt. */
+export const testWhatsApp = (target: { to?: string; group?: string }) =>
+  request<{ queued: true }>('/api/admin/whatsapp/test', { method: 'POST', body: JSON.stringify(target) });
 /** Fire the `test` alert — the platform delivers it to the admin's own email/webhook (the app
  *  never learns the admin address). Confirms OpenMasjidOS can reach you. */
 export const sendTestAlert = () =>
