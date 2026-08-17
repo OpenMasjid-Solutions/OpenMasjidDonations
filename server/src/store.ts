@@ -229,12 +229,18 @@ export interface NotifyChannels {
    */
   email: string;
   /**
-   * A specific WhatsApp destination: digits with a country code, or an approved group id. '' = off,
-   * and **off by default for every event**, deliberately. WhatsApp is an unofficial client whose
-   * number can be banned, and the platform paces every message under a shared daily cap — so it is
-   * something a masjid opts into per event, never something an update switches on for them.
+   * A specific WhatsApp destination: digits with a country code, or an approved group id.
+   *
+   * `whatsappOn` is a SEPARATE switch rather than "non-empty means on", so an admin can turn the
+   * channel off for a month without losing the number they typed — and so the tick box in the panel
+   * means what a tick box normally means. Both must be true to send.
+   *
+   * Off by default for every event, deliberately: WhatsApp is an unofficial client whose number can
+   * be banned, and the platform paces every message under a daily cap shared with every other app —
+   * so it is something a masjid opts into per event, never something an update switches on for them.
    */
   whatsapp: string;
+  whatsappOn: boolean;
 }
 
 export interface NotifySettings {
@@ -261,35 +267,29 @@ export type NotifyPatch = Partial<Omit<NotifySettings, 'events'>> & {
 };
 
 /** OS alert on, the other two off — "the channel you already have, and nothing switched on for you". */
-const CHANNELS_DEFAULT: NotifyChannels = { os: true, email: '', whatsapp: '' };
+const CHANNELS_DEFAULT: NotifyChannels = { os: true, email: '', whatsapp: '', whatsappOn: false };
 
 /**
- * `donation` is the ONE event whose OS channel is off by default, and it is worth the exception.
+ * The OS channel is ON for every event, `donation` included — Hasan's call, made after the risk
+ * below was put to him.
  *
- * Every other event here fires when something goes wrong or someone acts — a handful of times a
- * year. `donation` fires on every transaction. And the platform defaults a newly-declared alert id
- * to email+webhook ON, persisting only non-defaults, so there is no admin-side state that would
- * save a masjid from it and no migration we could write: shipping `os: true` here would start
- * emailing every existing admin once per donation the moment they updated — hundreds of times during
- * a Ramadan appeal or a fundraising dinner.
+ * The risk, recorded so nobody has to rediscover it: `donation` fires on every transaction, and the
+ * platform defaults a newly-declared alert id to email+webhook ON while persisting only non-defaults
+ * — so a masjid updating into this gets an email per donation without having asked, and during a
+ * Ramadan appeal that is hundreds. Alert mail is also rate-limited on a bucket shared with the
+ * platform's own alerts and with this app's, so a flood of good news can push `payment-failed` — the
+ * one that means nobody can give at all — behind it.
  *
- * It is worse than noise. The platform's alert mail is rate-limited on a bucket shared with its own
- * alerts and with this app's, so a flood of good news would push `payment-failed` — the one that
- * means nobody can give at all — behind it. A notification channel that drowns its own emergencies
- * is not a working channel.
- *
- * So this one is a deliberate tick, with the row in the panel saying plainly that it fires on every
- * donation and offering the minimum-amount floor next to it.
+ * `minAmount` is what keeps that in hand, and it is why the donation row carries the "only tell me
+ * about donations of at least…" field right beside its switches rather than somewhere in a
+ * sub-menu. If a masjid ever reports being buried, that field (or turning this one row off) is the
+ * answer — not a change of default, which was considered and decided against.
  */
-const OS_OFF_BY_DEFAULT: readonly NotifyEventId[] = ['donation'];
-
 export const NOTIFY_DEFAULT: NotifySettings = {
   defaultEmail: '',
   defaultWhatsapp: '',
   minAmount: 0,
-  events: Object.fromEntries(
-    NOTIFY_EVENTS.map((e) => [e, { ...CHANNELS_DEFAULT, os: !OS_OFF_BY_DEFAULT.includes(e) }]),
-  ) as Record<NotifyEventId, NotifyChannels>,
+  events: Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, { ...CHANNELS_DEFAULT }])) as Record<NotifyEventId, NotifyChannels>,
 };
 
 export interface Donation {
@@ -835,6 +835,9 @@ export class Store {
         os: typeof c.os === 'boolean' ? c.os : NOTIFY_DEFAULT.events[id].os,
         email: typeof c.email === 'string' ? c.email.trim().slice(0, 200) : '',
         whatsapp: typeof c.whatsapp === 'string' ? c.whatsapp.trim().slice(0, 64) : '',
+        // Absent on a row written before the switch existed: a stored number meant "on" then, and
+        // must keep meaning it now, or an upgrade silently stops a masjid's WhatsApp messages.
+        whatsappOn: typeof c.whatsappOn === 'boolean' ? c.whatsappOn : !!(typeof c.whatsapp === 'string' && c.whatsapp.trim()),
       };
     }
     return {
@@ -872,15 +875,9 @@ export class Store {
       // `donationRecovered` is new and had no old toggle; it follows the `donation` choice, which is
       // the same kind of news about the same money.
       const wasOn = !!old.events?.[id === 'donationRecovered' ? 'donation' : id];
-      // `os` takes the SAME default a fresh install would, not a hardcoded true. Hardcoding it here
-      // would re-create the very flood the default exists to prevent, and would do it to precisely
-      // the boxes most likely to notice — the ones already configured and taking real donations.
-      //
-      // The knowing cost: a dev-channel masjid currently gets a webhook post per donation (the old
-      // `notify()` relay was ungated), and after this they get one only if they tick the box. That is
-      // a real change and the release note says so — but it is the right way round, because the box
-      // they tick now also reaches their inbox, which is what they were asking for.
-      events[id] = { os: NOTIFY_DEFAULT.events[id].os, email: '', whatsapp: wasOn ? target : '' };
+      // `os` takes the SAME default a fresh install would, rather than being hardcoded, so there is
+      // exactly one answer anywhere to "is this channel on by default?".
+      events[id] = { os: NOTIFY_DEFAULT.events[id].os, email: '', whatsapp: wasOn ? target : '', whatsappOn: wasOn && !!target };
     }
     // Deliberately silent. `raise()` reads these settings on EVERY notification, and this runs until
     // something writes `notify` — so a line here would print once per donation, for ever, on a box

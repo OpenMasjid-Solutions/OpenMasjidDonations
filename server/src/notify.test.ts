@@ -9,13 +9,16 @@
 // looks fine, the admin's switch says on, and nothing ever arrives. Reading the manifest here is the
 // only way that fails loudly instead.
 //
-// THE OTHER TWO PROPERTIES:
-//  1. `donation` must NOT default to the OS channel. The platform defaults a newly-declared alert to
-//     email+webhook ON and persists only non-defaults, so shipping os:true for the one event that
-//     fires per transaction would email every existing admin once per donation the moment they
-//     updated — and, sharing the platform's alert-mail budget, would push `payment-failed` behind it.
+// THE OTHER THREE PROPERTIES:
+//  1. The OS channel is on by default for every event, and WhatsApp is off for every event. The
+//     first is Hasan's call and the second is not negotiable — an update must never start sending
+//     WhatsApp on a masjid's behalf. The known cost of the first is volume on `donation`, which
+//     fires per transaction; `minAmount` is the mitigation and lives beside it in the panel.
 //  2. A 0.43.0-dev WhatsApp configuration must survive the upgrade. Those masjids typed in real
 //     recipients; losing them would mean the refund notification they set up simply stops.
+//  3. The WhatsApp switch is separate from the number, and a row written before that switch existed
+//     reads a stored number as ON — otherwise the upgrade that added the switch would silently stop
+//     the messages it was meant to make clearer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -64,16 +67,14 @@ test('the manifest ids are kebab-case, as the platform requires', () => {
 
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
-test('the OS channel is on by default for everything EXCEPT the per-donation event', () => {
+test('the OS channel is on by default for EVERY event', () => {
+  // Hasan's call, made after the volume risk was put to him: `donation` fires per transaction, and
+  // the platform defaults a newly-declared alert to email+webhook ON — so a masjid updating into
+  // this gets an email per donation. `minAmount` is the mitigation, which is why the donation row
+  // carries that field beside its switches. If this ever needs revisiting, change the default here
+  // and say so in the release note; do not let it drift.
   for (const event of NOTIFY_EVENTS) {
-    const expected = event !== 'donation';
-    assert.equal(
-      NOTIFY_DEFAULT.events[event].os,
-      expected,
-      event === 'donation'
-        ? 'donation must default OFF: it fires per transaction, and the platform defaults a new alert id to email+webhook ON, so os:true here would email every existing admin once per donation on upgrade'
-        : `${event} should default to the channel the masjid already has`,
-    );
+    assert.equal(NOTIFY_DEFAULT.events[event].os, true, `${event} should default to the channel the masjid already has`);
   }
 });
 
@@ -84,11 +85,12 @@ test('email and WhatsApp are off by default for every event — nothing is switc
   }
 });
 
-test('a fresh store reads back the defaults, including the donation exception', () => {
+test('a fresh store reads back the defaults', () => {
   const s = new Store(':memory:');
   const cfg = s.getNotify();
-  assert.equal(cfg.events.donation.os, false);
+  assert.equal(cfg.events.donation.os, true);
   assert.equal(cfg.events.refund.os, true);
+  assert.equal(cfg.events.donation.whatsappOn, false, 'WhatsApp is never switched on for a masjid');
   assert.equal(cfg.minAmount, 0);
   assert.equal(cfg.defaultEmail, '');
 });
@@ -146,7 +148,9 @@ test('migration: a configured dev.3 box keeps its recipient on the events it had
   assert.equal(cfg.defaultWhatsapp, '447700900123', 'and is offered as the prefill');
   // Numbers 2..5 cannot survive a one-destination model. The release note says so and points at a
   // group, which is strictly better anyway: one message, one queue slot.
-  assert.equal(cfg.events.donation.os, false, 'the donation default still applies — migration must not flood either');
+  assert.equal(cfg.events.donation.os, true, 'and the OS channel takes the same default a fresh install would');
+  assert.equal(cfg.events.donation.whatsappOn, true, 'an event that WAS on must come back on, not merely keep a number');
+  assert.equal(cfg.events.planStopped.whatsappOn, false);
 });
 
 test('migration: a group is carried over when there was no number', () => {
@@ -197,4 +201,23 @@ test('migration: a fresh install with no old key is untouched by any of this', (
   const cfg = s.getNotify();
   assert.equal(cfg.defaultWhatsapp, '');
   for (const e of NOTIFY_EVENTS) assert.equal(cfg.events[e as NotifyEventId].whatsapp, '');
+});
+
+test('the WhatsApp switch is separate from the number, so turning it off keeps the number', () => {
+  const s = new Store(':memory:');
+  s.setNotify({ events: { refund: { whatsapp: '447700900123', whatsappOn: true } } });
+  s.setNotify({ events: { refund: { whatsappOn: false } } });
+  const c = s.getNotify().events.refund;
+  assert.equal(c.whatsappOn, false, 'the channel is off');
+  assert.equal(c.whatsapp, '447700900123', 'but the number they typed is still there');
+});
+
+test('a row written before the switch existed treats a stored number as ON', () => {
+  // Otherwise the upgrade that ADDED the switch would silently stop a masjid's WhatsApp messages,
+  // which is the worst kind of change: nothing on screen says anything happened.
+  const s = new Store(':memory:');
+  (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
+    .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
+    .run('notify', JSON.stringify({ events: { refund: { os: true, email: '', whatsapp: '447700900123' } } }));
+  assert.equal(s.getNotify().events.refund.whatsappOn, true);
 });

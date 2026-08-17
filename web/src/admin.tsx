@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Ban, CalendarClock, CalendarDays, CheckCircle2, CloudOff, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
+  Ban, Bell, CalendarClock, CalendarDays, CheckCircle2, CloudOff, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
   KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, MessageCircle, Pause, Pencil, Play, Plus, QrCode, ReceiptText, RefreshCw, Repeat, Send,
   Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Undo2, Upload, Wallet, X,
 } from 'lucide-react';
@@ -2298,22 +2298,25 @@ function EmailSetupCard() {
 
 /** Notifications — every event this app can tell somebody about, and who hears it how.
  *
- *  This lives here rather than only in OpenMasjidOS because the platform's alerts matrix can only
- *  reach the admin's OWN address: it cannot email the treasurer, it cannot send anybody a WhatsApp
- *  message, and it is not where a masjid would think to look for "tell Yusuf about refunds". So the
- *  platform keeps owning delivery and this owns the choice.
+ *  These settings live HERE rather than only in OpenMasjidOS because the platform's alerts matrix
+ *  can only reach the admin's OWN address: it cannot email the treasurer, cannot send anybody a
+ *  WhatsApp message, and is not where a masjid would look for "tell Yusuf about refunds". The
+ *  platform keeps owning delivery; this owns the choice.
  *
- *  The wording on the first channel matters and is deliberate. It is an AND with the admin's matrix
- *  in OpenMasjidOS → Settings → Alerts: ticking it here means "we will raise this", never "it will
- *  definitely arrive". An admin who reads it as a guarantee stops looking for the real switch, so the
- *  hint says so and the test button reports `disabled_by_admin` in those words. */
-const NOTIFY_ROWS: { id: NotifyEventId; label: string; hint?: string }[] = [
-  { id: 'donation', label: 'A donation is received' },
-  { id: 'refund', label: 'A donation is refunded' },
-  { id: 'planStopped', label: 'A donor stops their monthly donation' },
-  { id: 'paymentFailed', label: 'Donations stop working', hint: 'A payment couldn’t be started — nobody can give until it’s fixed. At most one message an hour.' },
-  { id: 'tuitionFailed', label: 'A tuition payment isn’t recorded in Students' },
-  { id: 'donationRecovered', label: 'A donation is found and added', hint: 'A card payment that went through but never reached your records. Your totals will go up.' },
+ *  One block per alert, so a row of tick boxes never has to be read against a column header — on a
+ *  phone that is the difference between "I can see what happens when a donation is refunded" and a
+ *  grid nobody trusts. Each block: what the alert is, one line on when it fires, then the channels.
+ *
+ *  The OpenMasjidOS row is worded as **"as you've set it up there"** on purpose. It is an AND with
+ *  the admin's own matrix, which we cannot read — so ticking it means "we will raise this", never
+ *  "this will arrive". An admin who reads it as a guarantee stops looking for the real switch. */
+const NOTIFY_ROWS: { id: NotifyEventId; label: string; hint: string }[] = [
+  { id: 'donation', label: 'A donation was received', hint: 'Somebody gave. Says how much and which appeal — never who.' },
+  { id: 'refund', label: 'A donation was refunded', hint: 'Money went back to a donor, from this app or from your Stripe dashboard.' },
+  { id: 'planStopped', label: 'A monthly donation was stopped', hint: 'A donor used the link in their email to stop their own payments.' },
+  { id: 'paymentFailed', label: 'A payment couldn’t be started', hint: 'Stripe refused to set a payment up — usually keys, or Stripe itself being down. At most one an hour.' },
+  { id: 'tuitionFailed', label: 'A tuition payment wasn’t recorded', hint: 'A card payment succeeded but OpenMasjid Students rejected it. The money is safe; please check.' },
+  { id: 'donationRecovered', label: 'A donation was found and added', hint: 'A payment that went through but never reached your records. Your totals will go up.' },
 ];
 
 function NotificationsCard() {
@@ -2322,7 +2325,7 @@ function NotificationsCard() {
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
   const [testing, setTesting] = useState('');
-  const [testMsg, setTestMsg] = useState<{ key: string; text: string; ok: boolean } | null>(null);
+  const [testMsg, setTestMsg] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   const load = (refresh = false) =>
     getNotifications(refresh).then(setValue).catch(() => setError('Couldn’t load the notification settings.'));
@@ -2332,16 +2335,15 @@ function NotificationsCard() {
   const save = async (patch: Parameters<typeof saveNotifications>[0]) => {
     setSaving(true); setError('');
     try { setValue(await saveNotifications(patch)); }
-    catch (e) { setError(msg(e)); await load(); } // reload so the form shows what was actually stored
+    catch (e) { setError(msg(e)); await load(); } // reload, so the form shows what was actually stored
     finally { setSaving(false); }
   };
-  const setChannel = (id: NotifyEventId, patch: Partial<NotifyChannels>) => save({ events: { [id]: patch } });
+  const set = (id: NotifyEventId, patch: Partial<NotifyChannels>) => save({ events: { [id]: patch } });
 
   const test = async (channel: 'os' | 'email' | 'whatsapp', id: NotifyEventId) => {
-    const key = `${id}:${channel}`;
-    setTesting(key); setTestMsg(null);
-    try { const r = await testNotification(channel, id); setTestMsg({ key, text: r.message, ok: true }); }
-    catch (e) { setTestMsg({ key, text: msg(e), ok: false }); }
+    setTesting(`${id}:${channel}`); setTestMsg(null);
+    try { const r = await testNotification(channel, id); setTestMsg({ id, text: r.message, ok: true }); }
+    catch (e) { setTestMsg({ id, text: msg(e), ok: false }); }
     finally { setTesting(''); }
   };
 
@@ -2355,96 +2357,30 @@ function NotificationsCard() {
     'unknown': 'We couldn’t check WhatsApp just now.',
   };
   const emailWhy =
-    !value.embedded ? 'Emailing a specific person needs OpenMasjidOS — run this app under it and set up an email provider (Settings → Email).'
+    !value.embedded ? 'Sending to a specific address needs OpenMasjidOS — run this app under it, with an email provider set up (Settings → Email).'
     : value.emailStatus === 'not_configured' ? 'No email provider is set up in OpenMasjidOS yet (Settings → Email), so these addresses can’t be reached.'
     : '';
-
-  /** A WhatsApp destination: a typed number, or one of the approved groups.
-   *
-   *  A stored value that LOOKS like a group but is not in the approved list is called out rather
-   *  than shown as a number: approval can be withdrawn in OpenMasjidOS at any time, and a migrated
-   *  or revoked group would otherwise sit here looking configured while every send 403s silently. */
-  const waField = (id: NotifyEventId, cur: string) => {
-    const group = wa.groups.find((g) => g.id === cur);
-    const revoked = !group && /@g\.us$/.test(cur);
-    if (revoked) {
-      return (
-        <div className="row" style={{ gap: '0.4rem', flexWrap: 'wrap' }}>
-          <span className="status-pill status-pill--warn">Group no longer approved</span>
-          <button className="btn btn--ghost btn--sm" type="button" onClick={() => void setChannel(id, { whatsapp: '' })} disabled={saving}>Clear</button>
-        </div>
-      );
-    }
-    return (
-      <div className="row" style={{ gap: '0.4rem', flexWrap: 'wrap' }}>
-        {group ? (
-          <span className="status-pill">{group.label}</span>
-        ) : (
-          <input
-            className="input" inputMode="tel" placeholder="447700900123" defaultValue={cur} disabled={saving || !wa.available}
-            onBlur={(e) => { if (e.target.value.trim() !== cur) void setChannel(id, { whatsapp: e.target.value.trim() }); }}
-          />
-        )}
-        {wa.groups.length > 0 && (
-          <select className="input" value={group ? cur : ''} disabled={saving || !wa.available}
-            onChange={(e) => void setChannel(id, { whatsapp: e.target.value })}>
-            <option value="">a number…</option>
-            {wa.groups.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
-          </select>
-        )}
-        {cur && <button className="btn btn--ghost btn--sm" type="button" onClick={() => void setChannel(id, { whatsapp: '' })} disabled={saving} aria-label="Turn off WhatsApp for this"><X size={14} /></button>}
-      </div>
-    );
-  };
-
-  const testBtn = (channel: 'os' | 'email' | 'whatsapp', id: NotifyEventId, enabled: boolean) => (
-    <button className="btn btn--ghost btn--sm" type="button" onClick={() => void test(channel, id)} disabled={!enabled || testing !== ''}>
-      {testing === `${id}:${channel}` ? <span className="spinner" /> : <Send size={13} />} Test
-    </button>
-  );
 
   return (
     <section className="glass panel">
       <div className="card-head">
-        <MessageCircle size={18} className="panel-ico" aria-hidden="true" />
+        <Bell size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
           <h2 className="section-title-inline">Notifications</h2>
-          <p className="muted">What you want to be told about, and who hears it. Set an email address or a WhatsApp destination per notification — leave one blank and it simply isn’t used.</p>
+          <p className="muted">
+            Who gets told when something happens. Each one can go to OpenMasjidOS (which sends it on by email or
+            webhook, as you’ve set it up there), straight to an email address, and to a WhatsApp number — or any
+            combination.
+          </p>
         </div>
       </div>
 
-      {/* Defaults are a typing convenience ONLY. They are never used as a fallback recipient: an
-          address that silently became the recipient is how a masjid finds out it has been emailing
-          the wrong person for a month. "Use for all" writes them into every row explicitly. */}
-      <h3 className="field-label">Usual recipients</h3>
-      <p className="hint">
-        Fill these in once, then apply them to everything below. Nothing is sent to them until they appear on a
-        notification. <b>One email address each — your own people, never a donor’s.</b> If several people need
-        telling, use an address that forwards to them, or an approved WhatsApp group.
-      </p>
-      <div className="row" style={{ gap: '0.5rem', flexWrap: 'wrap' }}>
-        <input className="input" type="email" placeholder="treasurer@masjid.org" defaultValue={value.defaultEmail} disabled={saving}
-          onBlur={(e) => { if (e.target.value.trim() !== value.defaultEmail) void save({ defaultEmail: e.target.value.trim() }); }} />
-        <input className="input" inputMode="tel" placeholder="447700900123" defaultValue={value.defaultWhatsapp} disabled={saving || !wa.available}
-          onBlur={(e) => { if (e.target.value.trim() !== value.defaultWhatsapp) void save({ defaultWhatsapp: e.target.value.trim() }); }} />
-        <button className="btn btn--ghost" type="button" disabled={saving || (!value.defaultEmail && !value.defaultWhatsapp)}
-          onClick={() => {
-            const events: Parameters<typeof saveNotifications>[0]['events'] = {};
-            for (const r of NOTIFY_ROWS) {
-              events[r.id] = {
-                ...(value.defaultEmail ? { email: value.defaultEmail } : {}),
-                ...(value.defaultWhatsapp && wa.available ? { whatsapp: value.defaultWhatsapp } : {}),
-              };
-            }
-            void save({ events });
-          }}>Use for all</button>
-      </div>
-
-      {emailWhy && <p className="hint" style={{ marginBlockStart: '0.6rem' }}>{emailWhy}</p>}
+      {emailWhy && <p className="hint">{emailWhy}</p>}
       {!wa.available && (
-        <p className="hint" style={{ marginBlockStart: '0.4rem' }}>
+        <p className="hint">
           {waWhy[wa.reason] || 'WhatsApp isn’t available on this server.'}{' '}
-          <button className="btn btn--ghost btn--sm" type="button" onClick={async () => { setChecking(true); await load(true); setChecking(false); }} disabled={checking}>
+          <button className="btn btn--ghost btn--sm" type="button" disabled={checking}
+            onClick={async () => { setChecking(true); await load(true); setChecking(false); }}>
             {checking ? <span className="spinner" /> : <RefreshCw size={13} />} Check again
           </button>
         </p>
@@ -2452,53 +2388,83 @@ function NotificationsCard() {
 
       {NOTIFY_ROWS.map((row) => {
         const c = value.events[row.id];
+        const group = wa.groups.find((g) => g.id === c.whatsapp);
+        // A stored value that looks like a group but is not in the approved list: approval can be
+        // withdrawn in OpenMasjidOS at any time, and it would otherwise sit here looking configured
+        // while every send 403s silently.
+        const revoked = !group && /@g\.us$/.test(c.whatsapp);
         return (
-          <div key={row.id} className="notify-row" style={{ marginBlockStart: '1.1rem' }}>
-            <h3 className="field-label">{row.label}</h3>
-            {row.hint && <p className="hint">{row.hint}</p>}
+          <div className="notify-block" key={row.id}>
+            <h3 className="notify-title">{row.label}</h3>
+            <p className="notify-hint">{row.hint}</p>
 
-            <label className="check-row">
-              <input type="checkbox" checked={c.os} disabled={saving} onChange={(e) => void setChannel(row.id, { os: e.target.checked })} />
-              <span>Your OpenMasjidOS inbox {testBtn('os', row.id, c.os)}</span>
-            </label>
-            <p className="hint">
-              Goes to your own admin email and webhook. OpenMasjidOS has its own switch for each of these
-              under Settings → Alerts, and both have to be on — so if one never arrives, look there too.
-            </p>
-
-            <div className="row" style={{ gap: '0.5rem', flexWrap: 'wrap', marginBlockStart: '0.4rem' }}>
-              <input className="input" type="email" placeholder="someone@masjid.org" defaultValue={c.email} disabled={saving}
-                onBlur={(e) => { if (e.target.value.trim() !== c.email) void setChannel(row.id, { email: e.target.value.trim() }); }} />
-              {testBtn('email', row.id, !!c.email)}
+            <div className="notify-line">
+              <label className="notify-check">
+                <input type="checkbox" checked={c.os} disabled={saving} onChange={(e) => void set(row.id, { os: e.target.checked })} />
+                <span><b>OpenMasjidOS</b> <span className="faint">— email/webhook, as you set it there</span></span>
+              </label>
+              <span className="notify-label">Also email</span>
+              <input
+                className="input notify-input" type="email" placeholder="nobody@example.org" defaultValue={c.email} disabled={saving}
+                onBlur={(e) => { if (e.target.value.trim() !== c.email) void set(row.id, { email: e.target.value.trim() }); }}
+              />
+              <button className="btn btn--ghost btn--sm" type="button" disabled={testing !== '' || (!c.os && !c.email)}
+                onClick={() => void test(c.os ? 'os' : 'email', row.id)}>
+                {testing === `${row.id}:os` || testing === `${row.id}:email` ? <span className="spinner" /> : <Send size={13} />}
+              </button>
             </div>
 
-            <div className="row" style={{ gap: '0.5rem', flexWrap: 'wrap', marginBlockStart: '0.4rem' }}>
-              {waField(row.id, c.whatsapp)}
-              {testBtn('whatsapp', row.id, !!c.whatsapp)}
+            <div className="notify-line">
+              <label className="notify-check">
+                <input type="checkbox" checked={c.whatsappOn} disabled={saving || !wa.available}
+                  onChange={(e) => void set(row.id, { whatsappOn: e.target.checked })} />
+                <span><MessageCircle size={15} aria-hidden="true" /> <b>WhatsApp</b></span>
+              </label>
+              <span className="notify-label">{group ? 'Group' : 'Number'}</span>
+              {group ? (
+                <span className="status-pill notify-input">{group.label}</span>
+              ) : revoked ? (
+                <span className="status-pill status-pill--warn notify-input">Group no longer approved</span>
+              ) : (
+                <input
+                  className="input notify-input" inputMode="tel" placeholder="+44 7700 900123" defaultValue={c.whatsapp}
+                  disabled={saving || !wa.available}
+                  onBlur={(e) => { if (e.target.value.trim() !== c.whatsapp) void set(row.id, { whatsapp: e.target.value.trim() }); }}
+                />
+              )}
+              {wa.groups.length > 0 && (
+                <select className="input notify-select" value={group ? c.whatsapp : ''} disabled={saving || !wa.available}
+                  onChange={(e) => void set(row.id, { whatsapp: e.target.value, whatsappOn: !!e.target.value })}>
+                  <option value="">a number…</option>
+                  {wa.groups.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
+                </select>
+              )}
+              <button className="btn btn--ghost btn--sm" type="button" disabled={testing !== '' || !c.whatsapp}
+                onClick={() => void test('whatsapp', row.id)}>
+                {testing === `${row.id}:whatsapp` ? <span className="spinner" /> : <Send size={13} />}
+              </button>
             </div>
 
             {row.id === 'donation' && (
-              <>
-                <p className="hint" style={{ marginBlockStart: '0.5rem' }}>
-                  Only tell me about donations of at least this much. WhatsApp limits how many messages your
-                  number may send in a day, shared with everything else on your server, so a figure here keeps a
-                  busy Friday of small gifts from using it all up. Leave it at 0 to hear about every donation.
-                </p>
-                <input className="input" type="number" min={0} step="any" defaultValue={value.minAmount} disabled={saving}
+              <div className="notify-line">
+                <span className="notify-label notify-label--wide">Only if it’s at least</span>
+                <input className="input notify-input" type="number" min={0} step="any" defaultValue={value.minAmount} disabled={saving}
                   onBlur={(e) => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 0 && v !== value.minAmount) void save({ minAmount: v }); }} />
-              </>
+                <span className="hint">0 tells you about every donation. A figure here keeps a busy Friday of small gifts from filling your inbox — and from using up the daily WhatsApp allowance your server shares.</span>
+              </div>
             )}
 
-            {testMsg?.key.startsWith(`${row.id}:`) && <p className={testMsg.ok ? 'hint' : 'form-error'}>{testMsg.text}</p>}
+            {testMsg?.id === row.id && <p className={testMsg.ok ? 'hint' : 'form-error'}>{testMsg.text}</p>}
           </div>
         );
       })}
 
       {error && <p className="form-error">{error}</p>}
-      <p className="hint" style={{ marginBlockStart: '0.8rem' }}>
-        Nothing here is anything you should have to wait for. WhatsApp messages are queued and spaced out to
-        keep your number safe, and none of these channels is somewhere a donor is ever written to — donors are
-        never messaged, and this app never asks anyone for a phone number.
+      <p className="hint">
+        Donors are never messaged and this app never asks anyone for a phone number — every address and number here
+        is one of your own people. One address each; if several need telling, use an address that forwards to them or
+        an approved WhatsApp group. WhatsApp messages are queued and spaced out to keep your number safe, so they
+        arrive within minutes rather than instantly.
       </p>
     </section>
   );

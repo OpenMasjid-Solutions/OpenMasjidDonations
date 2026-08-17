@@ -88,8 +88,9 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
   useEffect(() => {
     const html = document.documentElement;
     html.setAttribute('data-theme', readable); // card adapts to the campaign background
-    if (readable === 'light') html.setAttribute('data-scene', 'light'); // on-scene text too
-    else html.removeAttribute('data-scene');
+    // Pinned in both directions, not just "light": the donation page's scene IS the campaign's
+    // background image, so the ink must follow that measurement and never the theme's own scene.
+    html.setAttribute('data-scene', readable === 'light' ? 'light' : 'dark');
   }, [readable]);
 
   // Load the campaign on mount / slug change (needed for both the donation flow and the

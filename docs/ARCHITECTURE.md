@@ -1032,24 +1032,32 @@ strictly dominates the relay: same webhook, plus the admin's email, per event, w
 Keeping both would have posted twice to one webhook for one event, so the relay and its diagnostic
 route were removed.
 
-### The one event whose email is OFF by default
+### The OS channel is on by default for every event, and the volume risk that comes with it
 
-Every other event fires when something breaks or somebody acts — a handful of times a year.
+This was decided explicitly, against a raised objection, so the reasoning is worth keeping.
+
 `donation` fires on every transaction, and the platform **defaults a newly-declared alert id to
-email+webhook ON**, persisting only non-defaults. So shipping `os: true` for it would have started
-emailing every existing admin once per donation the moment they updated: hundreds of emails during a
-Ramadan appeal.
+email+webhook ON**, persisting only non-defaults — so a masjid updating into this gets an email per
+donation without having asked, and during a Ramadan appeal that is hundreds. Alert mail is also
+rate-limited on a bucket shared with the platform's own alerts and with this app's, so a flood of good
+news can push `payment-failed` — *nobody can give at all* — behind it.
 
-It is worse than noise. Alert mail is rate-limited on a bucket shared with the platform's own alerts
-and with this app's, so a flood of good news would push `payment-failed` — *nobody can give at all* —
-behind it. **A notification channel that drowns its own emergencies is not a working channel.** So
-`donation` is a deliberate tick, with the row saying it fires on every donation and offering the
-minimum-amount floor next to it. The migration applies the same default rather than hardcoding `true`,
-because otherwise the flood would land on exactly the boxes already taking real donations.
+The decision was to keep the default consistent (every event on) and rely on **`minAmount`**, which is
+why the donation row carries "only if it's at least…" beside its switches rather than in a sub-menu.
+If a masjid reports being buried, that field — or turning that one row off — is the answer. Changing
+the default is not, without saying so in a release note.
 
-The knowing cost, stated in the release note: a dev-channel masjid currently gets a webhook post per
-donation (the old relay was ungated) and after this gets one only if they tick the box — but the box
-they tick now also reaches their inbox, which is what they were asking for.
+WhatsApp is the opposite and is not a matter of taste: **off for every event**, always. An update must
+never begin sending messages from a masjid's phone number on their behalf.
+
+### The WhatsApp switch is separate from the number
+
+`whatsappOn` is its own boolean rather than "a non-empty number means on". Two reasons: an admin can
+mute the channel for a month without losing what they typed, and a tick box gets to mean what a tick
+box normally means. Both must be true to send, clearing the number also clears the switch (so a tick
+never sits beside an empty field), and a row written before the switch existed reads a stored number
+as **on** — otherwise the upgrade that added the switch would have silently stopped the very messages
+it was meant to make clearer.
 
 ### Two floods that were already there
 

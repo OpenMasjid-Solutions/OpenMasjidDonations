@@ -140,12 +140,28 @@
   --color-btn-hover: #075985;
   --color-on-primary: #FFFFFF;
 
-  /* NOTE: the ambient SCENE (page backdrop) is deliberately NOT lightened in light mode.
-     Light mode only lightens the glass content cards. The backdrop stays the dark gradient
-     (like every preset wallpaper, which is dark in both themes) so the light on-scene ink
-     below is always readable. Lightening the scene here was the "white tint" that made
-     on-scene text (titles, top bar, donations ledger) vanish in light mode. Scene tokens
-     therefore inherit the dark values from :root. */
+  /* THE SCENE IS LIGHT IN LIGHT MODE (ported from OpenMasjidStudents).
+     This used to inherit the dark scene from :root, on the reasoning that every preset wallpaper
+     is dark in both themes so on-scene ink could stay light. That was a workaround, and it cost
+     light mode the thing it is for: white-ish glass at 55% alpha over a near-black backdrop
+     composites to mid-grey, and the theme then wrote #0C4A6E dark-blue ink on top of it — under
+     AA, on every tab at once.
+     The fix is the one Students landed on: give light mode its own light scene, give each
+     wallpaper a light counterpart that KEEPS ITS HUE and inverts the lightness (below), and let
+     the on-scene ink follow the scene instead of being pinned. */
+  --scene-base: #EAF6FF;
+  --scene-gradient: linear-gradient(150deg, #cfeaf7 0%, #e3f2fb 50%, #f4fbff 100%);
+  --scene-gradient-default: linear-gradient(150deg, #cfeaf7 0%, #e3f2fb 50%, #f4fbff 100%);
+  --aurora-cyan: rgba(2, 132, 199, 0.16);
+  --aurora-navy: rgba(186, 230, 253, 0.50);
+  --aurora-gold: rgba(217, 119, 6, 0.08);
+  --aurora-blur: 56px;
+  --scene-vignette: rgba(2, 40, 70, 0.06);
+  /* The veil over a custom background image inverts with the theme: a light theme darkens far
+     less, because its ink on that image is dark. */
+  --scrim: linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(240, 249, 255, 0.55));
+  --pattern-opacity: 0.4;
+  --geometric-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 60 60'%3E%3Cg fill='none' stroke='%230284C7' stroke-width='0.5' opacity='0.1'%3E%3Cpolygon points='30,4 34.5,21 51,15 39,28 56,30 39,32 51,45 34.5,39 30,56 25.5,39 9,45 21,32 4,30 21,28 9,15 25.5,21'/%3E%3Crect x='19' y='19' width='22' height='22' transform='rotate(45 30 30)'/%3E%3Cline x1='0' y1='30' x2='60' y2='30'/%3E%3Cline x1='30' y1='0' x2='30' y2='60'/%3E%3C/g%3E%3C/svg%3E");
 }
 
 :root,
@@ -159,10 +175,15 @@
   --font-display: "Segoe UI", system-ui, ui-sans-serif, var(--font-sans);
 }
 
-/* On-scene ("on the wallpaper") text — INDEPENDENT of the light/dark content theme.
-   All preset wallpapers are dark, so on-scene text defaults to light (readable in BOTH
-   themes; glass-card text still uses the theme's --color-ink). A light custom wallpaper
-   image flips this to dark via data-scene="light" (set from JS luminance). */
+/* On-scene ("on the wallpaper") text. It follows THE SCENE, which is not the same question as
+   the content theme — but since light mode now has a light scene, the two agree by default.
+
+   Order matters here and the three tiers are deliberate:
+     1. dark scene  → light ink   (the default, and every preset wallpaper in dark mode)
+     2. light theme → dark ink    (light mode's own light scene)
+     3. data-scene  → wins over both, because a CUSTOM wallpaper image is whatever the admin
+        uploaded and JS has measured its luminance. It is last so it beats the theme rule at
+        equal specificity. */
 :root,
 [data-theme="dark"],
 [data-theme="light"] {
@@ -171,11 +192,26 @@
   --ink-scene-faint: #8593AD;
   --text-shadow-scene: 0 1px 12px rgba(0, 0, 0, 0.55);
 }
+[data-theme="light"] {
+  --ink-scene: #0C4A6E;
+  --ink-scene-muted: #475569;
+  --ink-scene-faint: #64748B;
+  --text-shadow-scene: 0 1px 10px rgba(255, 255, 255, 0.65);
+}
+/* A measured custom image overrides the theme in BOTH directions. `data-scene="dark"` exists for
+   the case light mode created: a DARK image under a light theme, where the rule above would
+   otherwise write dark ink onto it. */
 [data-scene="light"] {
   --ink-scene: #0C4A6E;
-  --ink-scene-muted: #44515F;
-  --ink-scene-faint: #647281;
+  --ink-scene-muted: #475569;
+  --ink-scene-faint: #64748B;
   --text-shadow-scene: 0 1px 10px rgba(255, 255, 255, 0.65);
+}
+[data-scene="dark"] {
+  --ink-scene: #F4F7FB;
+  --ink-scene-muted: #AEBACD;
+  --ink-scene-faint: #8593AD;
+  --text-shadow-scene: 0 1px 12px rgba(0, 0, 0, 0.55);
 }
 
 /* Wallpapers (applied via data-wallpaper on <html>) — mirror OpenMasjidOS so the
@@ -223,6 +259,65 @@
   --scene-gradient: linear-gradient(150deg, #3a4757 0%, #232c39 50%, #0b0f17 100%);
   --aurora-cyan: rgba(148, 163, 184, 0.20); --aurora-navy: rgba(51, 65, 85, 0.50); --aurora-gold: rgba(203, 213, 225, 0.10);
 }
+
+/* ── Light-theme wallpapers ───────────────────────────────────────────────────
+ * Ported from OpenMasjidStudents, and the reason light mode is readable at all. Every
+ * [data-wallpaper] block above is a dark gradient, and because they come after
+ * [data-theme="light"] at the SAME specificity they overwrote light mode's own light scene —
+ * so light mode painted white-ish glass over a near-black wallpaper and wrote dark ink on the
+ * mid-grey result.
+ *
+ * Each wallpaper therefore gets a light counterpart that KEEPS ITS HUE and inverts the lightness:
+ * ocean is still blue, forest still green, so choosing a wallpaper still means something. These
+ * are TWO-ATTRIBUTE selectors, so they win regardless of where they sit in the file — re-syncing
+ * the token file from a sibling app means re-applying this block.
+ * ─────────────────────────────────────────────────────────────────────────── */
+[data-theme="light"][data-wallpaper="aurora"] {
+  --scene-base: #EAF6FF;
+  --scene-gradient: linear-gradient(150deg, #cfeaf7 0%, #e3f2fb 50%, #f4fbff 100%);
+  --aurora-cyan: rgba(2, 132, 199, 0.16); --aurora-navy: rgba(186, 230, 253, 0.50); --aurora-gold: rgba(217, 119, 6, 0.08);
+}
+[data-theme="light"][data-wallpaper="ocean"] {
+  --scene-base: #E8F2FD;
+  --scene-gradient: linear-gradient(150deg, #c7dcf7 0%, #dceafc 50%, #f0f7ff 100%);
+  --aurora-cyan: rgba(56, 189, 248, 0.22); --aurora-navy: rgba(37, 99, 235, 0.16); --aurora-gold: rgba(45, 212, 191, 0.12);
+}
+[data-theme="light"][data-wallpaper="twilight"] {
+  --scene-base: #F2EDFC;
+  --scene-gradient: linear-gradient(150deg, #ded0f7 0%, #ebe2fb 50%, #f7f3ff 100%);
+  --aurora-cyan: rgba(147, 51, 234, 0.16); --aurora-navy: rgba(124, 58, 237, 0.14); --aurora-gold: rgba(236, 72, 153, 0.10);
+}
+[data-theme="light"][data-wallpaper="berry"] {
+  --scene-base: #FCEDF6;
+  --scene-gradient: linear-gradient(150deg, #f7d3e8 0%, #fae3f1 50%, #fff2f9 100%);
+  --aurora-cyan: rgba(219, 39, 119, 0.16); --aurora-navy: rgba(162, 28, 175, 0.14); --aurora-gold: rgba(251, 113, 133, 0.12);
+}
+[data-theme="light"][data-wallpaper="sunset"] {
+  --scene-base: #FFF1E8;
+  --scene-gradient: linear-gradient(150deg, #fbd9c0 0%, #fde8d8 50%, #fff6ef 100%);
+  --aurora-cyan: rgba(245, 158, 11, 0.20); --aurora-navy: rgba(244, 63, 94, 0.14); --aurora-gold: rgba(251, 146, 60, 0.18);
+}
+[data-theme="light"][data-wallpaper="ember"] {
+  --scene-base: #FFEDE8;
+  --scene-gradient: linear-gradient(150deg, #fbd2c4 0%, #fde3d8 50%, #fff4f0 100%);
+  --aurora-cyan: rgba(234, 88, 12, 0.20); --aurora-navy: rgba(220, 38, 38, 0.14); --aurora-gold: rgba(250, 204, 21, 0.16);
+}
+[data-theme="light"][data-wallpaper="forest"] {
+  --scene-base: #E9F7EE;
+  --scene-gradient: linear-gradient(150deg, #c8ecd5 0%, #ddf3e5 50%, #f1fbf5 100%);
+  --aurora-cyan: rgba(22, 163, 74, 0.18); --aurora-navy: rgba(21, 128, 61, 0.14); --aurora-gold: rgba(132, 204, 22, 0.14);
+}
+[data-theme="light"][data-wallpaper="night"] {
+  --scene-base: #EBF0FC;
+  --scene-gradient: linear-gradient(150deg, #cdd9f7 0%, #e0e8fb 50%, #f2f6ff 100%);
+  --aurora-cyan: rgba(59, 130, 246, 0.18); --aurora-navy: rgba(30, 58, 138, 0.14); --aurora-gold: rgba(99, 102, 241, 0.10);
+}
+[data-theme="light"][data-wallpaper="graphite"] {
+  --scene-base: #F1F3F6;
+  --scene-gradient: linear-gradient(150deg, #d8dee7 0%, #e6eaf0 50%, #f5f7fa 100%);
+  --aurora-cyan: rgba(100, 116, 139, 0.14); --aurora-navy: rgba(51, 65, 85, 0.12); --aurora-gold: rgba(148, 163, 184, 0.10);
+}
+
 
 *,
 *::before,

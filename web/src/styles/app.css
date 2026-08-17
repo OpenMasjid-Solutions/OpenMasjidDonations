@@ -654,3 +654,34 @@ select.input { appearance: auto; }
 /* Stopping a plan can't be undone: colour the words rather than invent a new button shape. */
 .btn--danger { background: transparent; color: var(--color-danger); box-shadow: inset 0 0 0 1px var(--color-danger); }
 .btn--danger:hover { background: var(--color-surface-hover); }
+
+/* ── Notification settings: one inset block per alert ─────────────────────────
+   A block per alert rather than a grid with column headers: on a phone, a row of tick
+   boxes read against a header three rows up is the difference between "I can see what
+   happens when a donation is refunded" and a table nobody trusts. Each line wraps as a
+   unit, so the label and its field never separate. */
+.notify-block {
+  background: var(--glass-bg-inset);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 0.85rem 0.95rem;
+  margin-block-start: 0.75rem;
+}
+.notify-title { font-size: 0.98rem; font-weight: 650; color: var(--color-ink); margin: 0; }
+.notify-hint { font-size: 0.82rem; color: var(--color-ink-muted); margin: 0.15rem 0 0.6rem; }
+.notify-line {
+  display: flex; align-items: center; gap: 0.5rem 0.65rem;
+  flex-wrap: wrap; margin-block-start: 0.45rem;
+}
+.notify-check { display: flex; align-items: center; gap: 0.45rem; cursor: pointer; white-space: nowrap; }
+.notify-check span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.notify-check input { flex: none; }
+.notify-label { font-size: 0.82rem; color: var(--color-ink-muted); white-space: nowrap; margin-inline-start: auto; }
+.notify-label--wide { margin-inline-start: 0; }
+/* The field takes the remaining width but never collapses below something typable. */
+.notify-input { flex: 1 1 14rem; min-width: 11rem; }
+.notify-select { flex: 0 1 10rem; min-width: 8rem; }
+@media (max-width: 640px) {
+  .notify-label { margin-inline-start: 0; }
+  .notify-input, .notify-select { flex-basis: 100%; }
+}

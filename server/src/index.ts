@@ -501,7 +501,7 @@ async function main(): Promise<void> {
 
       // 3. WhatsApp, if they opted this event in. Checked against the platform first rather than
       //    assumed: the phone may have been unlinked, and queueing into that achieves nothing.
-      if (cfg.whatsapp && ssoConfigured() && (await whatsappStatus()).available) {
+      if (cfg.whatsappOn && cfg.whatsapp && ssoConfigured() && (await whatsappStatus()).available) {
         const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };
         // Title and body together: a WhatsApp message has no subject line to carry the first half.
         const r = await sendWhatsApp(target, `${title}\n${text}`);
@@ -961,6 +961,7 @@ async function main(): Promise<void> {
     os: z.boolean().optional(),
     email: z.string().max(200).optional(),
     whatsapp: z.string().max(64).optional(),
+    whatsappOn: z.boolean().optional(),
   });
   const NotifyBody = z.object({
     defaultEmail: z.string().max(200).optional(),
@@ -1036,7 +1037,11 @@ async function main(): Promise<void> {
           const r = await cleanWhatsApp(c.whatsapp, `the WhatsApp destination for “${id}”`);
           if ('error' in r) return reply.code(400).send({ error: r.error });
           out.whatsapp = r.value;
+          // Clearing the number turns the channel off too, so the panel can never show a tick
+          // beside an empty field and imply something is being sent.
+          if (!r.value) out.whatsappOn = false;
         }
+        if (c.whatsappOn !== undefined) out.whatsappOn = c.whatsappOn;
         events[id as NotifyEventId] = out;
       }
       patch.events = events;
@@ -1056,7 +1061,7 @@ async function main(): Promise<void> {
       // community the last two digits of a phone number still name somebody.
       const on = NOTIFY_EVENTS.filter((e) => saved.events[e].os).length;
       const byEmail = NOTIFY_EVENTS.filter((e) => saved.events[e].email).length;
-      const byWhatsApp = NOTIFY_EVENTS.filter((e) => saved.events[e].whatsapp).length;
+      const byWhatsApp = NOTIFY_EVENTS.filter((e) => saved.events[e].whatsappOn && saved.events[e].whatsapp).length;
       audit(
         req,
         'notifications.settings',
@@ -1110,6 +1115,8 @@ async function main(): Promise<void> {
     }
 
     if (!cfg.whatsapp) return reply.code(400).send({ error: 'Add a WhatsApp number or group for this notification first.' });
+    // A test sends regardless of the switch — the admin pressed the button, and "it works but is
+    // currently off" is a useful thing to be able to find out.
     const st = await whatsappStatus(true); // forced: they may have just linked the phone
     if (!st.available) return reply.code(400).send({ error: whatsappUnavailableMessage(st.reason) });
     const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };

@@ -350,8 +350,12 @@ export interface NotifyChannels {
   os: boolean;
   /** A specific address, via the platform's email provider. '' = off. */
   email: string;
-  /** Digits with a country code, or an approved group id. '' = off. Off by default. */
+  /** Digits with a country code, or an approved group id. */
   whatsapp: string;
+  /** A separate switch, not "non-empty means on" — so turning the channel off for a month doesn't
+   *  lose the number, and the tick box means what a tick box normally means. Both must be true to
+   *  send. Off by default for every event. */
+  whatsappOn: boolean;
 }
 
 export interface NotifySettings {
