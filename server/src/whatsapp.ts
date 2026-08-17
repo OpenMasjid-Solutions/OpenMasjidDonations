@@ -69,6 +69,13 @@ export interface WhatsAppGroup {
 export function toWhatsAppDigits(raw: string): string | null {
   const digits = String(raw ?? '').replace(/[^0-9]/g, '');
   if (digits.length < 8 || digits.length > 15) return null; // E.164 allows at most 15
+  // A LEADING ZERO is a national trunk prefix, never a country code — no E.164 country code begins
+  // with 0. We are stricter than the platform here on purpose: its length floor alone accepts
+  // "07700900123" (eleven digits) and would address it as `07700900123@c.us`, which is somebody
+  // else's number or nobody's. This is the check that makes "include the country code" a real
+  // refusal rather than a hopeful error message, and it is the same class of mistake as the floor —
+  // refuse, never repair, because repairing means guessing whose number it is.
+  if (digits.startsWith('0')) return null;
   return digits;
 }
 

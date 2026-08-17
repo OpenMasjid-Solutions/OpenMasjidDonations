@@ -172,55 +172,124 @@ export const EMAIL_RECEIPT_DEFAULT: EmailReceipt = {
   accent: '',
 };
 
-/** Which donation events go out over WhatsApp, and to whom.
+// ── Who gets told what ────────────────────────────────────────────────────────
+/**
+ * Every notification this app can raise. One id per real EVENT, not per channel — the channels are
+ * chosen per event below, so adding a channel later never means renaming these.
  *
- *  An ADMIN channel: `numbers` are the masjid's own people, entered by the admin on our Settings
- *  screen, and `groupId` is a group the platform admin approved for this app. **No donor is ever
- *  messaged** — we never collect a donor's phone number at all. The platform's alerts matrix has no
- *  WhatsApp column for an app precisely so that this choice lives here.
+ * Each maps to a declared alert id in `manifest.yaml` (kebab-case there, camelCase here); the
+ * platform 400s an alert id it was not told about, so the two lists must stay in step.
+ */
+export const NOTIFY_EVENTS = ['donation', 'donationRecovered', 'refund', 'planStopped', 'paymentFailed', 'tuitionFailed'] as const;
+export type NotifyEventId = (typeof NOTIFY_EVENTS)[number];
+
+/**
+ * The declared `alerts:` id in `manifest.yaml` for each event.
  *
- *  Additive, never a replacement: every one of these events already goes out by email/webhook, and
- *  WhatsApp being off (or unavailable, or banned) must change nothing about that. */
-export interface WhatsAppSettings {
-  enabled: boolean;
-  /** Digits only, country code included (see toWhatsAppDigits). Capped — see MAX_WHATSAPP_NUMBERS. */
-  numbers: string[];
-  /** An approved group id, or ''. Its label is cached alongside only so the panel can name it
-   *  without a platform round-trip; the live list is always authoritative. */
-  groupId: string;
-  groupLabel: string;
-  events: {
-    donation: boolean;
-    refund: boolean;
-    planStopped: boolean;
-    paymentFailed: boolean;
-    tuitionFailed: boolean;
-  };
-  /** Don't announce a gift below this, in MINOR units. 0 = announce every one.
+ * Kept here, beside the event list, because the platform **400s an alert id it was not told about**
+ * — so these two lists and the manifest are one contract in three places, and a rename that misses
+ * one turns a notification into a silent failure. `store.test.ts` asserts every event has an id.
+ *
+ * Note `donation` and `donationRecovered` were added to the manifest in v0.43.0. Before that, "a
+ * donation arrived" went out through `notify()`, which reaches the masjid's **webhook only** — so
+ * there was no way for the most-wanted notification of all to reach an inbox. Giving it an alert id
+ * is what makes "email is on by default" true rather than aspirational.
+ */
+export const NOTIFY_ALERT_ID: Record<NotifyEventId, string> = {
+  donation: 'donation-received',
+  donationRecovered: 'donation-recovered',
+  refund: 'donation-refunded',
+  planStopped: 'plan-stopped',
+  paymentFailed: 'payment-failed',
+  tuitionFailed: 'tuition-record-failed',
+};
+
+/**
+ * The three ways one event can reach a person, chosen independently.
+ *
+ * Independent, not a priority list: a masjid may well want the treasurer messaged on WhatsApp AND
+ * the record kept in the admin inbox. A channel that is off or unavailable never suppresses another.
+ */
+export interface NotifyChannels {
+  /**
+   * Raise the OpenMasjidOS **alert** for this event, which reaches the admin's own email and webhook.
    *
-   *  Exists because of the pacing: the platform spaces messages 6–20s apart under hourly and daily
-   *  caps shared with every other app, so a busy Friday of £2 gifts would fill the masjid's whole
-   *  budget and push the messages that matter behind hours of quiet hours. */
-  minAmount: number;
+   * ON by default for every event — this is the channel a masjid already has, and the one that needs
+   * no setup. Note it is an **AND** with the admin's own matrix in OpenMasjidOS → Settings → Alerts:
+   * we ask the platform to deliver, the platform still honours the admin's per-alert channel
+   * choices, and `disabled_by_admin` is a normal answer. Turning this on here therefore means "we
+   * will raise it", never "it will definitely arrive" — and the panel says so, because an admin who
+   * reads it as a guarantee would stop looking for the real switch.
+   */
+  os: boolean;
+  /**
+   * A specific email address, sent through the platform's email provider. '' = off, and off by
+   * default: the OS alert already reaches the admin, so this is for somebody who is NOT them — the
+   * treasurer, the school office — and we cannot guess who that is.
+   */
+  email: string;
+  /**
+   * A specific WhatsApp destination: digits with a country code, or an approved group id. '' = off,
+   * and **off by default for every event**, deliberately. WhatsApp is an unofficial client whose
+   * number can be banned, and the platform paces every message under a shared daily cap — so it is
+   * something a masjid opts into per event, never something an update switches on for them.
+   */
+  whatsapp: string;
 }
 
-/** A partial update. `events` is itself partial, so a form may send one toggle without having to
- *  restate the other four (and so a future event can be added without an old client clearing it). */
-export type WhatsAppPatch = Partial<Omit<WhatsAppSettings, 'events'>> & { events?: Partial<WhatsAppSettings['events']> };
+export interface NotifySettings {
+  /** Prefill for the form only. NEVER consulted when sending: an event with an empty `email` is off,
+   *  full stop. A default that silently became the recipient would be how a masjid discovers they
+   *  have been emailing the wrong person for a month. */
+  defaultEmail: string;
+  defaultWhatsapp: string;
+  /** Don't raise `donation` below this, in MINOR units. 0 = every donation.
+   *
+   *  Matters most for WhatsApp, where the platform spaces messages 6–20s apart under hourly and
+   *  daily caps shared with every other app on the box: a busy Friday of £2 gifts would spend the
+   *  whole allowance on good news and push the refunds and failures behind it. Applied to all three
+   *  channels so the three never disagree about what happened. */
+  minAmount: number;
+  events: Record<NotifyEventId, NotifyChannels>;
+}
 
-/** More than a handful of recipients is a broadcast list, and every extra number multiplies the
- *  queue cost of a single donation. The admin's own people, not a mailing list. */
-export const MAX_WHATSAPP_NUMBERS = 5;
+/** A partial update — `events` and each channel set within it are themselves partial, so a form can
+ *  send one toggle without restating everything (and a new event can be added without an older
+ *  client wiping it). */
+export type NotifyPatch = Partial<Omit<NotifySettings, 'events'>> & {
+  events?: Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+};
 
-export const WHATSAPP_DEFAULT: WhatsAppSettings = {
-  enabled: false,
-  numbers: [],
-  groupId: '',
-  groupLabel: '',
-  // Off by default, every one. A masjid opting into WhatsApp has not thereby asked for a message
-  // per donation — that is the one most likely to exhaust the number's daily budget.
-  events: { donation: false, refund: false, planStopped: false, paymentFailed: false, tuitionFailed: false },
+/** OS alert on, the other two off — "the channel you already have, and nothing switched on for you". */
+const CHANNELS_DEFAULT: NotifyChannels = { os: true, email: '', whatsapp: '' };
+
+/**
+ * `donation` is the ONE event whose OS channel is off by default, and it is worth the exception.
+ *
+ * Every other event here fires when something goes wrong or someone acts — a handful of times a
+ * year. `donation` fires on every transaction. And the platform defaults a newly-declared alert id
+ * to email+webhook ON, persisting only non-defaults, so there is no admin-side state that would
+ * save a masjid from it and no migration we could write: shipping `os: true` here would start
+ * emailing every existing admin once per donation the moment they updated — hundreds of times during
+ * a Ramadan appeal or a fundraising dinner.
+ *
+ * It is worse than noise. The platform's alert mail is rate-limited on a bucket shared with its own
+ * alerts and with this app's, so a flood of good news would push `payment-failed` — the one that
+ * means nobody can give at all — behind it. A notification channel that drowns its own emergencies
+ * is not a working channel.
+ *
+ * So this one is a deliberate tick, with the row in the panel saying plainly that it fires on every
+ * donation and offering the minimum-amount floor next to it.
+ */
+const OS_OFF_BY_DEFAULT: readonly NotifyEventId[] = ['donation'];
+
+export const NOTIFY_DEFAULT: NotifySettings = {
+  defaultEmail: '',
+  defaultWhatsapp: '',
   minAmount: 0,
+  events: Object.fromEntries(
+    NOTIFY_EVENTS.map((e) => [e, { ...CHANNELS_DEFAULT, os: !OS_OFF_BY_DEFAULT.includes(e) }]),
+  ) as Record<NotifyEventId, NotifyChannels>,
 };
 
 export interface Donation {
@@ -740,38 +809,95 @@ export class Store {
     this.setRaw('email_status', status);
   }
 
-  /** WhatsApp admin-notification settings. Never holds a donor's number — see WhatsAppSettings. */
-  getWhatsApp(): WhatsAppSettings {
-    const s = this.getJson<WhatsAppSettings>('whatsapp');
-    const e = (s.events ?? {}) as Partial<WhatsAppSettings['events']>;
+  /**
+   * Who gets told what. Never holds a donor's address or number — every recipient here is somebody
+   * the admin typed in themselves (see NotifySettings).
+   *
+   * Reads from `notify`, and MIGRATES the old `whatsapp` key on first read if `notify` is absent.
+   * That migration matters even though the old shape only ever shipped on 0.43.0-dev.2/3: a masjid
+   * on the development channel configured real recipients, and losing them silently would mean the
+   * refund notification they set up simply stops arriving with nothing to see.
+   */
+  getNotify(): NotifySettings {
+    // `getJson` answers {} for a value that will not parse, so "present" is not enough: a truncated
+    // write would otherwise drop a dev.3 masjid onto all-defaults AND skip the migration, losing the
+    // recipients they configured with nothing to show why.
+    const stored = this.getRaw('notify') ? this.getJson<NotifySettings>('notify') : {};
+    const s: NotifyPatch = Object.keys(stored).length > 0 ? stored : this.migrateWhatsAppSettings();
+    const events = {} as Record<NotifyEventId, NotifyChannels>;
+    const given = (s.events ?? {}) as Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+    for (const id of NOTIFY_EVENTS) {
+      const c = given[id] ?? {};
+      events[id] = {
+        // An event the stored settings say nothing about — a fresh install, or one added by an
+        // update — takes the same default as a new install would, so there is exactly one answer to
+        // "is this on?" and `donation` cannot become a flood by the back door.
+        os: typeof c.os === 'boolean' ? c.os : NOTIFY_DEFAULT.events[id].os,
+        email: typeof c.email === 'string' ? c.email.trim().slice(0, 200) : '',
+        whatsapp: typeof c.whatsapp === 'string' ? c.whatsapp.trim().slice(0, 64) : '',
+      };
+    }
     return {
-      enabled: s.enabled ?? WHATSAPP_DEFAULT.enabled,
-      // Re-clamped on read as well as write: the cap is a safety property, and a row written by an
-      // older build (or restored from a backup) must not be able to exceed it.
-      numbers: (Array.isArray(s.numbers) ? s.numbers : []).filter((n) => typeof n === 'string').slice(0, MAX_WHATSAPP_NUMBERS),
-      groupId: s.groupId ?? '',
-      groupLabel: s.groupLabel ?? '',
-      events: {
-        donation: e.donation ?? false,
-        refund: e.refund ?? false,
-        planStopped: e.planStopped ?? false,
-        paymentFailed: e.paymentFailed ?? false,
-        tuitionFailed: e.tuitionFailed ?? false,
-      },
+      defaultEmail: typeof s.defaultEmail === 'string' ? s.defaultEmail.trim().slice(0, 200) : '',
+      defaultWhatsapp: typeof s.defaultWhatsapp === 'string' ? s.defaultWhatsapp.trim().slice(0, 64) : '',
       minAmount: Math.max(0, Math.round(s.minAmount ?? 0)),
+      events,
     };
   }
 
-  setWhatsApp(patch: WhatsAppPatch): WhatsAppSettings {
-    const cur = this.getWhatsApp();
-    const merged: WhatsAppSettings = {
-      ...cur,
-      ...clean(patch),
-      events: { ...cur.events, ...clean(patch.events ?? {}) },
-    };
-    merged.numbers = merged.numbers.slice(0, MAX_WHATSAPP_NUMBERS);
+  /**
+   * Carry a 0.43.0-dev WhatsApp configuration into the per-event model. Read-only — the result is
+   * persisted by the next `setNotify`, so a masjid that never opens the screen keeps being migrated
+   * consistently on every boot rather than depending on a write having happened.
+   *
+   * The old shape had ONE list of numbers plus an optional group, and per-event booleans. A single
+   * destination per event is the new shape, so we take the first number if there was one and fall
+   * back to the group — and only for events that were actually switched on, and only if the whole
+   * feature was enabled. `os` comes out true throughout, which is the new default and matches what
+   * those masjids were already getting from the alerts matrix.
+   */
+  private migrateWhatsAppSettings(): NotifyPatch {
+    const old = this.getJson<{
+      enabled?: boolean;
+      numbers?: unknown;
+      groupId?: string;
+      events?: Partial<Record<string, boolean>>;
+      minAmount?: number;
+    }>('whatsapp');
+    if (!old || Object.keys(old).length === 0) return {};
+    const numbers = (Array.isArray(old.numbers) ? old.numbers : []).filter((n): n is string => typeof n === 'string' && !!n.trim());
+    const target = old.enabled ? (numbers[0] ?? (old.groupId || '')) : '';
+    const events: Partial<Record<NotifyEventId, Partial<NotifyChannels>>> = {};
+    for (const id of NOTIFY_EVENTS) {
+      // `donationRecovered` is new and had no old toggle; it follows the `donation` choice, which is
+      // the same kind of news about the same money.
+      const wasOn = !!old.events?.[id === 'donationRecovered' ? 'donation' : id];
+      // `os` takes the SAME default a fresh install would, not a hardcoded true. Hardcoding it here
+      // would re-create the very flood the default exists to prevent, and would do it to precisely
+      // the boxes most likely to notice — the ones already configured and taking real donations.
+      //
+      // The knowing cost: a dev-channel masjid currently gets a webhook post per donation (the old
+      // `notify()` relay was ungated), and after this they get one only if they tick the box. That is
+      // a real change and the release note says so — but it is the right way round, because the box
+      // they tick now also reaches their inbox, which is what they were asking for.
+      events[id] = { os: NOTIFY_DEFAULT.events[id].os, email: '', whatsapp: wasOn ? target : '' };
+    }
+    // Deliberately silent. `raise()` reads these settings on EVERY notification, and this runs until
+    // something writes `notify` — so a line here would print once per donation, for ever, on a box
+    // whose admin never opens the screen.
+    return { minAmount: Math.max(0, Math.round(old.minAmount ?? 0)), defaultWhatsapp: target, events };
+  }
+
+  setNotify(patch: NotifyPatch): NotifySettings {
+    const cur = this.getNotify();
+    const events = { ...cur.events };
+    for (const [id, c] of Object.entries(patch.events ?? {})) {
+      if (!(NOTIFY_EVENTS as readonly string[]).includes(id)) continue; // ignore an unknown event id
+      events[id as NotifyEventId] = { ...events[id as NotifyEventId], ...clean(c ?? {}) };
+    }
+    const merged: NotifySettings = { ...cur, ...clean({ ...patch, events: undefined }), events };
     merged.minAmount = Math.max(0, Math.round(merged.minAmount));
-    this.setRaw('whatsapp', JSON.stringify(merged));
+    this.setRaw('notify', JSON.stringify(merged));
     return merged;
   }
 

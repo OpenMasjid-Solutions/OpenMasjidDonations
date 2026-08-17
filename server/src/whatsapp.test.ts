@@ -59,7 +59,13 @@ after(() => { globalThis.fetch = realFetch; });
 test('a number without a country code is REFUSED, never guessed at', () => {
   // The whole point. "07700900123" is a real number in the UK and a different real number
   // elsewhere; prefixing our guess would send a masjid's donation figures to a stranger.
-  for (const bad of ['07700', '5550123', '', '   ', 'abc', '+44']) {
+  //
+  // Note "07700900123" specifically: it is ELEVEN digits, so the length floor alone lets it through
+  // — the platform's own `toDigits` accepts it and would address it as `07700900123@c.us`. A leading
+  // zero is a national trunk prefix and never a country code (no E.164 country code starts with 0),
+  // and catching it here is what makes the "include the country code" error honest rather than
+  // aspirational. Found by probing the live route, not by reading the code.
+  for (const bad of ['07700', '5550123', '', '   ', 'abc', '+44', '07700900123', '00447700900123']) {
     assert.equal(wa.toWhatsAppDigits(bad), null, `"${bad}" must be refused`);
   }
 });

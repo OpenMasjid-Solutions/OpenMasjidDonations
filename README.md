@@ -175,10 +175,12 @@ the app, so it works with no internet.
   you don't say. Everything it answers is a **total** — no donor is ever named, and
   nothing you can send it changes anything.
 - **Notifications and alerts.** A relay for "a donation was received", plus five
-  alerts you can route to email or a webhook: **a payment couldn't be started**, **a
-  tuition payment wasn't recorded**, **a donation was refunded**, **a monthly donation
-  was stopped by the donor**, and a **test**. You choose the channel in OpenMasjidOS;
-  this app never sees the address.
+  alerts you can route to email or a webhook: **a donation was received**, **a donation
+  was found and added**, **a payment couldn't be started**, **a tuition payment wasn't
+  recorded**, **a donation was refunded**, and **a monthly donation was stopped by the
+  donor**. OpenMasjidOS still decides whether each becomes an email, a webhook post or
+  both — and it never tells this app your address. What you choose *here* is which of
+  them to raise at all, and who else hears them.
 - **Public access without port-forwarding**, through the platform's Cloudflare Tunnel
   on a single hostname, or the app's own tunnel when standalone. Share links, QR codes
   and the Stripe webhook URL then use your public domain automatically.

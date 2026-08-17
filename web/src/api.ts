@@ -37,15 +37,6 @@ export interface Session {
   sso: { enabled: boolean; reachable: boolean; username?: string };
 }
 
-export interface NotifyTestResult {
-  baseUrlSet: boolean;
-  hasSecret: boolean;
-  baseUrlLoopback: boolean;
-  appId: string;
-  delivered: boolean;
-  reason?: string;
-}
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(withBase(path), {
     ...init,
@@ -68,9 +59,6 @@ export const login = (password: string) =>
   request<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ password }) });
 
 export const logout = () => request<{ ok: true }>('/api/logout', { method: 'POST' });
-
-export const sendTestNotification = () =>
-  request<NotifyTestResult>('/api/admin/notify-test', { method: 'POST' });
 
 // ── Settings (masjid details + Stripe config + onboarding) ──────────────────
 
@@ -333,17 +321,10 @@ export const getEmailReceipt = () => request<EmailReceipt>('/api/admin/email-rec
 export const saveEmailReceipt = (patch: EmailReceiptPatch) =>
   request<EmailReceipt>('/api/admin/email-receipt', { method: 'PUT', body: JSON.stringify(patch) });
 
-// ── WhatsApp (admin notifications through OpenMasjidOS) ─────────────────────────
-/** Which of the platform's four situations we're in. Each needs a different sentence, and a
- *  different person to go and fix it — so never collapse them into "not working". */
+// ── Notifications (who hears what, on which channel) ────────────────────────────
+/** Which of the platform's four situations WhatsApp is in. Each needs a different sentence and a
+ *  different person to go and fix it, so never collapse them into "not working". */
 export type WhatsAppReason = 'ready' | 'not-configured' | 'not-linked' | 'unreachable' | 'not-allowed' | 'unknown';
-
-export interface WhatsAppStatus {
-  available: boolean;
-  reason: WhatsAppReason;
-  media: boolean;
-  maxMediaBytes: number;
-}
 
 export interface WhatsAppGroup {
   id: string;
@@ -351,33 +332,59 @@ export interface WhatsAppGroup {
   label: string;
 }
 
-export interface WhatsAppSettings {
-  enabled: boolean;
-  /** Digits only, country code included. Never a donor's number — this app doesn't collect one. */
-  numbers: string[];
-  groupId: string;
-  groupLabel: string;
-  events: { donation: boolean; refund: boolean; planStopped: boolean; paymentFailed: boolean; tuitionFailed: boolean };
-  /** MAJOR units across the API, like every other amount. 0 = tell me about every donation. */
-  minAmount: number;
-  status: WhatsAppStatus;
-  maxNumbers: number;
+export interface WhatsAppAvailability {
+  available: boolean;
+  reason: WhatsAppReason;
+  media: boolean;
+  maxMediaBytes: number;
+  /** Only the groups the OpenMasjidOS admin approved for this app. Empty = hide the picker. */
+  groups: WhatsAppGroup[];
 }
 
-export type WhatsAppPatch = Partial<Omit<WhatsAppSettings, 'events' | 'status' | 'maxNumbers'>> & {
-  events?: Partial<WhatsAppSettings['events']>;
+/** Every notification this app can raise. The ids are the app's own; the labels live in the UI. */
+export type NotifyEventId = 'donation' | 'donationRecovered' | 'refund' | 'planStopped' | 'paymentFailed' | 'tuitionFailed';
+
+export interface NotifyChannels {
+  /** Raise the OpenMasjidOS alert → the admin's own email + webhook. On by default. An AND with
+   *  their matrix in OpenMasjidOS → Settings → Alerts, which the UI must say out loud. */
+  os: boolean;
+  /** A specific address, via the platform's email provider. '' = off. */
+  email: string;
+  /** Digits with a country code, or an approved group id. '' = off. Off by default. */
+  whatsapp: string;
+}
+
+export interface NotifySettings {
+  defaultEmail: string;
+  defaultWhatsapp: string;
+  /** MAJOR units across the API. 0 = tell me about every donation. */
+  minAmount: number;
+  events: Record<NotifyEventId, NotifyChannels>;
+  embedded: boolean;
+  /** The last real outcome of a send through the platform's email provider. */
+  emailStatus: string;
+  whatsapp: WhatsAppAvailability;
+}
+
+export type NotifyPatch = {
+  defaultEmail?: string;
+  defaultWhatsapp?: string;
+  minAmount?: number;
+  events?: Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
 };
 
-/** `refresh` re-probes the platform instead of using its 60-second cache — what the admin presses
- *  after linking their phone, when seeing the answer change is the entire point. */
-export const getWhatsApp = (refresh = false) =>
-  request<WhatsAppSettings>(`/api/admin/whatsapp${refresh ? '?refresh=1' : ''}`);
-export const saveWhatsApp = (patch: WhatsAppPatch) =>
-  request<WhatsAppSettings>('/api/admin/whatsapp', { method: 'PUT', body: JSON.stringify(patch) });
-export const getWhatsAppGroups = () => request<{ groups: WhatsAppGroup[] }>('/api/admin/whatsapp/groups');
-/** Queues one real message. Resolves on QUEUED, never on delivered — there is no receipt. */
-export const testWhatsApp = (target: { to?: string; group?: string }) =>
-  request<{ queued: true }>('/api/admin/whatsapp/test', { method: 'POST', body: JSON.stringify(target) });
+/** `refresh` re-probes WhatsApp instead of using the 60-second cache — what the admin presses after
+ *  linking their phone, when seeing the answer change is the entire point. */
+export const getNotifications = (refresh = false) =>
+  request<NotifySettings>(`/api/admin/notifications${refresh ? '?refresh=1' : ''}`);
+export const saveNotifications = (patch: NotifyPatch) =>
+  request<NotifySettings>('/api/admin/notifications', { method: 'PUT', body: JSON.stringify(patch) });
+/** Sends one real notification down one channel. WhatsApp resolves on QUEUED, never delivered. */
+export const testNotification = (channel: 'os' | 'email' | 'whatsapp', event: NotifyEventId) =>
+  request<{ ok: true; message: string }>('/api/admin/notifications/test', {
+    method: 'POST',
+    body: JSON.stringify({ channel, event }),
+  });
 /** Fire the `test` alert — the platform delivers it to the admin's own email/webhook (the app
  *  never learns the admin address). Confirms OpenMasjidOS can reach you. */
 export const sendTestAlert = () =>

@@ -874,10 +874,15 @@ name and email are already optional — and a phone number is the field most lik
 abandon a gift. It would also put us one bug away from messaging a stranger on an unofficial client
 that gets numbers banned for exactly that.
 
-### Additive, never load-bearing
+### Never load-bearing (and, from v0.43.0, not necessarily additive)
 
-Every event that can go out over WhatsApp already goes out by email or webhook through the alerts
-matrix. WhatsApp is a **second copy** on a channel the masjid chose, so:
+Until v0.43.0 this section claimed WhatsApp was always a *second* copy of something that had already
+gone out by email or webhook. Per-event notification settings make that false: `{os: false,
+whatsapp: '…'}` is one click, and an admin who wants refunds on WhatsApp and nowhere else is entitled
+to that. The weaker claim is the one that was doing the real work, and it still holds — **nothing
+depends on a WhatsApp message arriving.** The donation is in the database and in the panel either way,
+no money movement and no donor outcome hangs on a notification, and every event is still reachable
+through the alerts matrix if the admin wants it there. So:
 
 - the send is fire-and-forget and never blocks a donor, a payment or a receipt;
 - a failure is logged at warn and dropped — the alert that did go out is unaffected;
@@ -995,3 +1000,80 @@ Two smaller decisions inside it:
   exchange, so it is the right answer for "I give up" and the wrong one for "try again" — but
   re-asking for ever would leave a confused sender captured until the platform's timeout, with their
   ordinary conversation being read as answers.
+
+## Notification settings live in this app (v0.43.0)
+
+Six events, three channels each, chosen per event: the OpenMasjidOS alert, a specific email address,
+and a WhatsApp destination. One helper — `raise()` in `index.ts` — is the only door any of it leaves
+through, and `NOTIFY_ALERT_ID` beside `NOTIFY_EVENTS` is the only place an event's manifest alert id
+is written down.
+
+### Why the settings are here and not only in OpenMasjidOS
+
+The platform's alerts matrix is good at exactly one thing: reaching **the admin's own** address. It
+cannot email the treasurer, it cannot send anybody a WhatsApp message, we can never read what it is
+set to (it is tRPC-only, behind the admin's session), and it is not where a masjid would look for
+"tell Yusuf about refunds". So the platform keeps owning *delivery* and this app owns the *choice*.
+
+That is also why the first channel is labelled **"your OpenMasjidOS inbox"** and never "email me". It
+is an **AND** with the admin's matrix: ticking it means *we will raise this*, never *this will
+arrive*. Worse, a `delivered: false` comes back with no reason, so not-routed, no-address-configured
+and attempted-but-failed are indistinguishable — `disabled_by_admin` is the one honest signal, and the
+per-row test reports it in those words. An admin who reads the tick as a guarantee stops looking for
+the real switch, which is the failure this wording exists to prevent.
+
+### `notify()` is gone
+
+"A donation arrived" used to go out through `POST /api/fabric/notify`, which reaches the masjid's
+**webhook only**. So the notification every masjid actually wants could never reach an inbox, however
+the alerts matrix was set. Two new declared alert ids — `donation-received` and `donation-recovered` —
+are what make "email is on by default" true rather than aspirational, and the alert channel then
+strictly dominates the relay: same webhook, plus the admin's email, per event, with an admin on/off.
+Keeping both would have posted twice to one webhook for one event, so the relay and its diagnostic
+route were removed.
+
+### The one event whose email is OFF by default
+
+Every other event fires when something breaks or somebody acts — a handful of times a year.
+`donation` fires on every transaction, and the platform **defaults a newly-declared alert id to
+email+webhook ON**, persisting only non-defaults. So shipping `os: true` for it would have started
+emailing every existing admin once per donation the moment they updated: hundreds of emails during a
+Ramadan appeal.
+
+It is worse than noise. Alert mail is rate-limited on a bucket shared with the platform's own alerts
+and with this app's, so a flood of good news would push `payment-failed` — *nobody can give at all* —
+behind it. **A notification channel that drowns its own emergencies is not a working channel.** So
+`donation` is a deliberate tick, with the row saying it fires on every donation and offering the
+minimum-amount floor next to it. The migration applies the same default rather than hardcoding `true`,
+because otherwise the flood would land on exactly the boxes already taking real donations.
+
+The knowing cost, stated in the release note: a dev-channel masjid currently gets a webhook post per
+donation (the old relay was ungated) and after this gets one only if they tick the box — but the box
+they tick now also reaches their inbox, which is what they were asking for.
+
+### Two floods that were already there
+
+`alertAccountRefusal` had a once-per-campaign-per-day guard. The two **intent-failure** sites had
+nothing at all — one notification per failed attempt, from an unauthenticated public endpoint. That
+was survivable at one channel and is not at three, so both are capped at one an hour. The email
+channel also shares this app's mail budget with **donor receipts and refund notices**, and the refund
+notice deliberately has no outbox — so it is what a flood would silently lose. That is the second
+reason the per-donation event is opt-in.
+
+### What the recipients may see
+
+`raise()`'s `title` and `text` are read by somebody **outside** the masjid's admin account, whom the
+platform never vetted. No body names a donor — §13 and §11.3 already required that, and this channel
+makes it load-bearing for a third party. Adding `${donorName}` to a title would be the leak. The
+audit line records counts only, never an address and **not a masked number either**: in a small
+community the last two digits still name somebody.
+
+### Refuse, never repair — including a leading zero
+
+An address must be exactly one address: the platform's own check is a strict single-address regex and
+a comma list comes back `bad_recipient`, which `raise()` swallows, so an admin who types
+`treasurer@x, chair@x` would get total silence. And a number keeps the country-code rule, now with the
+check that makes the error message honest: **a leading zero is a national trunk prefix, never a
+country code.** The length floor alone accepts `07700900123` — eleven digits — and the platform would
+address it as `07700900123@c.us`, somebody else's number or nobody's. Found by probing the live route,
+not by reading the code.

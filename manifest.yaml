@@ -5,7 +5,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.43.0-dev.3
+version: 0.43.0-dev.4
 author: OpenMasjid-Solutions
 license: AGPL-3.0-only
 icon: icon.svg
@@ -40,10 +40,12 @@ description: |
 # The app still works fully standalone (its own admin password) when the Fabric is
 # absent. The compose MUST reference the injected vars in `environment:` (it does).
 sso: true
-# Opt into Fabric notifications so the app can relay alerts — e.g. "A new donation
-# of £50 was received" — to the masjid's configured webhook via POST
-# /api/fabric/notify. The app never sees the webhook URL; it fails soft when
-# notifications aren't enabled.
+# Fabric notifications. RETAINED, though nothing in this app posts to /api/fabric/notify any more
+# (v0.43.0): that relay reached the masjid's WEBHOOK ONLY with no per-event control, and the alert
+# channel below strictly dominates it — the same webhook, plus the admin's email, per declared event,
+# with an on/off the admin owns. Keeping both would have posted twice for one event. The flag stays
+# because it is how the platform knows this app has something to say, and alert delivery uses the
+# masjid's notification-channel configuration.
 notifications: true
 # This app uses Stripe's in-page secure card field (Elements), which requires a
 # browser secure context — so it MUST be served over HTTPS. The platform serves
@@ -90,21 +92,37 @@ email: true
 # THEIR OWN number in OpenMasjidOS; we POST /api/fabric/whatsapp and the platform does the sending.
 # We never see the gateway, its credentials, or which number is linked.
 #
-# In this app WhatsApp is an ADMIN channel: the masjid enters the number(s) — or picks an approved
-# group — on our own Settings screen, and chooses which donation events go out. We never collect a
-# phone number from a donor and never message one.
+# In this app WhatsApp is an ADMIN channel: the masjid enters a number — or picks an approved group —
+# per notification on our own Settings screen. We never collect a phone number from a donor and never
+# message one.
 #
 # Two rules that shape every use of it here. The API returns 202 {queued:true} and NEVER "sent":
 # ban risk attaches to the NUMBER, so the platform paces everything (randomised 6–20s gaps, hourly
-# and daily caps, quiet hours that defer for hours). And nothing auth-critical may ride on it — it
-# is an unofficial client whose number can be restricted at any time, so email and the alert
-# channels stay the fallback and this is only ever additive.
+# and daily caps, quiet hours that defer for hours). And nothing may DEPEND on a message arriving —
+# it is an unofficial client whose number can be restricted at any time. Note the second rule is
+# deliberately weaker than "WhatsApp is always a second copy", which per-event settings made false:
+# an admin may legitimately choose WhatsApp and nothing else for an event. What still holds is that
+# the donation is in the database and the panel either way, and no donor outcome depends on it.
 whatsapp: true
 # Admin alerts (platform v0.41.0+): each declared type gets a granular Email/Webhook on-off in
-# OpenMasjidOS → Settings → Alerts (the admin picks the channel — we never do). We fire one with
-# POST /api/fabric/alert. Fail-soft on `disabled_by_admin`. (No `reader-offline` here — this is a
+# OpenMasjidOS → Settings → Alerts. The admin still owns THOSE channels — we cannot read or change
+# them, and `disabled_by_admin` is a normal answer. What the app additionally owns, since v0.43.0, is
+# WHICH events it raises at all and who else hears them: Settings → Notifications in the app carries a
+# specific email address and a WhatsApp destination per event. The two layers are an AND for this
+# channel. We fire one with POST /api/fabric/alert. (No `reader-offline` here — this is a
 # web/Stripe-Elements app with no card reader; that alert belongs to the Kiosk.)
+#
+# `donation-received` and `donation-recovered` are new in v0.43.0. Before them, "a donation arrived"
+# went out via POST /api/fabric/notify, which reaches the masjid's WEBHOOK ONLY — so the one
+# notification every masjid actually wants could never reach an inbox. They are what makes "email on
+# by default" true rather than aspirational.
 alerts:
+  - id: donation-received
+    label: A donation was received
+    description: Somebody gave. Says how much and which appeal — never who, since an alert can be forwarded and the donor didn't agree to that. Set a smallest amount worth hearing about in the app if a busy Friday is too much.
+  - id: donation-recovered
+    label: A donation was found and added
+    description: A card payment had gone through but never reached your records (the donor's page didn't finish loading), and the app has now found it and added it, dated when the money actually arrived. Your totals will go up.
   - id: payment-failed
     label: A payment couldn't be started
     description: Stripe rejected a payment setup (e.g. bad or expired keys, or Stripe is down) — donors can't give until it's fixed.

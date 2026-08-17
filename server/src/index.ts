@@ -17,10 +17,10 @@ import fastifyMultipart from '@fastify/multipart';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, MAX_WHATSAPP_NUMBERS } from './store';
-import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, WhatsAppSettings, WhatsAppPatch } from './store';
+import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID } from './store';
+import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
-import { notify, probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
+import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
   chooseAppeal,
@@ -115,8 +115,6 @@ import {
 } from './stripe';
 
 const log = makeLog('main');
-
-const LOOPBACK_RE = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[?::1)/i;
 
 /** Deliberately loose "could this be posted to at all" check — one @, a dot after it, no spaces.
  *  Not a validator (nothing short of sending is), just enough to refuse a value we would certainly
@@ -438,63 +436,81 @@ async function main(): Promise<void> {
     return { data: { ok: true } };
   });
 
-  // ── Fabric notifications: diagnose + send a test alert ──────────────────────
-  // Reports what the platform injected (non-secret) so the admin can see exactly why
-  // alerts are/aren't arriving, and fires a real test through the Fabric. Donation
-  // events in later slices relay through the same notify() helper.
-  app.post('/api/admin/notify-test', { preHandler: requireAdmin }, async () => {
-    const base = config.omosBaseUrl;
-    const hasSecret = !!config.omosAppSecret;
-    let result: { delivered: boolean; reason?: string } = { delivered: false, reason: 'no-fabric' };
-    if (base && hasSecret) {
-      result = await notify({
-        title: 'OpenMasjid Donations — test',
-        text: '✅ Test alert from OpenMasjid Donations. If you see this, donation alerts will reach you here.',
-        level: 'info',
-      });
-    }
-    return {
-      data: { baseUrlSet: !!base, hasSecret, baseUrlLoopback: LOOPBACK_RE.test(base), appId: config.omosAppId, ...result },
-    };
-  });
+  // ── Telling the masjid something happened ───────────────────────────────────
+  //
+  // ONE door for every admin-facing notification this app raises. Before v0.43.0 each event site
+  // reached for its own channel — `notify()` here, `fabricAlert()` there, a WhatsApp call beside it
+  // — and the consequence was not just untidiness: "a donation arrived" went through the relay that
+  // reaches the masjid's WEBHOOK ONLY, so the notification every masjid actually wants could never
+  // reach an inbox however the alerts matrix was set.
+  //
+  // Now every event has a declared alert id and three independent channels, each a per-event choice
+  // (see NotifySettings). Independent is the point: a WhatsApp outage never suppresses the email, the
+  // platform refusing an alert never suppresses WhatsApp, and nothing here can throw into the
+  // payment, refund or background job that raised it.
+  type NotifyLevel = 'info' | 'success' | 'warning' | 'error';
 
-  // ── WhatsApp: tell the masjid's own people something happened ────────────────
-  //
-  // ADDITIVE, always. Every event below already reaches the admin by email or webhook through the
-  // alerts matrix, and this is a second copy on a channel they chose. So it is fire-and-forget, it
-  // never blocks a donor, and a failure is logged and dropped — a WhatsApp outage must not be able
-  // to affect a payment, a receipt, or an alert that did go out.
-  //
-  // It is also strictly an ADMIN channel: the numbers are typed in by the admin on our Settings
-  // screen and the group is one the platform admin approved. No donor is ever messaged, and we
-  // never collect a donor's phone number in the first place.
-  //
-  // One call per recipient, because that is the platform's API shape and it is deliberate — an
-  // array would invite exactly the cold blast that gets a number banned. Sequential rather than
-  // parallel: the queue paces them anyway, and firing five at once only races them into it.
-  type WhatsAppEvent = keyof WhatsAppSettings['events'];
-  const whatsappNotify = async (event: WhatsAppEvent, text: string): Promise<void> => {
-    try {
-      const cfg = store.getWhatsApp();
-      if (!cfg.enabled || !cfg.events[event]) return;
-      if (!ssoConfigured()) return;
-      // Ask the platform rather than assuming: the admin may have unlinked the phone, or the
-      // gateway may be down, and queueing into that is pointless. Cached for a minute.
-      if (!(await whatsappStatus()).available) return;
-      const targets: import('./whatsapp').WhatsAppTarget[] = cfg.numbers.map((to) => ({ to }));
-      if (cfg.groupId) targets.push({ group: cfg.groupId });
-      for (const t of targets) {
-        const r = await sendWhatsApp(t, text);
-        // Status only — never the body, which carries a donor's name and how much they gave.
+  /**
+   * "Don't say this again for a while", for the events that can repeat in a burst.
+   *
+   * A Stripe outage fails EVERY donation attempt, and the payment-failure sites had no cap at all —
+   * one notification per attempt, from an unauthenticated public endpoint. That was survivable while
+   * the only channel was the admin's own inbox. It is not once the same event also emails the
+   * treasurer (sharing the rate budget that donor receipts and refund notices use) and queues a
+   * WhatsApp message under a daily cap shared with every other app on the box, where a bad hour
+   * would spend the masjid's whole allowance repeating one sentence.
+   *
+   * In-memory and bounded: a restart may re-notify, which is the right way round for something whose
+   * entire purpose is to be noticed.
+   */
+  const lastRaised = new Map<string, number>();
+  const throttled = (key: string, everyMs: number): boolean => {
+    const now = Date.now();
+    const at = lastRaised.get(key);
+    if (at !== undefined && now - at < everyMs) return true;
+    if (lastRaised.size > 500) lastRaised.clear();
+    lastRaised.set(key, now);
+    return false;
+  };
+  const HOUR = 3600_000;
+
+  const raise = (event: NotifyEventId, title: string, text: string, level: NotifyLevel = 'info'): void => {
+    void (async () => {
+      const cfg = store.getNotify().events[event];
+
+      // 1. The OpenMasjidOS alert → the admin's own email + webhook, per THEIR matrix. An AND with
+      //    that matrix, never an override: we ask the platform to deliver and it still honours the
+      //    admin's per-alert channel choices, so `disabled_by_admin` is a normal answer here.
+      if (cfg.os) await fabricAlert(NOTIFY_ALERT_ID[event], title, text, level).catch(() => {});
+
+      // 2. A specific address the admin typed in — the treasurer, the school office. Sent through
+      //    the platform's provider, so we never see their mail credentials.
+      //
+      //    TWO THINGS TO KEEP IN MIND BEFORE CHANGING `title`/`text` ANYWHERE ABOVE:
+      //    • They are read by somebody OUTSIDE the masjid's admin account, whom the platform never
+      //      vetted and who never consented to anything. That is why no body here names a donor
+      //      (§13, §11.3) — the rule was already ours, and this channel makes it load-bearing for a
+      //      third party. Adding `${donorName}` to a title would be the leak.
+      //    • This shares the app's per-app email rate budget with DONOR receipts and refund notices.
+      //      A receipt has an outbox and survives being throttled; the refund notice deliberately
+      //      does not, so it is what gets lost. That is the other reason the per-donation event is
+      //      opt-in and carries a minimum.
+      if (cfg.email && ssoConfigured()) {
+        await fabricEmail({ to: cfg.email, subject: title, text }).catch(() => {});
+      }
+
+      // 3. WhatsApp, if they opted this event in. Checked against the platform first rather than
+      //    assumed: the phone may have been unlinked, and queueing into that achieves nothing.
+      if (cfg.whatsapp && ssoConfigured() && (await whatsappStatus()).available) {
+        const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };
+        // Title and body together: a WhatsApp message has no subject line to carry the first half.
+        const r = await sendWhatsApp(target, `${title}\n${text}`);
+        // Status only. Never the body, which carries figures, and never the destination.
         if (!r.queued) log.warn(`WhatsApp ${event} not queued`);
       }
-    } catch {
-      /* fail soft — a notification channel must never be able to break the thing it reports on */
-    }
-  };
-  /** Fire-and-forget wrapper for the event sites, so no caller has to remember the `void`/catch. */
-  const notifyWhatsApp = (event: WhatsAppEvent, text: string): void => {
-    void whatsappNotify(event, text).catch(() => {});
+    })().catch(() => {
+      /* fail soft — a notification channel must never break the thing it reports on */
+    });
   };
 
   // ── Currency + view helpers (amounts cross the API in MAJOR units) ──────────
@@ -909,116 +925,197 @@ async function main(): Promise<void> {
     return { data: res };
   });
 
-  // ── WhatsApp settings (admin) ───────────────────────────────────────────────
-  // The panel asks for `status` before rendering anything, so the feature is hidden — not broken —
-  // on a masjid that never set WhatsApp up. `reason` carries the platform's four-word vocabulary so
-  // the UI can say which of the four situations it is; they have completely different fixes.
-  const whatsappView = async (force = false) => ({
-    ...store.getWhatsApp(),
-    status: await whatsappStatus(force),
-    maxNumbers: MAX_WHATSAPP_NUMBERS,
-    /** Minor → major, like every other amount crossing this API. */
-    minAmount: toMajorCur(store.getWhatsApp().minAmount),
-  });
-  app.get('/api/admin/whatsapp', { preHandler: requireAdmin }, async (req) => ({
+  // ── Notification settings (admin) ───────────────────────────────────────────
+  //
+  // Every notification this app raises, and who hears about it on which of three channels. This
+  // lives HERE rather than only in OpenMasjidOS because the platform's alerts matrix routes to the
+  // admin's own address and nothing else: it cannot send the treasurer an email or anybody a
+  // WhatsApp message, and it is not where a masjid would think to look for "tell Yusuf about
+  // refunds". So the platform keeps owning delivery, and this owns the choice.
+  //
+  // The `os` channel is an AND with that matrix, and the UI says so — see NotifyChannels.
+  const notifyView = async (force = false) => {
+    const cfg = store.getNotify();
+    const wa = await whatsappStatus(force);
+    return {
+      ...cfg,
+      /** Minor → major, like every other amount crossing this API. */
+      minAmount: toMajorCur(cfg.minAmount),
+      /** So the form can label each row without hardcoding our internal ids. */
+      events: cfg.events,
+      embedded: ssoConfigured(),
+      /** Whether the email channel can work at all, and whether WhatsApp is even set up. Asked
+       *  before the switches are drawn, so a channel that cannot deliver is explained rather than
+       *  offered. */
+      emailStatus: emailStatus(),
+      whatsapp: { ...wa, groups: wa.available ? await whatsappGroups() : [] },
+    };
+  };
+  app.get('/api/admin/notifications', { preHandler: requireAdmin }, async (req) => ({
     // ?refresh=1 re-probes rather than waiting out the 60s cache — what the admin presses after
     // linking the phone in OpenMasjidOS, when the whole point is to see the answer change.
-    data: await whatsappView((req.query as { refresh?: string }).refresh === '1'),
+    data: await notifyView((req.query as { refresh?: string }).refresh === '1'),
   }));
 
-  const WhatsAppBody = z.object({
-    enabled: z.boolean().optional(),
-    numbers: z.array(z.string().max(32)).max(MAX_WHATSAPP_NUMBERS).optional(),
-    groupId: z.string().max(64).optional(),
-    groupLabel: z.string().max(80).optional(),
-    events: z.object({
-      donation: z.boolean().optional(),
-      refund: z.boolean().optional(),
-      planStopped: z.boolean().optional(),
-      paymentFailed: z.boolean().optional(),
-      tuitionFailed: z.boolean().optional(),
-    }).optional(),
-    minAmount: z.number().nonnegative().optional(), // major units
+  const ChannelsBody = z.object({
+    os: z.boolean().optional(),
+    email: z.string().max(200).optional(),
+    whatsapp: z.string().max(64).optional(),
   });
-  app.put('/api/admin/whatsapp', { preHandler: requireAdmin }, async (req, reply) => {
-    const parsed = WhatsAppBody.safeParse(req.body);
+  const NotifyBody = z.object({
+    defaultEmail: z.string().max(200).optional(),
+    defaultWhatsapp: z.string().max(64).optional(),
+    minAmount: z.number().nonnegative().optional(), // major units
+    events: z.record(z.string().max(40), ChannelsBody).optional(),
+  });
+
+  /** Normalise one recipient, or return the sentence to show the admin.
+   *
+   *  Both directions refuse rather than repair. An address that cannot be posted to, or a number
+   *  without a country code, would otherwise be accepted here and fail silently weeks later at the
+   *  moment it mattered — and for the number, "repairing" it by guessing a country code would send
+   *  the masjid's donation figures to whoever holds it there. */
+  const cleanEmail = (raw: string, where: string): { value: string } | { error: string } => {
+    const v = raw.trim();
+    if (!v) return { value: '' };
+    if (!EMAIL_RE.test(v)) return { error: `“${v.slice(0, 40)}” doesn’t look like an email address (${where}).` };
+    return { value: v };
+  };
+  const cleanWhatsApp = async (raw: string, where: string): Promise<{ value: string } | { error: string }> => {
+    const v = raw.trim();
+    if (!v) return { value: '' };
+    if (looksLikeGroupId(v)) {
+      // Verified against the APPROVED list, not merely shape-checked. The platform would refuse an
+      // unapproved id with a 403 anyway, but that arrives silently at send time — long after the
+      // admin left this screen believing it was set up.
+      const groups = await whatsappGroups();
+      if (!groups.some((g) => g.id === v)) return { error: `That group isn’t approved for this app any more (${where}). Please choose another.` };
+      return { value: v };
+    }
+    const digits = toWhatsAppDigits(v);
+    if (!digits) {
+      return { error: `“${v.slice(0, 24)}” doesn’t look like a full number (${where}). Include the country code — for example 447700900123, not 07700900123.` };
+    }
+    return { value: digits };
+  };
+
+  app.put('/api/admin/notifications', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = NotifyBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
     const p = parsed.data;
-    const patch: WhatsAppPatch = { ...p };
+    const patch: NotifyPatch = {};
 
-    if (p.numbers) {
-      // Normalise here, once, so what is stored is exactly what will be sent — and refuse a number
-      // with no country code rather than guessing one. Guessing would send a masjid's donation
-      // figures to a stranger who happens to hold that number in the platform's default country.
-      const cleaned: string[] = [];
-      for (const raw of p.numbers) {
-        if (!raw.trim()) continue;
-        const digits = toWhatsAppDigits(raw);
-        if (!digits) {
-          return reply.code(400).send({
-            error: `“${raw.trim().slice(0, 24)}” doesn’t look like a full number. Include the country code — for example 447700900123, not 07700900123.`,
-          });
-        }
-        if (!cleaned.includes(digits)) cleaned.push(digits);
-      }
-      patch.numbers = cleaned;
+    if (p.defaultEmail !== undefined) {
+      const r = cleanEmail(p.defaultEmail, 'the default address');
+      if ('error' in r) return reply.code(400).send({ error: r.error });
+      patch.defaultEmail = r.value;
     }
-
-    if (p.groupId !== undefined) {
-      const wanted = p.groupId.trim();
-      if (wanted) {
-        if (!looksLikeGroupId(wanted)) return reply.code(400).send({ error: 'Please choose a group from the list.' });
-        // Verify against the APPROVED list rather than trusting the form. The platform would refuse
-        // an unapproved id with a 403 anyway, but that failure would arrive silently at send time,
-        // long after the admin left the screen believing it was set up.
-        const groups = await whatsappGroups();
-        const match = groups.find((g) => g.id === wanted);
-        if (!match) return reply.code(400).send({ error: 'That group isn’t approved for this app any more. Please choose another.' });
-        patch.groupLabel = match.label;
-      } else {
-        patch.groupLabel = '';
-      }
+    if (p.defaultWhatsapp !== undefined) {
+      const r = await cleanWhatsApp(p.defaultWhatsapp, 'the default WhatsApp destination');
+      if ('error' in r) return reply.code(400).send({ error: r.error });
+      patch.defaultWhatsapp = r.value;
     }
-
     if (p.minAmount !== undefined) patch.minAmount = toMinorCur(p.minAmount);
 
-    const before = store.getWhatsApp();
-    const saved = store.setWhatsApp(patch);
-    // Worth a line in the record: it changes who at the masjid is told about money, and the panel
-    // is shared. Counts and flags only — never a phone number.
-    if (before.enabled !== saved.enabled || before.numbers.length !== saved.numbers.length || before.groupId !== saved.groupId) {
-      audit(req, 'whatsapp.settings', '', `changed WhatsApp notifications (${saved.enabled ? 'on' : 'off'}, ${saved.numbers.length} number(s)${saved.groupId ? ' + a group' : ''})`);
+    if (p.events) {
+      const events: NonNullable<NotifyPatch['events']> = {};
+      for (const [id, c] of Object.entries(p.events)) {
+        // An id we do not know is refused rather than ignored: a form posting `refunds` instead of
+        // `refund` would otherwise report success and change nothing at all.
+        if (!(NOTIFY_EVENTS as readonly string[]).includes(id)) {
+          return reply.code(400).send({ error: 'Please check the details and try again.' });
+        }
+        const out: Partial<import('./store').NotifyChannels> = {};
+        if (c.os !== undefined) out.os = c.os;
+        if (c.email !== undefined) {
+          const r = cleanEmail(c.email, `the address for “${id}”`);
+          if ('error' in r) return reply.code(400).send({ error: r.error });
+          out.email = r.value;
+        }
+        if (c.whatsapp !== undefined) {
+          const r = await cleanWhatsApp(c.whatsapp, `the WhatsApp destination for “${id}”`);
+          if ('error' in r) return reply.code(400).send({ error: r.error });
+          out.whatsapp = r.value;
+        }
+        events[id as NotifyEventId] = out;
+      }
+      patch.events = events;
     }
-    return { data: await whatsappView() };
+
+    const before = store.getNotify();
+    const saved = store.setNotify(patch);
+    // Worth a line in the record — it changes who at the masjid is told about money, and the panel is
+    // shared. WHICH channels changed, never an address or a number.
+    const changed = NOTIFY_EVENTS.some((e) => {
+      const a = before.events[e];
+      const b = saved.events[e];
+      return a.os !== b.os || a.email !== b.email || a.whatsapp !== b.whatsapp;
+    });
+    if (changed) {
+      // Counts only. Never an address and never a number — not even a masked one: in a small
+      // community the last two digits of a phone number still name somebody.
+      const on = NOTIFY_EVENTS.filter((e) => saved.events[e].os).length;
+      const byEmail = NOTIFY_EVENTS.filter((e) => saved.events[e].email).length;
+      const byWhatsApp = NOTIFY_EVENTS.filter((e) => saved.events[e].whatsapp).length;
+      audit(
+        req,
+        'notifications.settings',
+        '',
+        `changed notification settings (${on} of ${NOTIFY_EVENTS.length} to OpenMasjidOS, ${byEmail} by email, ${byWhatsApp} by WhatsApp)`,
+      );
+    }
+    return { data: await notifyView() };
   });
 
-  /** The groups the platform admin approved for this app. Empty = hide the picker, never an error. */
-  app.get('/api/admin/whatsapp/groups', { preHandler: requireAdmin }, async () => ({ data: { groups: await whatsappGroups() } }));
+  /** Send one real notification down one channel, so the admin finds out now rather than when
+   *  something matters. Reports WhatsApp honestly as queued — the platform paces every message and
+   *  quiet hours can hold one for hours, so "sent" would be a lie and an admin watching a silent
+   *  phone would conclude it is broken. */
+  app.post('/api/admin/notifications/test', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = z
+      .object({ channel: z.enum(['os', 'email', 'whatsapp']), event: z.string().max(40).optional() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'Please choose what to test.' });
+    const event = (parsed.data.event ?? 'donation') as NotifyEventId;
+    if (!(NOTIFY_EVENTS as readonly string[]).includes(event)) return reply.code(400).send({ error: 'Unknown notification.' });
+    const cfg = store.getNotify().events[event];
+    const TITLE = 'Test from OpenMasjid Donations';
+    const TEXT = 'If you can read this, your donation notifications will reach you here.';
 
-  /** Send one real message, so the admin finds out now rather than when something matters.
-   *
-   *  Reports honestly that it was QUEUED, not delivered: the platform paces every message and quiet
-   *  hours can hold one for hours, so "sent" would be a lie and an admin waiting on their phone for
-   *  a message that is correctly queued would conclude it is broken. */
-  app.post('/api/admin/whatsapp/test', { preHandler: requireAdmin }, async (req, reply) => {
-    const parsed = z.object({ to: z.string().max(32).optional(), group: z.string().max(64).optional() }).safeParse(req.body ?? {});
-    if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
-    const st = await whatsappStatus(true); // forced: the admin is standing here, and may have just linked the phone
-    if (!st.available) return reply.code(400).send({ error: whatsappUnavailableMessage(st.reason) });
-
-    let target: import('./whatsapp').WhatsAppTarget;
-    if (parsed.data.group) {
-      const groups = await whatsappGroups();
-      if (!groups.some((g) => g.id === parsed.data.group)) return reply.code(400).send({ error: 'That group isn’t approved for this app.' });
-      target = { group: parsed.data.group };
-    } else {
-      const digits = parsed.data.to ? toWhatsAppDigits(parsed.data.to) : store.getWhatsApp().numbers[0];
-      if (!digits) return reply.code(400).send({ error: 'Add a number with its country code first — for example 447700900123.' });
-      target = { to: digits };
+    if (parsed.data.channel === 'os') {
+      const r = await fabricAlert(NOTIFY_ALERT_ID[event], TITLE, TEXT, 'info');
+      if (r.delivered) {
+        return { data: { ok: true, message: `Sent ✓ — check your OpenMasjidOS admin email${r.webhook ? ' and webhook' : ''}.` } };
+      }
+      return reply.code(400).send({
+        error:
+          r.reason === 'disabled_by_admin'
+            ? 'OpenMasjidOS has this one turned off for both email and webhook (Settings → Alerts). Turn it on there and it will arrive.'
+            : r.reason === 'no-fabric'
+              ? 'Run this app under OpenMasjidOS to use this channel.'
+              : 'OpenMasjidOS couldn’t deliver that just now. Please try again in a moment.',
+      });
     }
-    const r = await sendWhatsApp(target, `Test from OpenMasjid Donations — if you can read this, your donation notifications will reach you here.`);
+
+    if (parsed.data.channel === 'email') {
+      if (!cfg.email) return reply.code(400).send({ error: 'Add an email address for this notification first.' });
+      const r = await fabricEmail({ to: cfg.email, subject: TITLE, text: TEXT });
+      if (r.sent) return { data: { ok: true, message: `Sent ✓ to ${cfg.email}.` } };
+      return reply.code(r.reason === 'not_configured' ? 400 : 502).send({
+        error:
+          r.reason === 'not_configured'
+            ? 'No email provider is set up in OpenMasjidOS yet (Settings → Email).'
+            : 'That email couldn’t be sent. Check the address and your OpenMasjidOS email provider.',
+      });
+    }
+
+    if (!cfg.whatsapp) return reply.code(400).send({ error: 'Add a WhatsApp number or group for this notification first.' });
+    const st = await whatsappStatus(true); // forced: they may have just linked the phone
+    if (!st.available) return reply.code(400).send({ error: whatsappUnavailableMessage(st.reason) });
+    const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };
+    const r = await sendWhatsApp(target, `${TITLE}\n${TEXT}`);
     if (!r.queued) return reply.code(r.retry ? 502 : 400).send({ error: r.error });
-    return { data: { queued: true } };
+    return { data: { ok: true, message: 'Queued ✓ — OpenMasjidOS spaces messages out to keep your number safe, so it may take a few minutes to arrive.' } };
   });
 
   // ── Image upload (campaign cover/background) — saved to the data volume ──────
@@ -1534,16 +1631,12 @@ async function main(): Promise<void> {
     // It is sent even though an admin is standing right in front of the screen, on purpose: a
     // masjid's panel is shared, and "money left the account, and who sent it back" is precisely
     // the thing a treasurer should hear about without having to be the one who did it.
-    void fabricAlert(
-      'donation-refunded',
+    raise(
+      'refund',
       full ? 'A donation was refunded' : 'Part of a donation was refunded',
       `${formatMoney(res.amountMinor, currency)} from the donation to “${camp?.title ?? 'your masjid'}” has been refunded to the donor by ${actorOf(req)}` +
         `${body.reason ? ` (${body.reason.replace(/_/g, ' ')})` : ''}. Reference ${donationRef(don.id)}.`,
       'warning',
-    ).catch(() => {});
-    notifyWhatsApp(
-      'refund',
-      `${formatMoney(res.amountMinor, currency)} from the donation to “${camp?.title ?? 'your masjid'}” was refunded by ${actorOf(req)}. Reference ${donationRef(don.id)}.`,
     );
 
     return {
@@ -2260,14 +2353,14 @@ async function main(): Promise<void> {
         : problem === 'not-configured'
           ? 'that account isn’t finished being set up'
           : 'the account it pays into isn’t available';
-    void fabricAlert(
-      'payment-failed',
+    // Once per campaign per day, via the `refusalAlerted` guard above — on every channel at once,
+    // so the three can never disagree about how often this happened.
+    raise(
+      'paymentFailed',
       `Donations are paused on “${c.title}”`,
       `Somebody tried to give to “${c.title}” and couldn’t: ${why}. Open Donations → Campaigns to choose another account. Your other appeals are unaffected.`,
       'error',
-    ).catch(() => {});
-    // The same once-a-day cap applies, since this shares the `refusalAlerted` guard above.
-    notifyWhatsApp('paymentFailed', `Donations are paused on “${c.title}” — ${why}. Your other appeals are unaffected.`);
+    );
   };
 
   const intentHandler = async (
@@ -2398,8 +2491,10 @@ async function main(): Promise<void> {
     } catch (e) {
       log.warn('payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
       // Tell the admin donations are broken (bad/expired keys, Stripe down). Fail soft.
-      void fabricAlert('payment-failed', 'A donation payment failed to start', 'Stripe rejected a payment setup — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error').catch(() => {});
-      notifyWhatsApp('paymentFailed', 'A donation couldn’t be started — donors can’t give until it’s fixed. Check your Stripe details in OpenMasjidOS → Settings → Payments.');
+      // Once an hour: a Stripe outage fails every attempt, and the second identical message
+      // helps nobody while costing a WhatsApp slot the refunds may need.
+      if (!throttled('paymentFailed:donation', HOUR))
+        raise('paymentFailed', 'A donation payment failed to start', 'Stripe rejected a payment setup — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error');
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createDonation({
@@ -2454,13 +2549,11 @@ async function main(): Promise<void> {
       cardLast4: pi.cardLast4,
     });
     if (succeeded && wasPending) {
-      void notify({ title: 'New donation', text: `A donation of ${formatMoney(pi.amount, pi.currency)} to “${c.title}” was received.`, level: 'success' });
-      // …and on WhatsApp, if the masjid asked for it. Gated on `minAmount` because the platform
-      // paces every message and shares an hourly/daily budget with every other app: a Friday of
-      // small gifts would otherwise spend the whole allowance and push the refunds and failures
-      // that actually need attention behind hours of queue. Never carries the donor's name.
-      if (updated && pi.amount >= store.getWhatsApp().minAmount) {
-        notifyWhatsApp('donation', `${formatMoney(pi.amount, pi.currency)} was donated to “${c.title}”.`);
+      // Gated on `minAmount`, and on EVERY channel rather than WhatsApp alone: a masjid that asked
+      // not to hear about £2 gifts meant it, and telling them by email instead would be a strange
+      // reading of that. Never carries the donor's name — all three channels forward easily.
+      if (pi.amount >= store.getNotify().minAmount) {
+        raise('donation', 'A donation was received', `${formatMoney(pi.amount, pi.currency)} was donated to “${c.title}”.`, 'success');
       }
       // Branded receipt — ONLY when we recorded 'pending' at intent (i.e. Stripe's receipt was
       // suppressed in favour of ours), so there's never a double. Non-blocking; a transient
@@ -2639,15 +2732,11 @@ async function main(): Promise<void> {
       // rather than a silent log line. No donor name or address — the masjid can find the plan by
       // its reference in the Monthly tab.
       const camp = store.getCampaign(seed.campaignId);
-      void fabricAlert(
-        'plan-stopped',
+      raise(
+        'planStopped',
         'A monthly donation was stopped',
         `A donor stopped their monthly donation of ${formatMoney(seed.amountMinor, seed.currency)} to “${camp?.title ?? 'your masjid'}” using the link in their email. Nothing more will be taken from their card. Reference ${donationRef(seed.firstDonationId)}.`,
         'info',
-      ).catch(() => {});
-      notifyWhatsApp(
-        'planStopped',
-        `A donor stopped their monthly donation of ${formatMoney(seed.amountMinor, seed.currency)} to “${camp?.title ?? 'your masjid'}”. Reference ${donationRef(seed.firstDonationId)}.`,
       );
     }
 
@@ -2733,10 +2822,9 @@ async function main(): Promise<void> {
       store.setStudentRecordStatus(pi, 'skipped'); // permanent — Students' reconciliation is the backstop
       // The charge succeeded but the ledger rejected it (e.g. the invoice changed). Money is
       // safe (reconciliation picks it up) but the admin should verify. Alert carries no PII.
-      void fabricAlert('tuition-record-failed', 'A tuition payment wasn’t recorded in Students', `A card payment succeeded (${pi}) but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.`, 'warning').catch(() => {});
-      // No Student ID and no child's name — §13 bans both from anything that leaves this app, and a
-      // WhatsApp message is the most forwardable thing there is.
-      notifyWhatsApp('tuitionFailed', `A tuition payment went through but wasn’t recorded in OpenMasjid Students. The money is safe — their daily reconciliation picks it up — but please check.`);
+      // No Student ID and no child's name — §13 bans both from anything that leaves this app, and
+      // all three of these channels forward easily.
+      raise('tuitionFailed', 'A tuition payment wasn’t recorded in Students', `A card payment succeeded (${pi}) but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.`, 'warning');
     }
     // 'unavailable' → leave pending; the outbox retries.
   };
@@ -2968,7 +3056,8 @@ async function main(): Promise<void> {
       paymentIntentId = intent.id;
     } catch (e) {
       log.warn('tuition payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
-      void fabricAlert('payment-failed', 'A tuition payment failed to start', 'Stripe rejected a payment setup — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error').catch(() => {});
+      if (!throttled('paymentFailed:tuition', HOUR))
+        raise('paymentFailed', 'A tuition payment failed to start', 'Stripe rejected a payment setup — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error');
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createStudentPayment({
@@ -3074,12 +3163,12 @@ async function main(): Promise<void> {
           const camp = store.getCampaign(after.campaignId);
           const full = refundState(after.amount, after.refundedAmount) === 'full';
           log.info(`recorded a refund made outside this app (${piId})`);
-          void fabricAlert(
-            'donation-refunded',
+          raise(
+            'refund',
             full ? 'A donation was refunded' : 'Part of a donation was refunded',
             `${formatMoney(after.refundedAmount - before.refundedAmount, ccy)} from the donation to “${camp?.title ?? 'your masjid'}” has been refunded in Stripe, so it has come off your donation totals. Reference ${donationRef(after.id)}.`,
             'warning',
-          ).catch(() => {});
+          );
         }
       } else if (event.type === 'invoice.paid' || event.type === 'invoice.payment_succeeded') {
         const inv = event.data.object as { billing_reason?: string; subscription?: string; payment_intent?: string; amount_paid?: number; currency?: string };
@@ -3105,7 +3194,11 @@ async function main(): Promise<void> {
               subscriptionId: inv.subscription,
             });
             const camp = store.getCampaign(original.campaignId);
-            void notify({ title: 'Recurring donation', text: `A monthly donation of ${formatMoney(amt, ccy)} to “${camp?.title ?? 'your masjid'}” was received.`, level: 'success' });
+            // The same event as any other donation, so the same channels and the same minimum — a
+            // masjid that asked not to hear about small gifts did not mean "except monthly ones".
+            if (amt >= store.getNotify().minAmount) {
+              raise('donation', 'A monthly donation was received', `${formatMoney(amt, ccy)} was donated to “${camp?.title ?? 'your masjid'}”.`, 'success');
+            }
           }
         }
       }
@@ -3466,11 +3559,15 @@ async function main(): Promise<void> {
         });
         const camp = store.getCampaign(don.campaignId);
         log.warn(`recovered a donation Stripe took but we never recorded (${don.paymentIntentId})`);
-        void notify({
-          title: 'Donation recovered',
-          text: `A donation of ${formatMoney(pi.amount, pi.currency)} to “${camp?.title ?? 'your masjid'}” had been paid but not recorded — it is now in your donations.`,
-          level: 'success',
-        }).catch(() => {});
+        // Deliberately NOT gated on `minAmount`: this is not "a donation arrived", it is "your
+        // records were wrong and are now right", and a masjid reconciling accounts needs to know
+        // that however small the amount.
+        raise(
+          'donationRecovered',
+          'A donation was found and added',
+          `A donation of ${formatMoney(pi.amount, pi.currency)} to “${camp?.title ?? 'your masjid'}” had been paid but never recorded — it is now in your donations, dated when the money arrived.`,
+          'success',
+        );
         if (don.receipt === 'pending') {
           void sendDonationReceipt(updated ?? don)
             .then((r) => {

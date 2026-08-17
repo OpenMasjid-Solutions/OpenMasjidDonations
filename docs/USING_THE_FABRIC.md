@@ -26,18 +26,22 @@ stop a donation.
 
 ```yaml
 sso: true            # sign in with the dashboard login
-notifications: true  # relay "a donation was received" to the masjid's webhook
+notifications: true  # retained; the raw relay is no longer used (see §3)
 https: true          # Stripe's Payment Element needs a secure context
 stripe: true         # fetch vaulted Stripe keys from the OS               (v0.16.0)
 domain: true         # learn our public URL + base path                     (v0.17.0)
 email: true          # send a donor a receipt through the OS provider       (v0.29.0)
-alerts:              # five declared ids, each routable to email/webhook    (v0.27.0)
-  - payment-failed | tuition-record-failed | donation-refunded | plan-stopped | test
+whatsapp: true       # message the masjid's own people                      (v0.43.0)
+alerts:              # seven declared ids, each routable to email/webhook   (v0.27.0)
+  - donation-received | donation-recovered | payment-failed
+  - tuition-record-failed | donation-refunded | plan-stopped | test
+commands:            # stats an admin can ask for by WhatsApp               (v0.43.0)
+  - today | month | totals | appeal | monthly
 fabric:
   consumes:
     - students/billing   # tuition, via the app-to-app broker               (v0.26.0)
 # NO `settings:` block — install is one-click, with no dialog. Everything is
-# chosen inside the app.
+# chosen inside the app. `commands` must NEVER go in `fabric.provides` — reserved.
 ```
 
 ## 1. Single sign-on
@@ -62,14 +66,20 @@ presentation input and is sanitised before use (`web/src/prefs.ts`, `Scene` in `
 
 ## 3. Notifications and alerts — two different things
 
-- **`POST /api/fabric/notify`** — the masjid's configured **webhook** only. Used for ordinary news:
-  "a donation of £50 was received".
-- **`POST /api/fabric/alert`** — a **declared** alert id. The admin chooses per alert, in
-  OpenMasjidOS → Settings → Alerts, whether it goes to email, webhook, both or nowhere. This is the
-  **only** way the app can reach the admin's own email address, which it never learns.
+- **`POST /api/fabric/alert`** — a **declared** alert id, reaching the admin's own email and webhook.
+  The admin chooses per alert, in OpenMasjidOS → Settings → Alerts, whether it goes to email, webhook,
+  both or nowhere, and **we can never read that choice** (the matrix is tRPC-only, behind their
+  session). So an alert id must exist in `manifest.yaml` or the platform refuses it;
+  `disabled_by_admin` is a normal answer, not an error; and a `delivered: false` with no reason is
+  genuinely ambiguous — not-routed, no address configured and attempted-but-failed all look alike.
 
-So an alert id must exist in `manifest.yaml` or the platform refuses it, and `disabled_by_admin` is a
-normal answer, not an error.
+  It is the only way to reach **the admin's own** address, which we never learn. It is *not* the only
+  way this app emails a person: since v0.43.0 the masjid can name a specific address per event in our
+  own settings, sent with `/api/fabric/email`. The platform owns delivery; the app owns the choice.
+
+- **`POST /api/fabric/notify`** — the webhook-only relay. **No longer used by this app** (v0.43.0):
+  the alert channel reaches the same webhook *and* the admin's email, per event, with an on/off the
+  admin owns, so keeping both would have posted twice for one event.
 
 ## 4. Stripe keys from the vault
 
@@ -101,11 +111,16 @@ We never see the gateway, its URL, its key, or which number is linked: we POST t
 it does the sending, which is the only way the anti-ban pacing can be enforced across every app at
 once.
 
-**In this app WhatsApp is an admin channel.** The masjid's own numbers (or an approved group) are
-entered on our Settings screen and they choose which donation events go out. We never collect a
-donor's phone number, so there is nothing here that could message one. That choice lives here
-because the platform's alerts matrix deliberately has **no WhatsApp column** for an app — it routes
-to the admin's one number, whereas an app's messages are usually for donors.
+**In this app WhatsApp is an admin channel.** The masjid's own number (or an approved group) is
+entered per notification on our Settings screen. We never collect a donor's phone number, so there is
+nothing here that could message one. That choice lives here because the platform's alerts matrix
+deliberately has **no WhatsApp column** for an app — it routes to the admin's one number, whereas an
+app's messages are usually for donors.
+
+Note what that means for the wording of any switch: an app can *raise* an alert, and the admin's own
+matrix still decides independently whether it becomes an email. "On" in our settings therefore means
+"we will raise this", never "this will arrive" — and the panel says so, because an admin who reads it
+as a guarantee stops looking for the real switch.
 
 ```
 GET  /api/fabric/whatsapp          → { available, reason, media, maxMediaBytes }

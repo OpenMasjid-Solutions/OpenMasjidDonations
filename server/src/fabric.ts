@@ -80,52 +80,14 @@ function warnIfCleartextSecret(): void {
   );
 }
 
-export interface NotifyPayload {
-  text: string;
-  title?: string;
-  level?: 'info' | 'success' | 'warning' | 'error';
-}
-
-/**
- * Relay a message to the masjid's configured webhook via the Fabric (server→server,
- * authenticated with our per-app secret). The platform owns the destination — we
- * never see the webhook URL — and it requires the notifications capability (manifest
- * `notifications: true`). FAILS SOFT: no platform, no secret, the admin hasn't
- * enabled notifications, or any error → returns delivered:false and the app carries
- * on. Never throws. Used to alert the masjid (e.g. "A new donation of £50 arrived").
- */
-export async function notify(payload: NotifyPayload): Promise<{ delivered: boolean; reason?: string }> {
-  if (!config.omosBaseUrl || !config.omosAppSecret) return { delivered: false, reason: 'no-fabric' };
-  if (!payload.text?.trim()) return { delivered: false, reason: 'empty' };
-  warnIfCleartextSecret(); // about to send the per-app secret — flag it if cleartext to a public host
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 5000);
-    const res = await fetch(`${config.omosBaseUrl}/api/fabric/notify`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-openmasjid-app-secret': config.omosAppSecret,
-      },
-      body: JSON.stringify({ text: payload.text, title: payload.title, level: payload.level ?? 'info' }),
-      signal: ctrl.signal,
-      redirect: 'error',
-    });
-    clearTimeout(t);
-    if (!res.ok) {
-      log.warn(`Fabric notify not delivered: platform returned HTTP ${res.status}`);
-      return { delivered: false, reason: `http_${res.status}` };
-    }
-    const j = (await res.json().catch(() => ({}))) as { delivered?: boolean; reason?: string };
-    if (j.delivered !== true) {
-      log.warn(`Fabric notify not delivered (reason: ${j.reason ?? 'unknown'}) — e.g. notifications not enabled in OpenMasjidOS.`);
-    }
-    return { delivered: j.delivered === true, reason: j.reason };
-  } catch (err) {
-    log.warn(`Fabric notify could not reach the platform: ${err instanceof Error ? err.message : String(err)}`);
-    return { delivered: false, reason: 'unreachable' };
-  }
-}
+// The `/api/fabric/notify` relay used to live here. It was retired in v0.43.0: it reached the
+// masjid's WEBHOOK ONLY, with no per-event control, and the alert channel (`fabricAlert` below)
+// strictly dominates it — same webhook, plus the admin's email, per declared event, with an on/off
+// the admin owns. Keeping both would have posted twice to one webhook for a single event.
+//
+// `notifications: true` stays in the manifest deliberately: it is what the platform reads to know
+// this app has something to say, and the alert delivery uses the masjid's notification channel
+// configuration. Nothing in this app calls the raw relay any more.
 
 // ── Fabric email (manifest `email: true`) — send a donor a receipt via the OS ──────
 // The admin sets up ONE provider (SMTP/Resend) in OpenMasjidOS → Settings → Email; we send
