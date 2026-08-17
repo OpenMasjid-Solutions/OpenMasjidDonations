@@ -23,6 +23,21 @@ import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, token
 import { notify, probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
+  chooseAppeal,
+  isPlatformCall,
+  pickAttempt,
+  pickToken,
+  replyAppeal,
+  replyAppealMenu,
+  replyMonth,
+  replyMonthly,
+  replyToday,
+  replyTotals,
+  type CommandReply,
+  type CommandRequest,
+  type Money,
+} from './commands';
+import {
   looksLikeGroupId,
   sendWhatsApp,
   toWhatsAppDigits,
@@ -3099,6 +3114,155 @@ async function main(): Promise<void> {
     }
     return { received: true };
   });
+
+  // ── Admin commands over WhatsApp (POST /fabric/commands/run) ────────────────
+  //
+  // An authorised admin messages the masjid's number (`!donations`); the platform renders the menu,
+  // decides who may run what, and POSTs the chosen command here. Everything we serve is READ-ONLY
+  // and aggregate, and NO DONOR IS EVER NAMED — the reasoning is in commands.ts and manifest.yaml.
+  //
+  // Note the path: `/fabric/*`, not `/api/*`. That is the platform's convention, it is LAN-only and
+  // never served over the tunnel, and it is why this route sits outside every `/api` guard — its own
+  // authentication is the two-header check below, not an admin cookie.
+  {
+    /** The month key ('YYYY-MM') `n` months back from now, in the server's own zone — the same
+     *  boundary the panel's trend chart uses, so the two can never disagree. */
+    const monthKey = (back = 0): string => {
+      const d = new Date();
+      const m = new Date(d.getFullYear(), d.getMonth() - back, 1);
+      return `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, '0')}`;
+    };
+    const monthName = (back = 0): string => {
+      const d = new Date();
+      return new Date(d.getFullYear(), d.getMonth() - back, 1).toLocaleString('en', { month: 'long' });
+    };
+    const dayKey = (): string => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    /** Money for a command reply, in the masjid's own currency. */
+    const money: Money = (minor) => formatMoney(minor, cur());
+
+    /** The appeals a command may name — live ones first, in the admin's own order, so the numbered
+     *  menu matches what they see in the panel. Bounded, because the reply is one WhatsApp message. */
+    const appealChoices = (): { id: string; title: string }[] =>
+      store.listCampaigns().filter((c) => c.type !== 'tuition').slice(0, 12).map((c) => ({ id: c.id, title: c.title }));
+
+    const appealReply = (c: Campaign): CommandReply => ({
+      ok: true,
+      text: replyAppeal(
+        {
+          title: c.title,
+          raisedMinor: store.raisedForCampaign(c.id),
+          count: store.metrics().byCampaign.find((r) => r.campaignId === c.id)?.count ?? 0,
+          goalMinor: c.goalAmount,
+          active: c.active,
+        },
+        money,
+      ),
+    });
+
+    /** Run one command. Pure of HTTP — every branch returns a CommandReply. */
+    const runCommand = (req: CommandRequest): CommandReply | null => {
+      switch (req.command) {
+        case 'today': {
+          const today = store.raisedInPeriod(dayKey());
+          const month = store.raisedInPeriod(monthKey());
+          return { ok: true, text: replyToday({ todayMinor: today.raised, todayCount: today.count, monthMinor: month.raised, monthCount: month.count }, money) };
+        }
+        case 'month': {
+          const now = store.raisedInPeriod(monthKey());
+          const prev = store.raisedInPeriod(monthKey(1));
+          return {
+            ok: true,
+            text: replyMonth({ monthMinor: now.raised, monthCount: now.count, lastMonthMinor: prev.raised, monthLabel: monthName(), lastMonthLabel: monthName(1) }, money),
+          };
+        }
+        case 'totals': {
+          const m = store.metrics();
+          return {
+            ok: true,
+            text: replyTotals(
+              {
+                totalMinor: m.totalRaised,
+                count: m.count,
+                averageMinor: m.count > 0 ? Math.round(m.totalRaised / m.count) : 0,
+                refundedMinor: m.totalRefunded,
+                liveAppeals: store.listCampaigns().filter((c) => c.active).length,
+              },
+              money,
+            ),
+          };
+        }
+        case 'monthly': {
+          const g = store.monthlyGiving(monthKey());
+          return { ok: true, text: replyMonthly({ donors: g.donors, perMonthMinor: g.perMonth, thisMonthMinor: g.thisMonth }, money) };
+        }
+        case 'appeal': {
+          const appeals = appealChoices();
+          if (appeals.length === 0) return { ok: false, error: 'There are no appeals set up yet.' };
+          // One appeal and no argument: answering beats asking a question with one answer.
+          const asked = (req.text ?? '').trim();
+          if (!asked && appeals.length === 1) {
+            const only = store.getCampaign(appeals[0].id);
+            return only ? appealReply(only) : { ok: false, error: 'That appeal has gone.' };
+          }
+          if (!asked) return { ok: true, text: replyAppealMenu(appeals, false), followUp: { token: pickToken(1) } };
+
+          const chosen = chooseAppeal(asked, appeals);
+          if (chosen) {
+            const c = store.getCampaign(chosen.id);
+            return c ? appealReply(c) : { ok: false, error: 'That appeal has gone.' };
+          }
+          // Didn't recognise it. Ask ONCE more (a typo on a phone is ordinary), then give up —
+          // `ok:false` ends the exchange, which is the right way to release somebody who is stuck.
+          const attempt = pickAttempt(req.followUpToken);
+          if (attempt >= 2) return { ok: false, error: `I couldn’t find an appeal called “${asked.slice(0, 40)}”. Try again with !donations appeal.` };
+          return { ok: true, text: replyAppealMenu(appeals, true), followUp: { token: pickToken(attempt + 1) } };
+        }
+        default:
+          return null; // not ours → 404 unknown_command
+      }
+    };
+
+    app.post('/fabric/commands/run', async (req, reply) => {
+      // No cookie, no session: the platform is proving itself with our own per-app secret AND the
+      // caller header. A wrong or absent pair is a flat 403 that says nothing more.
+      if (!isPlatformCall(req.headers as Record<string, unknown>)) {
+        return reply.code(403).send({ ok: false, error: 'Not permitted.' });
+      }
+      const parsed = z
+        .object({
+          command: z.string().min(1).max(64),
+          text: z.string().max(1000).optional(),
+          requestId: z.string().max(128).optional(),
+          locale: z.string().max(16).optional(),
+          followUpToken: z.string().max(128).optional(),
+        })
+        .safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ ok: false, error: 'That request could not be read.' });
+
+      try {
+        const out = runCommand({
+          command: parsed.data.command,
+          text: parsed.data.text ?? '',
+          requestId: parsed.data.requestId ?? '',
+          locale: parsed.data.locale ?? 'en',
+          followUpToken: parsed.data.followUpToken,
+        });
+        // A command we don't declare (or withdrew in an update since the menu was rendered).
+        if (!out) return reply.code(404).send({ ok: false, code: 'unknown_command' });
+        // requestId only — never the reply, which carries the masjid's figures.
+        log.info(`command ${parsed.data.command} answered (${parsed.data.requestId ?? '-'})`);
+        return out;
+      } catch (e) {
+        // Someone is waiting on a phone, so answer rather than letting this become a 500 the
+        // platform reports as "the app is unreachable".
+        log.warn(`command ${parsed.data.command} failed: ${e instanceof Error ? e.message : 'error'}`);
+        return { ok: false, error: 'Something went wrong reading your donation figures. Please try the panel.' };
+      }
+    });
+  }
 
   // ── Static web app (built by Vite into ./public) ────────────────────────────
   const indexPath = path.join(config.publicDir, 'index.html');

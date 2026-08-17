@@ -142,7 +142,50 @@ unapproved one is a 403 at the platform, which would otherwise surface silently 
 Images (`media`) are supported by the contract and **not used here** — an admin notification is a
 sentence. The capability check is still read honestly, so adding one later is a small change.
 
-## 8. The app-to-app broker (tuition)
+## 8. Admin commands (`commands:`, platform v0.51.0+)
+
+An authorised admin messages the masjid's number — `!donations` — and the platform renders the
+numbered menu, decides who may run what, and POSTs the chosen one to **our** web port:
+
+```
+POST /fabric/commands/run
+  X-OpenMasjid-App-Secret: <our OWN OPENMASJID_APP_SECRET>
+  X-OpenMasjid-Caller-App: omos:platform
+  { "command": "appeal", "text": "zakat", "requestId": "…", "locale": "en", "followUpToken": "…" }
+
+→ { "ok": true,  "text": "…" }                       done
+  { "ok": true,  "text": "…", "followUp": { "token": "…" } }   ask one more thing
+  { "ok": false, "error": "…" }                      failed, and we can say why
+  404 { "ok": false, "code": "unknown_command" }
+  503 { "ok": false, "code": "not_ready" }
+```
+
+**Note the path.** `/fabric/*`, not `/api/*` — LAN-only, never served over the tunnel, and outside
+every `/api` guard. There is no cookie: **the two headers are the authentication**, so both are
+checked and the secret is compared in constant time. `omos:platform` is the one caller id no app can
+present, since the colon is outside the charset app ids are validated against — which is also why
+`commands` must never go in `fabric.provides` (the platform refuses it at install: it would let
+another app reach this same handler through the broker).
+
+The five we declare are **stats, and nothing else**: `today`, `month`, `totals`, `appeal`,
+`monthly`. Read-only and aggregate, on purpose — see `docs/ARCHITECTURE.md` → *Admin commands*.
+
+### Holding a conversation
+
+Return `followUp.token` and the platform treats the sender's next message as an answer — no `!`
+prefix — and posts it back with that token. The token is ours; the platform stores it against that
+one sender and keeps no other state. Charset `A-Za-z0-9._:-`, ≤128 characters, validated before it
+is echoed because it lands in a later request body.
+
+**The exchange can end without us** — three minutes idle, fifteen minutes total, twelve turns, the
+sender typing `exit`/`cancel`/`done`, or starting any new `!` command. We are not told; the answers
+simply stop. So never leave anything half-applied waiting on a reply that may not come. Here that is
+free, because every command is read-only.
+
+Any `ok:false` also ends the exchange, so it is the right answer for "I give up" and the wrong one
+for "try again" — the `appeal` picker re-asks once with `ok:true` and only then gives up.
+
+## 9. The app-to-app broker (tuition)
 
 `POST ${OPENMASJID_BASE_URL}/api/fabric/app/students/billing/<method>`, server→server with our
 per-app secret. The `consumes` grant here plus the target's matching `provides` are what let the OS

@@ -5,7 +5,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.43.0-dev.2
+version: 0.43.0-dev.3
 author: OpenMasjid-Solutions
 license: AGPL-3.0-only
 icon: icon.svg
@@ -120,6 +120,40 @@ alerts:
   - id: test
     label: Test message
     description: A test you trigger from the app (Settings → Email receipt → "Send me a test") to confirm OpenMasjidOS is reaching you by email/webhook.
+
+# Admin commands (platform v0.51.0+): an authorised admin messages the masjid's number with
+# `!donations` and the platform renders the menu, decides who may run what, and POSTs the chosen
+# command to POST /fabric/commands/run on our own web port.
+#
+# Every one of these is READ-ONLY and aggregate, and that is the whole design:
+#   * Nothing here changes anything. In a channel this informal the blast radius of a mistake
+#     should be a wrong figure on a screen, never a closed appeal or a refunded donation.
+#   * NO DONOR IS EVER NAMED — no name, no email, no reference. A WhatsApp message is forwardable
+#     and screenshottable and the donor never agreed to be in one, so a command says "£312 from 9
+#     donations", never who gave it. Donor records stay in the panel, behind a login.
+#   * Every figure comes from this app's own database. There is a 10-second timeout and somebody is
+#     holding a phone, so nothing here calls Stripe.
+# `confirm:` is deliberately absent throughout — it exists for things people will see or that
+# cannot be undone, and reading a number back is neither.
+commands:
+  - id: today
+    label: What's come in today
+    description: Today's donations and the month so far.
+  - id: month
+    label: This month so far
+    description: This month's total, next to the whole of last month.
+  - id: totals
+    label: Overall totals
+    description: All-time raised, the number of donations, and the average gift.
+  - id: appeal
+    label: How an appeal is doing
+    description: One appeal's total and how close it is to its goal. Asks which, if you don't say.
+    argument:
+      label: appeal name
+      required: false
+  - id: monthly
+    label: Monthly donors
+    description: How many people give every month, and roughly how much that is.
 
 # NO install settings — install is truly one-click (the platform shows no dialog).
 # Everything is chosen INSIDE the app: on its admin Payments screen it lists the

@@ -933,3 +933,65 @@ The availability probe is cached for a minute so the Settings screen is cheap, b
 never cached** — one dropped packet would otherwise hide the feature from the admin for a full
 minute — and `?refresh=1` forces a re-probe, which is what the admin presses after linking the phone,
 when watching the answer change is the whole point.
+
+## Admin commands: stats only, and why that is the whole design (v0.43.0)
+
+An admin messages the masjid's number with `!donations`; the platform renders the menu, authorises
+the sender, and POSTs the chosen command to `/fabric/commands/run` on our own port. Five are
+declared — `today`, `month`, `totals`, `appeal`, `monthly` — and every one of them only reads.
+
+### Three constraints, and the design falls out of them
+
+**It is an informal channel.** A WhatsApp message is typed on a phone, often one-handed, by whoever
+happens to be holding it. So the blast radius of a mistake should be a wrong figure on a screen, not
+a closed appeal or a refunded donation. `confirm: true` exists in the contract for exactly the
+commands we chose not to have; the safer answer was to have none of them. Nothing here writes.
+
+**A message is forwardable.** It gets screenshotted into a family group, quoted in a committee
+thread, and backed up to somebody's cloud. The donor never agreed to any of that — so a command
+answers *"£312 from 9 donations"* and never who gave it. This is structural rather than a habit: the
+formatters in `commands.ts` are given counts and totals, and there is no parameter anywhere in that
+surface that *could* carry a name, an email or a reference. `commands.test.ts` asserts it, so adding
+one fails a test rather than shipping.
+
+**Ten seconds, and somebody is waiting.** Every figure comes from SQLite. Nothing calls Stripe —
+which is why `monthly` reports what the local recurring rows say (donors who have actually paid,
+what they most recently gave, what arrived this month) rather than syncing plan state. A stat that
+is a few minutes stale is fine; a command that times out is not.
+
+### The two headers are the authentication
+
+`/fabric/commands/run` is outside every `/api` guard and carries no cookie, by the platform's own
+convention. `isPlatformCall` therefore checks **both** headers: the secret against our own, in
+constant time, and the caller against exactly `omos:platform`.
+
+That second check is not belt-and-braces. `omos:platform` is the one caller id **no app can ever
+present**, because the colon is outside the charset app ids are validated against — so it is what
+separates "the platform is asking" from "an app that learned our secret is asking through the
+app-to-app broker", which is a different trust boundary sharing the `/fabric` prefix. The platform
+refuses `commands` in `fabric.provides` for the same reason.
+
+### The one conversation, and the thing that will bite
+
+`appeal` is the only command that asks a follow-up, and it earns it: a treasurer will not remember
+whether the appeal is called "Ramadan Appeal" or "Ramadan 2026". It accepts an argument on the first
+message (`!donations appeal zakat`), answers immediately when there is only one appeal, and otherwise
+posts a numbered list and keeps the exchange open with a token.
+
+**The exchange can end without us** — three minutes idle, fifteen total, twelve turns, `cancel`, or
+any new `!` command — with no notification; the answers simply stop arriving. The token therefore
+carries a step name and an attempt counter and **nothing a later turn needs in order to be correct**.
+Because every command is read-only, there is nothing that could be left half-applied either; that is
+the strong form of the same guarantee, and it is a reason to keep commands read-only even if a
+tempting write one is proposed later.
+
+Two smaller decisions inside it:
+
+- **The appeal list is re-derived on the second turn, not encoded in the token.** 128 characters will
+  not hold a dozen campaign ids, and the failure it guards against — the admin reordering their
+  appeals inside a three-minute window — is both vanishingly rare and *visible*, because **the reply
+  always names the appeal it is reporting on.**
+- **A miss re-asks once with `ok:true`, then gives up with `ok:false`.** Any `ok:false` ends the
+  exchange, so it is the right answer for "I give up" and the wrong one for "try again" — but
+  re-asking for ever would leave a confused sender captured until the platform's timeout, with their
+  ordinary conversation being read as answers.

@@ -169,6 +169,11 @@ the app, so it works with no internet.
   never asks them for a phone number**; messages are queued and spaced out to keep your
   number safe, so they arrive within minutes rather than instantly, and your email and
   webhook alerts carry on exactly as before.
+- **Ask for figures by WhatsApp.** Message your masjid's number with `!donations` and
+  you get a menu: today's total, this month next to last month, overall totals, how a
+  particular appeal is doing, and your monthly donors. It asks which appeal you mean if
+  you don't say. Everything it answers is a **total** — no donor is ever named, and
+  nothing you can send it changes anything.
 - **Notifications and alerts.** A relay for "a donation was received", plus five
   alerts you can route to email or a webhook: **a payment couldn't be started**, **a
   tuition payment wasn't recorded**, **a donation was refunded**, **a monthly donation

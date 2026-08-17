@@ -1512,6 +1512,50 @@ export class Store {
    *  a refunded donation was still a donation that arrived, and quietly deducting it from the
    *  count would make the ledger (which still lists the row) disagree with the headline.
    *  `totalRefunded` is reported separately so the difference is never a mystery. */
+  /** Money and count for one day or month, net of refunds, from the LOCAL ledger.
+   *
+   *  `prefix` is matched against `created_at` — 'YYYY-MM-DD' for a day, 'YYYY-MM' for a month.
+   *  Timestamps are stored as the server's own ISO strings, so this is the same day boundary the
+   *  panel's "this month" figure uses; a masjid and its box are in the same place.
+   *
+   *  Exists for the WhatsApp commands, which have a ten-second budget and someone holding a phone:
+   *  two indexed prefix scans, no Stripe, no full table read. */
+  raisedInPeriod(prefix: string): { raised: number; count: number } {
+    const r = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(amount - refunded_amount), 0) AS s, COUNT(*) AS n
+         FROM donations WHERE status = 'succeeded' AND created_at LIKE ?`,
+      )
+      .get(`${prefix}%`) as { s: number; n: number };
+    return { raised: Number(r.s), count: Number(r.n) };
+  }
+
+  /** Monthly giving, from LOCAL rows only — no Stripe call, so it is safe on a command's clock.
+   *
+   *  "Donors" counts distinct subscriptions that have actually TAKEN money: a recurring row is
+   *  written at /intent, before the card is entered, so counting every one would report every
+   *  abandoned checkout as a monthly donor. `perMonth` sums the most recent payment on each of
+   *  those, which is what they are currently giving; `thisMonth` is what has arrived this month. */
+  monthlyGiving(monthPrefix: string): { donors: number; perMonth: number; thisMonth: number } {
+    const rows = this.db
+      .prepare(
+        `SELECT subscription_id AS sub, amount - refunded_amount AS net, created_at AS at
+         FROM donations
+         WHERE status = 'succeeded' AND recurring = 1 AND subscription_id <> ''
+         ORDER BY created_at ASC`,
+      )
+      .all() as { sub: string; net: number; at: string }[];
+    const latest = new Map<string, number>();
+    let thisMonth = 0;
+    for (const r of rows) {
+      latest.set(String(r.sub), Number(r.net)); // ascending, so the last write wins = most recent
+      if (String(r.at).startsWith(monthPrefix)) thisMonth += Number(r.net);
+    }
+    let perMonth = 0;
+    for (const v of latest.values()) perMonth += v;
+    return { donors: latest.size, perMonth, thisMonth };
+  }
+
   metrics(): {
     totalRaised: number;
     count: number;
