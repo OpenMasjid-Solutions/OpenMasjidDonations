@@ -135,7 +135,7 @@ looks fine and simply never messages anybody. `server/src/whatsapp.test.ts` pins
 | | |
 |---|---|
 | **Groups** | `{ groups: [...] }`, **not** a bare array. Parsing it as an array yields nothing, so the picker is empty and the admin concludes no groups were approved. |
-| **`reason`** | Always a word, never `null` — it is **`"ready"`** when available. It is one of `ready`, `not-configured`, `not-linked`, `unreachable`, and each needs a different sentence because each has a different fix. |
+| **`reason`** | Always a word, never `null` — it is **`"ready"`** when available. One of `ready`, `not-configured`, `not-linked`, `not-allowed` (403: we don't hold the capability), `unreachable` and `unknown` (429: it wouldn't answer). Each needs its own sentence because each has a different fix, and the last two are *no information* rather than a No — a 429 or a 5xx must not be cached as "not allowed", or one throttled probe becomes a minute of a channel looking switched off. |
 | **`media`** | **Absent means no.** An older platform omits the field, and reading absence as yes means base64-ing half a megabyte into a request that was never going to work. |
 
 And two rules the channel itself imposes:
@@ -144,9 +144,13 @@ And two rules the channel itself imposes:
   the *number*, so the platform paces everything: randomised 6–20s gaps, per-recipient cooldowns,
   hourly and daily caps shared with every other app, and quiet hours that defer rather than drop.
   There is no delivery receipt. Nothing may block on it, and the panel says "queued", not "sent".
-- **Nothing auth-critical, ever.** It is an unofficial client and the number can be restricted or
-  banned. Every event we send over it has already gone out by email or webhook; WhatsApp is a second
-  copy, never the only one.
+- **Nothing auth-critical, and nothing that DEPENDS on the message arriving.** It is an unofficial
+  client and the number can be restricted or banned at any moment. Note the precise claim, because
+  it changed in v0.43.0: WhatsApp is **not** necessarily a second copy of something that also went
+  out by email. Per-event notification settings make `{os: false, whatsapp: '…'}` one click and an
+  admin is entitled to choose it. What still holds is that nothing depends on it — the donation is
+  in the database and in the panel either way, no donor outcome and no money movement waits on a
+  notification, and every event stays reachable through the platform's own alerts matrix.
 
 A number is normalised with `toWhatsAppDigits`, which mirrors the platform's own rule: strip to
 digits, require 8–15, and **refuse a number with no country code rather than guessing one** — a

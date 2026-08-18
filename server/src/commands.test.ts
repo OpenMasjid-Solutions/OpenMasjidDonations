@@ -227,3 +227,54 @@ test('PRIVACY: no reply can name a donor, because no reply is given one', () => 
     assert.ok(!/[ --]/.test(t), 'no control characters');
   }
 });
+
+// ── 6. A masjid with more appeals than fit in one message ────────────────────
+//
+// The menu is capped so one WhatsApp message stays readable. The list SEARCHED must not be, or the
+// thirteenth appeal is unreachable by every route at once: not by number (never printed) and not by
+// name either (not in the list being matched). That is a silent, permanent "no" to a fair question.
+
+const MANY = Array.from({ length: 15 }, (_, i) => ({ id: `cmp_${i + 1}`, title: `Appeal ${i + 1}` }));
+const MENU = MANY.slice(0, 12);
+
+test('choose: a name finds an appeal that did not fit in the menu', () => {
+  assert.equal(c.chooseAppeal('Appeal 15', MENU, MANY)?.id, 'cmp_15');
+  assert.equal(c.chooseAppeal('appeal 13', MENU, MANY)?.id, 'cmp_13');
+});
+
+test('choose: a NUMBER only ever means a line of the menu that was shown', () => {
+  // 13 was never printed, so it cannot mean the thirteenth appeal — reading it that way would
+  // report a total for something the sender was never offered.
+  assert.equal(c.chooseAppeal('13', MENU, MANY), null);
+  assert.equal(c.chooseAppeal('12', MENU, MANY)?.id, 'cmp_12');
+});
+
+test('choose: one list still behaves exactly as it did', () => {
+  assert.equal(c.chooseAppeal('2', APPEALS)?.id, 'cmp_2');
+  assert.equal(c.chooseAppeal('zakat', APPEALS)?.id, 'cmp_2');
+});
+
+test('appeal menu: says how many did not fit, so none of them look lost', () => {
+  const t = c.replyAppealMenu(MENU, false, MANY.length - MENU.length);
+  assert.match(t, /12\. Appeal 12/);
+  assert.match(t, /…and 3 more/);
+  assert.ok(!/13\. /.test(t), 'a capped menu must not number past its own end');
+  assert.ok(!/more/.test(c.replyAppealMenu(APPEALS, false, 0)), 'nothing extra when they all fit');
+});
+
+// ── 7. Monthly donors: a plan that stopped is not a current donor ────────────
+
+test('monthly: a dormant plan is explained, not silently missing from the figure', () => {
+  const t = c.replyMonthly({ donors: 4, perMonthMinor: 8000, thisMonthMinor: 8000, dormant: 6 }, money);
+  assert.match(t, /4 monthly donors, giving about £80\.00 a month\./);
+  assert.match(t, /6 other plans/);
+  assert.ok(!/10 monthly donors/.test(t), 'a stopped plan must never be counted as a current donor');
+});
+
+test('monthly: all of them dormant reads as nobody giving NOW, not as nobody ever', () => {
+  const t = c.replyMonthly({ donors: 0, perMonthMinor: 0, thisMonthMinor: 0, dormant: 3 }, money);
+  assert.match(t, /Nobody is giving monthly at the moment/);
+  assert.match(t, /3 plans used to/);
+  // And a genuinely fresh masjid still gets the simple sentence.
+  assert.equal(c.replyMonthly({ donors: 0, perMonthMinor: 0, thisMonthMinor: 0 }, money), 'Nobody has set up a monthly donation yet.');
+});

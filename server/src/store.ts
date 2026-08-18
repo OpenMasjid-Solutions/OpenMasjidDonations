@@ -1658,8 +1658,20 @@ export class Store {
    *  "Donors" counts distinct subscriptions that have actually TAKEN money: a recurring row is
    *  written at /intent, before the card is entered, so counting every one would report every
    *  abandoned checkout as a monthly donor. `perMonth` sums the most recent payment on each of
-   *  those, which is what they are currently giving; `thisMonth` is what has arrived this month. */
-  monthlyGiving(monthPrefix: string): { donors: number; perMonth: number; thisMonth: number } {
+   *  those, which is what they are currently giving; `thisMonth` is what has arrived this month.
+   *
+   *  `activeSince` is what keeps the answer TRUE as the years pass, and it is the reason this is
+   *  not a one-line SUM. Nothing local records that a plan ENDED — a cancellation happens at
+   *  Stripe, and a masjid on a LAN may never see the webhook — so a plan stopped two years ago
+   *  still has its succeeded rows sitting in this table. Counting those, a masjid three years in
+   *  would be told it had fifty monthly donors giving about £2,000 a month when the truth was ten
+   *  and £400: confidently wrong, about money, in the flattering direction.
+   *
+   *  A live monthly plan is charged every month, so "nothing since `activeSince`" is the one local
+   *  signal that a plan is no longer running. Those are returned separately as `dormant` rather
+   *  than dropped, so a caller can explain the smaller figure instead of just presenting it. Pass
+   *  nothing to count every plan ever, which is the old behaviour. */
+  monthlyGiving(monthPrefix: string, activeSince = ''): { donors: number; perMonth: number; thisMonth: number; dormant: number } {
     const rows = this.db
       .prepare(
         `SELECT subscription_id AS sub, amount - refunded_amount AS net, created_at AS at
@@ -1668,15 +1680,26 @@ export class Store {
          ORDER BY created_at ASC`,
       )
       .all() as { sub: string; net: number; at: string }[];
-    const latest = new Map<string, number>();
+    // Ascending, so the last write for a subscription wins = its most recent payment.
+    const latest = new Map<string, { net: number; at: string }>();
     let thisMonth = 0;
     for (const r of rows) {
-      latest.set(String(r.sub), Number(r.net)); // ascending, so the last write wins = most recent
+      latest.set(String(r.sub), { net: Number(r.net), at: String(r.at) });
       if (String(r.at).startsWith(monthPrefix)) thisMonth += Number(r.net);
     }
+    let donors = 0;
     let perMonth = 0;
-    for (const v of latest.values()) perMonth += v;
-    return { donors: latest.size, perMonth, thisMonth };
+    let dormant = 0;
+    for (const v of latest.values()) {
+      // ISO-8601 throughout, so a lexical compare IS a chronological one.
+      if (activeSince && v.at < activeSince) {
+        dormant += 1;
+        continue;
+      }
+      donors += 1;
+      perMonth += v.net;
+    }
+    return { donors, perMonth, thisMonth, dormant };
   }
 
   metrics(): {

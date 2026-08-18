@@ -964,6 +964,22 @@ which is why `monthly` reports what the local recurring rows say (donors who hav
 what they most recently gave, what arrived this month) rather than syncing plan state. A stat that
 is a few minutes stale is fine; a command that times out is not.
 
+That constraint has one sharp consequence, found in the v0.44.0 sweep and worth writing down.
+**Nothing local records that a monthly plan ENDED.** A cancellation happens at Stripe, and a
+LAN-only masjid may never see the webhook — so the succeeded rows of a plan stopped two years ago
+are still sitting in `donations`, indistinguishable by themselves from a live one. Counting every
+subscription that ever took money, a masjid three years in would be told it had *fifty monthly
+donors giving about £2,000 a month* when the truth was ten and £400. Confidently wrong, about money,
+in the flattering direction — which is the worst of the three.
+
+The fix stays inside the constraint: a live monthly plan is charged every month, so **"nothing
+charged in the last two months" is the one local signal that a plan is no longer running.**
+`monthlyGiving` takes that cutoff and returns those separately as `dormant`, and the reply says so
+("*6 other plans haven't been charged in the last two months — stopped, paused, or a card worth
+looking at*"). Reported rather than dropped, because a figure that quietly shrank is unexplainable
+from a phone, and two months rather than one because a plan the day before its renewal is not
+dormant and a retry after a declined card needs room.
+
 ### The two headers are the authentication
 
 `/fabric/commands/run` is outside every `/api` guard and carries no cookie, by the platform's own
@@ -996,6 +1012,14 @@ Two smaller decisions inside it:
   not hold a dozen campaign ids, and the failure it guards against — the admin reordering their
   appeals inside a three-minute window — is both vanishingly rare and *visible*, because **the reply
   always names the appeal it is reporting on.**
+- **The menu is capped at twelve; the list that gets SEARCHED is not.** One WhatsApp message has to
+  stay readable, and capping the printed list is the obvious way to get that. Capping the list being
+  *matched against* was the bug (v0.44.0): a masjid with thirteen appeals could not reach the
+  thirteenth by any route at all — not by number, because it was never printed, and not by name
+  either, because it was not in the list being searched. So a **number** may only ever index a line
+  that was actually shown, a **name** is matched against every appeal the masjid has, and the menu
+  says how many did not fit, since an appeal that is simply missing from a list reads as one the app
+  has lost.
 - **A miss re-asks once with `ok:true`, then gives up with `ok:false`.** Any `ok:false` ends the
   exchange, so it is the right answer for "I give up" and the wrong one for "try again" — but
   re-asking for ever would leave a confused sender captured until the platform's timeout, with their

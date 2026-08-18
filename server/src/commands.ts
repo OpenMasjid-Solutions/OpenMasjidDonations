@@ -106,18 +106,27 @@ export interface AppealChoice {
  * generous — case-insensitive, and a substring counts — since somebody typing on a phone will send
  * "ramadan" rather than "Ramadan Appeal 2026". An ambiguous substring is a miss rather than a guess:
  * reporting the wrong appeal's total confidently is worse than asking again.
+ *
+ * TWO LISTS, and the split is the point. A number can only mean a line of the menu that was
+ * actually shown, so it indexes `menu`. A NAME is searched across `all` — every appeal the masjid
+ * has — because the menu is capped to keep one WhatsApp message readable, and searching only the
+ * capped list meant a masjid with thirteen appeals could never ask about the thirteenth at all:
+ * not by number (it was never listed) and not by name either (it was not in the list being
+ * searched). Every answer names the appeal it reports on, so a name that reaches past the menu is
+ * still unambiguous to whoever reads the reply.
  */
-export function chooseAppeal(reply: string, appeals: AppealChoice[]): AppealChoice | null {
+export function chooseAppeal(reply: string, menu: AppealChoice[], all: AppealChoice[] = menu): AppealChoice | null {
   const t = (reply ?? '').trim().toLowerCase();
-  if (!t || appeals.length === 0) return null;
+  if (!t) return null;
 
   if (/^\d{1,2}$/.test(t)) {
     const i = Number(t) - 1;
-    return i >= 0 && i < appeals.length ? appeals[i] : null;
+    return i >= 0 && i < menu.length ? menu[i] : null;
   }
-  const exact = appeals.filter((a) => a.title.trim().toLowerCase() === t);
+  if (all.length === 0) return null;
+  const exact = all.filter((a) => a.title.trim().toLowerCase() === t);
   if (exact.length === 1) return exact[0];
-  const partial = appeals.filter((a) => a.title.toLowerCase().includes(t));
+  const partial = all.filter((a) => a.title.toLowerCase().includes(t));
   return partial.length === 1 ? partial[0] : null;
 }
 
@@ -213,23 +222,40 @@ export function replyAppeal(s: AppealStats, fmt: Money): string {
   return lines.join('\n');
 }
 
-/** The "which appeal?" question. Numbered, because a number is the easiest thing to type back. */
-export function replyAppealMenu(appeals: AppealChoice[], again: boolean): string {
+/** The "which appeal?" question. Numbered, because a number is the easiest thing to type back.
+ *
+ *  `hidden` is how many appeals did not fit in the menu. It is SAID rather than silently dropped:
+ *  an admin who cannot see the appeal they want would otherwise conclude the app has lost it, when
+ *  typing part of its name works perfectly well. */
+export function replyAppealMenu(appeals: AppealChoice[], again: boolean, hidden = 0): string {
   const list = appeals.map((a, i) => `${i + 1}. ${a.title}`).join('\n');
-  return `${again ? 'Sorry — I didn’t recognise that one. Which appeal?' : 'Which appeal?'}\n${list}\n\nReply with a number, or part of the name.`;
+  const more = hidden > 0 ? `\n…and ${hidden} more — type part of the name for one of those.` : '';
+  return `${again ? 'Sorry — I didn’t recognise that one. Which appeal?' : 'Which appeal?'}\n${list}${more}\n\nReply with a number, or part of the name.`;
 }
 
 export interface MonthlyStats {
   donors: number;
   perMonthMinor: number;
   thisMonthMinor: number;
+  /** Plans that HAVE given but not lately — see `Store.monthlyGiving`. Reported, never hidden. */
+  dormant?: number;
 }
 
 export function replyMonthly(s: MonthlyStats, fmt: Money): string {
-  if (s.donors === 0) return 'Nobody has set up a monthly donation yet.';
-  return [
+  if (s.donors === 0) {
+    return s.dormant
+      ? `Nobody is giving monthly at the moment. ${plural(s.dormant, 'plan')} used to and hasn’t been charged lately — the Monthly tab shows why.`
+      : 'Nobody has set up a monthly donation yet.';
+  }
+  const lines = [
     `${plural(s.donors, 'monthly donor')}, giving about ${fmt(s.perMonthMinor)} a month.`,
     `${fmt(s.thisMonthMinor)} of this month’s donations came from them.`,
-    'Open the Monthly tab in the panel for each plan and its next payment.',
-  ].join('\n');
+  ];
+  // Said out loud, because otherwise the figure above simply looks lower than the masjid expected
+  // and there is nothing on the screen to explain why.
+  if (s.dormant) {
+    lines.push(`${plural(s.dormant, 'other plan')} hasn’t been charged in the last two months — stopped, paused, or a card worth looking at.`);
+  }
+  lines.push('Open the Monthly tab in the panel for each plan and its next payment.');
+  return lines.join('\n');
 }

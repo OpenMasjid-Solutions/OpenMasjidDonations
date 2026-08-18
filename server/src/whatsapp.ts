@@ -14,10 +14,17 @@
  *     once — randomised 6–20s gaps, per-recipient cooldowns, hourly and daily caps, and quiet hours
  *     that defer rather than drop. Delivery is seconds to hours away and there is no receipt. So
  *     nothing here may block on a send, report one as delivered, or retry on a timeout.
- *  2. **Nothing auth-critical may ride on it.** It is an unofficial client and the number can be
- *     restricted or banned. In this app it carries admin notifications only — never a receipt a
- *     donor is waiting on, never a payment confirmation, never anything resembling a code. Email
- *     and the alert channels stay the fallback, and WhatsApp is only ever additive.
+ *  2. **Nothing auth-critical may ride on it, and nothing may DEPEND on it arriving.** It is an
+ *     unofficial client and the number can be restricted or banned. In this app it carries admin
+ *     notifications only — never a receipt a donor is waiting on, never a payment confirmation,
+ *     never anything resembling a code.
+ *
+ *     Note the precise claim, which changed in v0.43.0: WhatsApp is NOT necessarily a second copy
+ *     of something that also went out by email. Per-event notification settings make
+ *     `{os: false, whatsapp: '…'}` one click, and an admin is entitled to choose it. What still
+ *     holds is that nothing depends on the message: the donation is in the database and in the
+ *     panel either way, no donor outcome and no money movement waits on it, and every event stays
+ *     reachable through the platform's own alerts matrix.
  *
  * In Donations this is an ADMIN channel. The platform's alerts matrix deliberately has no WhatsApp
  * column for an app, because it routes to the admin's one number while an app's messages are
@@ -122,6 +129,13 @@ export async function whatsappStatus(force = false): Promise<WhatsAppStatus> {
       redirect: 'error',
     });
     clearTimeout(t);
+    // 429/5xx is NO INFORMATION — the platform never answered the question. Caching it would turn
+    // one throttled probe into a minute of "OpenMasjidOS isn't allowing this app to send", which
+    // sends an admin to check a permission that was never off; and during that minute `raise()`
+    // would skip the WhatsApp leg of every notification. So serve the last good answer when we
+    // have one, and do not overwrite it. (403 is different, and is cached below: "you don't hold
+    // this capability" is an answer.)
+    if (res.status === 429 || res.status >= 500) return statusCache?.value ?? { ...UNAVAILABLE, reason: 'unknown' };
     // 403 = we don't hold the capability (an older platform, or it was withdrawn). That is an
     // answer, not an outage, and it is worth caching like any other.
     const j = (await res.json().catch(() => null)) as Partial<WhatsAppStatus> | null;

@@ -395,7 +395,8 @@ export const sendTestAlert = () =>
   request<{ delivered: boolean; reason?: string; email?: boolean; webhook?: boolean }>('/api/admin/test-alert', { method: 'POST' });
 
 export type AccountInput = { label?: string; publishableKey?: string; secretKey?: string; webhookSecret?: string };
-export const listAccounts = () => request<StripeAccount[]>('/api/admin/stripe-accounts');
+// (No listAccounts here: the panel reads the accounts out of GET /api/settings, which it already
+// fetches, rather than a second round trip for the same list.)
 export const createAccount = (body: AccountInput) =>
   request<SaveAccountResult>('/api/admin/stripe-accounts', { method: 'POST', body: JSON.stringify(body) });
 export const updateAccount = (id: string, body: AccountInput) =>

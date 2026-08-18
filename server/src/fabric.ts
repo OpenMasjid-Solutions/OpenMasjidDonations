@@ -314,7 +314,7 @@ export async function probePlatform(cookieHeader: string | undefined): Promise<P
 /** Cheap, unauthenticated "is the platform up?" check, used only when there's no session
  *  cookie to validate. The appearance endpoint is public + CORS-enabled; any response
  *  (even an error status) proves we reached it. */
-export async function platformReachable(): Promise<boolean> {
+async function platformReachable(): Promise<boolean> {
   if (!config.omosBaseUrl) return false;
   try {
     const ctrl = new AbortController();

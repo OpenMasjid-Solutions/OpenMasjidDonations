@@ -400,6 +400,15 @@ async function main(): Promise<void> {
     // the pre-setup window where a passer-by on the LAN could otherwise claim the admin
     // password before the real admin. Distinguishing "not configured" from "configured
     // but unreachable" is exactly what the Fabric restore-resilience contract requires.
+    // The reachability probe below is an OUTBOUND call to the platform made from an
+    // UNAUTHENTICATED route, so it needs the same cap as the other two (see platformCallRateOk).
+    // Without it this route is an unmetered amplifier: `hasAdmin()` is false for the whole life of
+    // every SSO install, so the 409 above never short-circuits and each POST costs one 3s socket
+    // against the OS core. The cap is far above the one request a real first run makes, so it
+    // cannot get in the way of the recovery this route exists for.
+    if (ssoConfigured() && !platformCallRateOk(peerOf(req))) {
+      return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
+    }
     if (ssoConfigured() && (await probePlatform(req.headers.cookie)).reachable) {
       return reply.code(403).send({ error: 'Sign in through your OpenMasjidOS dashboard — press Open on the Donations app.' });
     }
@@ -3243,10 +3252,19 @@ async function main(): Promise<void> {
     /** Money for a command reply, in the masjid's own currency. */
     const money: Money = (minor) => formatMoney(minor, cur());
 
-    /** The appeals a command may name — live ones first, in the admin's own order, so the numbered
-     *  menu matches what they see in the panel. Bounded, because the reply is one WhatsApp message. */
+    /** Every appeal a command may name, in the ADMIN'S OWN ORDER — the same order as the Campaigns
+     *  tab, so a numbered menu matches what they are looking at. Inactive ones are included on
+     *  purpose: "how did the Ramadan appeal do?" is a question about a page that has since been
+     *  hidden, and the reply says it is hidden.
+     *
+     *  NOT capped here. Only the printed menu is capped (MENU_MAX), because one WhatsApp message
+     *  has to stay readable — capping the list itself is what made an appeal past the twelfth
+     *  unreachable even by name. */
     const appealChoices = (): { id: string; title: string }[] =>
-      store.listCampaigns().filter((c) => c.type !== 'tuition').slice(0, 12).map((c) => ({ id: c.id, title: c.title }));
+      store.listCampaigns().filter((c) => c.type !== 'tuition').map((c) => ({ id: c.id, title: c.title }));
+    /** How many appeals fit in one numbered menu. Beyond this, the reply says how many more there
+     *  are and a name still finds them. */
+    const MENU_MAX = 12;
 
     const appealReply = (c: Campaign): CommandReply => ({
       ok: true,
@@ -3295,21 +3313,32 @@ async function main(): Promise<void> {
           };
         }
         case 'monthly': {
-          const g = store.monthlyGiving(monthKey());
-          return { ok: true, text: replyMonthly({ donors: g.donors, perMonthMinor: g.perMonth, thisMonthMinor: g.thisMonth }, money) };
+          // Two months back, because a live monthly plan is charged every month and nothing local
+          // records a cancellation (see Store.monthlyGiving). One month would call a plan dormant
+          // on the day before its renewal; two leaves room for a retry after a declined card.
+          const since = new Date();
+          since.setMonth(since.getMonth() - 2);
+          const g = store.monthlyGiving(monthKey(), since.toISOString());
+          return {
+            ok: true,
+            text: replyMonthly({ donors: g.donors, perMonthMinor: g.perMonth, thisMonthMinor: g.thisMonth, dormant: g.dormant }, money),
+          };
         }
         case 'appeal': {
-          const appeals = appealChoices();
-          if (appeals.length === 0) return { ok: false, error: 'There are no appeals set up yet.' };
+          const all = appealChoices();
+          if (all.length === 0) return { ok: false, error: 'There are no appeals set up yet.' };
+          const menu = all.slice(0, MENU_MAX);
+          const hidden = all.length - menu.length;
           // One appeal and no argument: answering beats asking a question with one answer.
           const asked = (req.text ?? '').trim();
-          if (!asked && appeals.length === 1) {
-            const only = store.getCampaign(appeals[0].id);
+          if (!asked && all.length === 1) {
+            const only = store.getCampaign(all[0].id);
             return only ? appealReply(only) : { ok: false, error: 'That appeal has gone.' };
           }
-          if (!asked) return { ok: true, text: replyAppealMenu(appeals, false), followUp: { token: pickToken(1) } };
+          if (!asked) return { ok: true, text: replyAppealMenu(menu, false, hidden), followUp: { token: pickToken(1) } };
 
-          const chosen = chooseAppeal(asked, appeals);
+          // A number means a line of the menu; a name is matched against ALL of them.
+          const chosen = chooseAppeal(asked, menu, all);
           if (chosen) {
             const c = store.getCampaign(chosen.id);
             return c ? appealReply(c) : { ok: false, error: 'That appeal has gone.' };
@@ -3318,7 +3347,7 @@ async function main(): Promise<void> {
           // `ok:false` ends the exchange, which is the right way to release somebody who is stuck.
           const attempt = pickAttempt(req.followUpToken);
           if (attempt >= 2) return { ok: false, error: `I couldn’t find an appeal called “${asked.slice(0, 40)}”. Try again with !donations appeal.` };
-          return { ok: true, text: replyAppealMenu(appeals, true), followUp: { token: pickToken(attempt + 1) } };
+          return { ok: true, text: replyAppealMenu(menu, true, hidden), followUp: { token: pickToken(attempt + 1) } };
         }
         default:
           return null; // not ours → 404 unknown_command
@@ -3421,8 +3450,14 @@ async function main(): Promise<void> {
   // surfaced; everything else becomes a friendly line.
   app.setErrorHandler((err, _req, reply) => {
     const e = err as { message?: string; statusCode?: number; expose?: boolean };
-    log.error('request error', e.message ?? 'unknown');
     const status = typeof e.statusCode === 'number' && e.statusCode >= 400 && e.statusCode < 600 ? e.statusCode : 500;
+    // A 4xx is the CLIENT's mistake and says nothing about the health of this box, so it must not
+    // be logged as an error. Several are reachable without signing in — `/uploads/` names a
+    // directory and the static plugin refuses it, an upload over 5 MiB is a 413, an unreadable body
+    // is a 400 — so at error level a passer-by could fill a masjid's log with ERROR lines and bury
+    // the one that mattered. 5xx is ours and stays loud.
+    if (status >= 500) log.error('request error', e.message ?? 'unknown');
+    else log.debug(`request refused (${status}) ${e.message ?? ''}`);
     const friendly =
       status === 413 ? 'That request was too large.' : status < 500 ? "We couldn't process that request." : 'Something went wrong. Please try again.';
     reply.code(status).send({ error: e.expose && e.message ? e.message : friendly });
