@@ -11,8 +11,24 @@ name: Build image
 #
 # TWO CHANNELS (the org's Update Channel toggle in OpenMasjidOS):
 #
-#   main / v* tags  ->  :<version>  +  :latest    stable, e.g. :0.40.1
+#   main            ->  :<version>  +  :latest    stable, e.g. :0.40.1
 #   dev             ->  :<version>  +  :dev       development, e.g. :0.41.0-dev.1
+#
+# A `v*` TAG PUSH DELIBERATELY PUBLISHES NOTHING, and that is a correction (v0.43.0).
+# A release tag in this repo always points at a commit already on `main`, which the
+# branch push has already built and published — so a tag build can only rebuild the
+# same source and push it again. Docker builds are not reproducible (provenance carries
+# timestamps), so the second push lands a DIFFERENT digest under the same `:X.Y.Z` tag,
+# and the tag then no longer resolves to the digest that `docker-compose.yml` pins at
+# that very commit. The pin still works — Docker resolves by digest and every masjid
+# gets the audited image — but the tag and the pin disagree, and the untagged original
+# becomes eligible for registry pruning. Observed on v0.43.0: :0.43.0 was published as
+# sha256:285ce87…, pinned, tagged, and the tag push moved :0.43.0 to sha256:a9aed99….
+#
+# §16.1's step order (publish, pin the digest, THEN tag that commit) is what makes the
+# tag trustworthy, and it only holds if the tag itself publishes nothing. Use
+# workflow_dispatch if a tag ever genuinely needs building — e.g. a hotfix tag on a
+# commit that never reached `main`.
 #
 # Both channels publish the EXACT `version:` from manifest.yaml as an immutable tag.
 # That is not cosmetic: OpenMasjidOS detects an update by comparing the catalog's
@@ -31,7 +47,10 @@ name: Build image
 on:
   push:
     branches: [main, dev]
-    tags: ['v*']
+    # NO `tags:` here — see the note above. A release tag names a commit `main` already
+    # published, so building it again would move the version tag off the digest that the
+    # tagged commit pins.
+    #
     # Changes that don't affect the image — skip the (slow) multi-arch build.
     # docker-compose.yml is NOT part of the image build context (the Dockerfile only
     # copies server/ + web/), so a compose change (e.g. pinning the image @sha256
@@ -127,8 +146,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Publishes the version-pinned (+ latest) image on main and on v* tags, like the
-      # OpenMasjidDisplay template, or the moving :dev pair on the dev branch. Bump
+      # Publishes the version-pinned (+ latest) image on main, or the moving :dev pair on
+      # the dev branch. (Display's template also built v* tags; this one deliberately does
+      # not — a tag build would repoint :X.Y.Z away from the digest that tag's own compose
+      # pins.) Bump
       # manifest.yaml `version:` for each meaningful change so a pinned install stays
       # stable (the catalog pins a git tag + version). Both arches always: a masjid box
       # is usually a Raspberry Pi, so an amd64-only dev image would be untestable where
