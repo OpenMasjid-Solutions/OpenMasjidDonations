@@ -5,10 +5,12 @@
 
 From the 2026-08-03 security and code-health audit. Ordered by urgency.
 
-> ### Where this stands as of 2026-08-13 (the v0.42.0 sweep)
+> ### Where this stands as of 2026-08-18 (the v0.43.0 sweep)
 >
 > | Item | Status |
 > |---|---|
+> | §4g `@fastify/static` major upgrade (DONATIONS-040) | **Done.** 8.x → 10.1.3 in the v0.43.0 sweep, clearing all four advisories rather than continuing to argue they are unreachable. Verified by a real container start: the SPA, an asset, an uploaded image, the SPA fallback and a 401 all behave, and five traversal shapes (`../`, `%2e%2e`, `..%2f`, `%2e%2e%2f`, `....//`) return 404 with no file body. Both `npm audit` runs are now clean. |
+> | §4a `/api/setup` during an outage (DONATIONS-005) | **Still your decision, but no longer unmetered.** The reachability probe on that route is now behind the same 120/min per-peer cap as the other two unauthenticated platform-callers; the trade-off between recovery and takeover is unchanged and still yours. |
 > | §0a three-decimal currencies (DONATIONS-001) | **Fixed and shipped** in v0.39.0. Steps 1–4 below are still yours if any masjid runs BHD/JOD/KWD/OMR/TND — the fix does not rewrite historical rows. |
 > | §0b lost one-time donations (DONATIONS-002) | **Fixed and shipped** in v0.39.0. The sweep runs every 10 minutes; expect the ledger to have grown. |
 > | §1 credentials to rotate | Still none. Re-checked on 2026-08-13. |
@@ -194,10 +196,18 @@ loads `js.stripe.com` and its own frames, and a CSP that is even slightly wrong 
 with no obvious error. It needs writing against a real Stripe Element in a browser. Highest-value
 missing header on the admin panel, and worth doing properly.
 
-### 4g. `@fastify/static` major upgrade (DONATIONS-040) — Low
-Four High advisories, all **refuted as exploitable in this configuration** (both registrations use
-`index: false`, never `list: true`, and both roots hold only already-public assets). The fix is
-8.3.0 → 10.1.2, a major bump across two majors. Left for a human on its own schedule.
+### 4g. `@fastify/static` major upgrade (DONATIONS-040) — ~~Low~~ **DONE (v0.43.0)**
+Four High advisories, all originally **refuted as exploitable in this configuration** (both
+registrations use `index: false`, never `list: true`, and both roots hold only already-public
+assets). Deferred twice on that reasoning, and then done anyway in the v0.43.0 sweep: 8.x → 10.1.3.
+
+Being right about unreachability is not the same as being clean, a fourth advisory had arrived on
+the same package, and "we reasoned it was fine" is a worse answer to a masjid than "we upgraded it".
+Two majors, but the API surface used here is four options across two registrations, so the diff is
+one line in `package.json`. Verified by a real container start rather than by tests alone — see the
+status table at the top of this file. The one behaviour change: a request for the `/uploads/`
+directory is now a 403 from the plugin rather than a 404, which the error handler no longer logs at
+error level (a client 4xx is not this box's problem).
 
 ### 4h. Session revocation and password change (DONATIONS-013) — Medium
 There is no way to change the admin password and no way to invalidate a stolen 30-day cookie short

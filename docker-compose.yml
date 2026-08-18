@@ -23,7 +23,8 @@ services:
     #
     # The digest is added in a follow-up commit, once CI has actually published the image
     # and there is a real digest to pin — naming one before it exists would be a guess.
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.42.0@sha256:76a075273104b22f0c2c95601279c514554a268390efed5ecbd6f53ba6d04e0c
+    # THE TAG GOES ON THAT COMMIT, never on this merge (CLAUDE.md §16.1).
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.43.0
     restart: unless-stopped
     environment:
       PORT: "8080"
@@ -35,9 +36,11 @@ services:
       OPENMASJID_BASE_URL: ${OPENMASJID_BASE_URL:-}
       OPENMASJID_APP_ID: ${OPENMASJID_APP_ID:-}
       OPENMASJID_APP_SECRET: ${OPENMASJID_APP_SECRET:-}
-      # Optional install settings (also settable in the admin panel). Delivered the
-      # same way — ${KEY} substitution from the platform-written .env. The secret
-      # key is read server-side only and never sent to the browser.
+      # First-run SEEDS, not install settings — `manifest.yaml` declares no `settings:`
+      # block, so the platform never asks for these and never writes them. They are kept
+      # for an operator running this container by hand, and are read once at first run;
+      # anything saved in the admin panel afterwards wins. The secret key is read
+      # server-side only and never sent to the browser.
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}

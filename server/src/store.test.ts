@@ -549,3 +549,84 @@ test('stop link: the row SURVIVES the plan ending, so an old link reads "already
   const t = s.ensurePlanLink('sub_GONE');
   assert.equal(s.planLinkSubscription(t), 'sub_GONE');
 });
+
+// ── monthlyGiving: a plan that stopped is not a current monthly donor ────────
+//
+// Nothing local records a cancellation — it happens at Stripe, and a LAN-only box may never see the
+// webhook — so without a recency window a masjid three years in is told it has every monthly donor
+// it has ever had, and "about £X a month" adds up plans nobody is paying. Wrong about money, in the
+// flattering direction, which is the worst way to be wrong about money.
+
+const recurring = (s: Store, campaignId: string, subscriptionId: string, amount: number, createdAt: string) =>
+  s.createDonation({
+    campaignId,
+    stripeAccountId: 'acct_test',
+    amount,
+    currency: 'GBP',
+    status: 'succeeded',
+    donorName: '',
+    donorEmail: '',
+    coverFees: false,
+    giftAid: false,
+    paymentIntentId: `pi_${subscriptionId}_${createdAt}`,
+    recurring: true,
+    subscriptionId,
+    createdAt,
+  });
+
+test('monthlyGiving: only plans charged since the cutoff count as donors', () => {
+  const s = fresh();
+  const c = mk(s);
+  recurring(s, c.id, 'sub_live', 2000, '2026-08-01T10:00:00.000Z'); // still being charged
+  recurring(s, c.id, 'sub_live', 2000, '2026-07-01T10:00:00.000Z');
+  recurring(s, c.id, 'sub_gone', 5000, '2024-03-01T10:00:00.000Z'); // stopped two years ago
+  recurring(s, c.id, 'sub_gone', 5000, '2024-02-01T10:00:00.000Z');
+
+  const g = s.monthlyGiving('2026-08', '2026-06-01T00:00:00.000Z');
+  assert.equal(g.donors, 1, 'one plan is actually still being charged');
+  assert.equal(g.perMonth, 2000, 'the £50 plan that ended must not be inside "per month"');
+  assert.equal(g.dormant, 1, 'and it is reported rather than silently dropped');
+  assert.equal(g.thisMonth, 2000);
+});
+
+test('monthlyGiving: the most recent charge is the one that counts, not the first', () => {
+  const s = fresh();
+  const c = mk(s);
+  recurring(s, c.id, 'sub_raised', 1000, '2026-01-01T10:00:00.000Z'); // started at £10
+  recurring(s, c.id, 'sub_raised', 3000, '2026-08-01T10:00:00.000Z'); // now giving £30
+  const g = s.monthlyGiving('2026-08', '2026-06-01T00:00:00.000Z');
+  assert.equal(g.donors, 1);
+  assert.equal(g.perMonth, 3000);
+});
+
+test('monthlyGiving: no cutoff counts every plan ever, exactly as before', () => {
+  const s = fresh();
+  const c = mk(s);
+  recurring(s, c.id, 'sub_old', 1000, '2020-01-01T10:00:00.000Z');
+  const g = s.monthlyGiving('1999-01');
+  assert.equal(g.donors, 1);
+  assert.equal(g.dormant, 0);
+});
+
+test('monthlyGiving: an abandoned sign-up is not a donor and never "used to give"', () => {
+  const s = fresh();
+  const c = mk(s);
+  s.createDonation({
+    campaignId: c.id, stripeAccountId: 'acct_test', amount: 1000, currency: 'GBP',
+    status: 'pending', donorName: '', donorEmail: '', coverFees: false, giftAid: false,
+    paymentIntentId: 'pi_pending', recurring: true, subscriptionId: 'sub_abandoned',
+  });
+  const g = s.monthlyGiving('2026-08', '2026-06-01T00:00:00.000Z');
+  assert.equal(g.donors, 0);
+  assert.equal(g.dormant, 0, 'never charged at all is not the same as no longer charged');
+});
+
+test('monthlyGiving: a refund comes off what the plan is giving', () => {
+  const s = fresh();
+  const c = mk(s);
+  const d = recurring(s, c.id, 'sub_part', 5000, '2026-08-02T10:00:00.000Z');
+  s.setDonationRefund(d.paymentIntentId, 2000, '2026-08-03T10:00:00.000Z');
+  const g = s.monthlyGiving('2026-08', '2026-06-01T00:00:00.000Z');
+  assert.equal(g.perMonth, 3000, 'net of the refund, like every other money figure');
+  assert.equal(g.thisMonth, 3000);
+});

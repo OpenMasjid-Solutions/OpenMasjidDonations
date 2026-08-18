@@ -98,16 +98,19 @@ export function App() {
     if (goToSetup) window.location.replace(withBase('/admin'));
   }, [goToSetup]);
 
-  // On-scene text colour follows the WALLPAPER (not the light/dark toggle): preset
-  // wallpapers are dark → light on-scene text in both themes; a light custom wallpaper
-  // image flips data-scene to "light" so on-scene text goes dark. The content theme
-  // (glass cards) stays under the user's control. The donate page manages its own scene.
+  // On-scene text colour follows the WALLPAPER, not the light/dark toggle. With no custom image
+  // the scene is the theme's own gradient — light in light mode since v0.43.0 — and the CSS picks
+  // the ink from the theme. A custom image overrides that in BOTH directions, which is why this
+  // sets "dark" as well as "light": a DARK image under a LIGHT theme would otherwise get the
+  // theme's dark ink written straight onto it. The donate page manages its own scene.
   const prefs = usePrefs();
   const sceneTone = useReadableTheme(!campaign ? prefs.wallpaperImage.trim() || undefined : undefined, 'dark');
   useEffect(() => {
     if (campaign) return;
     const html = document.documentElement;
-    if (sceneTone === 'light') html.setAttribute('data-scene', 'light');
+    // Only when there IS an image to measure. Without one, remove the attribute entirely so the
+    // theme's own rule applies rather than a stale measurement of a wallpaper that has gone.
+    if (prefs.wallpaperImage.trim()) html.setAttribute('data-scene', sceneTone === 'light' ? 'light' : 'dark');
     else html.removeAttribute('data-scene');
   }, [sceneTone, campaign]);
 

@@ -37,15 +37,6 @@ export interface Session {
   sso: { enabled: boolean; reachable: boolean; username?: string };
 }
 
-export interface NotifyTestResult {
-  baseUrlSet: boolean;
-  hasSecret: boolean;
-  baseUrlLoopback: boolean;
-  appId: string;
-  delivered: boolean;
-  reason?: string;
-}
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(withBase(path), {
     ...init,
@@ -68,9 +59,6 @@ export const login = (password: string) =>
   request<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ password }) });
 
 export const logout = () => request<{ ok: true }>('/api/logout', { method: 'POST' });
-
-export const sendTestNotification = () =>
-  request<NotifyTestResult>('/api/admin/notify-test', { method: 'POST' });
 
 // ── Settings (masjid details + Stripe config + onboarding) ──────────────────
 
@@ -332,13 +320,83 @@ export type EmailReceiptPatch = Partial<Pick<EmailReceipt, 'enabled' | 'subject'
 export const getEmailReceipt = () => request<EmailReceipt>('/api/admin/email-receipt');
 export const saveEmailReceipt = (patch: EmailReceiptPatch) =>
   request<EmailReceipt>('/api/admin/email-receipt', { method: 'PUT', body: JSON.stringify(patch) });
+
+// ── Notifications (who hears what, on which channel) ────────────────────────────
+/** Which of the platform's four situations WhatsApp is in. Each needs a different sentence and a
+ *  different person to go and fix it, so never collapse them into "not working". */
+export type WhatsAppReason = 'ready' | 'not-configured' | 'not-linked' | 'unreachable' | 'not-allowed' | 'unknown';
+
+export interface WhatsAppGroup {
+  id: string;
+  /** The admin's own nickname for the group, not its WhatsApp subject. Show it as-is. */
+  label: string;
+}
+
+export interface WhatsAppAvailability {
+  available: boolean;
+  reason: WhatsAppReason;
+  media: boolean;
+  maxMediaBytes: number;
+  /** Only the groups the OpenMasjidOS admin approved for this app. Empty = hide the picker. */
+  groups: WhatsAppGroup[];
+}
+
+/** Every notification this app can raise. The ids are the app's own; the labels live in the UI. */
+export type NotifyEventId = 'donation' | 'donationRecovered' | 'refund' | 'planStopped' | 'paymentFailed' | 'tuitionFailed';
+
+export interface NotifyChannels {
+  /** Raise the OpenMasjidOS alert → the admin's own email + webhook. On by default. An AND with
+   *  their matrix in OpenMasjidOS → Settings → Alerts, which the UI must say out loud. */
+  os: boolean;
+  /** A specific address, via the platform's email provider. '' = off. */
+  email: string;
+  /** Digits with a country code, or an approved group id. */
+  whatsapp: string;
+  /** A separate switch, not "non-empty means on" — so turning the channel off for a month doesn't
+   *  lose the number, and the tick box means what a tick box normally means. Both must be true to
+   *  send. Off by default for every event. */
+  whatsappOn: boolean;
+}
+
+export interface NotifySettings {
+  defaultEmail: string;
+  defaultWhatsapp: string;
+  /** MAJOR units across the API. 0 = tell me about every donation. */
+  minAmount: number;
+  events: Record<NotifyEventId, NotifyChannels>;
+  embedded: boolean;
+  /** The last real outcome of a send through the platform's email provider. */
+  emailStatus: string;
+  whatsapp: WhatsAppAvailability;
+}
+
+export type NotifyPatch = {
+  defaultEmail?: string;
+  defaultWhatsapp?: string;
+  minAmount?: number;
+  events?: Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+};
+
+/** `refresh` re-probes WhatsApp instead of using the 60-second cache — what the admin presses after
+ *  linking their phone, when seeing the answer change is the entire point. */
+export const getNotifications = (refresh = false) =>
+  request<NotifySettings>(`/api/admin/notifications${refresh ? '?refresh=1' : ''}`);
+export const saveNotifications = (patch: NotifyPatch) =>
+  request<NotifySettings>('/api/admin/notifications', { method: 'PUT', body: JSON.stringify(patch) });
+/** Sends one real notification down one channel. WhatsApp resolves on QUEUED, never delivered. */
+export const testNotification = (channel: 'os' | 'email' | 'whatsapp', event: NotifyEventId) =>
+  request<{ ok: true; message: string }>('/api/admin/notifications/test', {
+    method: 'POST',
+    body: JSON.stringify({ channel, event }),
+  });
 /** Fire the `test` alert — the platform delivers it to the admin's own email/webhook (the app
  *  never learns the admin address). Confirms OpenMasjidOS can reach you. */
 export const sendTestAlert = () =>
   request<{ delivered: boolean; reason?: string; email?: boolean; webhook?: boolean }>('/api/admin/test-alert', { method: 'POST' });
 
 export type AccountInput = { label?: string; publishableKey?: string; secretKey?: string; webhookSecret?: string };
-export const listAccounts = () => request<StripeAccount[]>('/api/admin/stripe-accounts');
+// (No listAccounts here: the panel reads the accounts out of GET /api/settings, which it already
+// fetches, rather than a second round trip for the same list.)
 export const createAccount = (body: AccountInput) =>
   request<SaveAccountResult>('/api/admin/stripe-accounts', { method: 'POST', body: JSON.stringify(body) });
 export const updateAccount = (id: string, body: AccountInput) =>

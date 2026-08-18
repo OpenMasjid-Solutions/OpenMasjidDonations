@@ -144,7 +144,7 @@ Eight tabs behind a login, with a bottom dock like the rest of the family:
 | **Thank-you** | Write the on-screen thank-you, and design the emailed receipt — subject, heading, body, accent — with a **"send me a test"** |
 | **Large gifts** | The threshold, your wording, and the QR image for the bank-transfer suggestion |
 | **Payments** | **Several Stripe accounts** — add, edit, test the keys and remove accounts whose keys live on this device, and pick which **vaulted OpenMasjidOS account** is the default for the site. Any appeal can then be pointed at a different one, so Zakat and general funds settle separately; the currency; a clear **TEST MODE** badge; and the optional per-account webhook with the URL to paste into Stripe |
-| **Settings** | **Your masjid** (name, address, email, phone, website, currency) · **Appearance** (light/dark/follow-system, accent, logo, wallpaper, or mirror the dashboard) · **Notifications** · **Email receipts** on/off · **Public access** via a Cloudflare Tunnel |
+| **Settings** | **Your masjid** (name, address, email, phone, website, currency) · **Appearance** (light/dark/follow-system, accent, logo, wallpaper, or mirror the dashboard) · **Notifications** — the six things the app can tell someone about, each one routed to your OpenMasjidOS inbox, a specific email address and a WhatsApp number or approved group, in any combination, with a **Test** on every line · **Email receipts** on/off · **Public access** via a Cloudflare Tunnel |
 
 Plus a **guided first-run setup**, a top-right account menu (theme · settings · sign
 out) with a live clock, and a **What's new** dialog that tells you what changed after
@@ -162,11 +162,30 @@ the app, so it works with no internet.
   Payments, fetched server-to-server and never stored here, or paste keys into the app.
 - **Email without credentials.** Receipts go out through the platform's email provider,
   so this app never sees your mail password or From address.
-- **Notifications and alerts.** A relay for "a donation was received", plus five
-  alerts you can route to email or a webhook: **a payment couldn't be started**, **a
-  tuition payment wasn't recorded**, **a donation was refunded**, **a monthly donation
-  was stopped by the donor**, and a **test**. You choose the channel in OpenMasjidOS;
-  this app never sees the address.
+- **WhatsApp, to the people who look after the money.** If your masjid runs the WhatsApp
+  gateway in OpenMasjidOS, any of the six notifications can also go to a number you enter — or
+  to a group your OpenMasjidOS admin has approved — and each one can go somewhere different, so
+  refunds can reach the treasurer while a broken payment setup reaches whoever fixes things.
+  **Donors are never messaged and this app never asks anyone for a phone number.** WhatsApp is
+  never switched on for you: it sends from your masjid's own number, so that has to be your
+  choice. Messages are queued and spaced out to keep the number safe, which is why a test says
+  *queued* rather than *sent* — it arrives within minutes rather than instantly.
+- **Ask for figures by WhatsApp.** Message your masjid's number with `!donations` and
+  you get a menu: today's total, this month next to the whole of last month, overall totals,
+  how a particular appeal is doing against its goal, and your monthly donors. It asks which
+  appeal you mean if you don't say, and if you have more appeals than fit in one message you
+  can type part of a name instead. Everything it answers is a **total** — no donor is ever
+  named, and nothing you can send it changes anything. Who may use it is set in
+  OpenMasjidOS, not here.
+- **Notifications, and you choose who hears them.** Six things this app can tell somebody
+  about: **a donation was received**, **a donation was refunded**, **a monthly donation was
+  stopped by the donor**, **a payment couldn't be started**, **a tuition payment wasn't
+  recorded**, and **a donation was found and added**. For each one, Settings → Notifications
+  picks any combination of your OpenMasjidOS inbox, a specific email address, and WhatsApp.
+  OpenMasjidOS still decides whether its own copy becomes an email, a webhook post or both —
+  and it never tells this app your address — so the two are an AND, which the panel says
+  plainly rather than promising you an email it can't see. "A donation was received" also
+  carries a smallest-amount setting, since it is the one that happens every single time.
 - **Public access without port-forwarding**, through the platform's Cloudflare Tunnel
   on a single hostname, or the app's own tunnel when standalone. Share links, QR codes
   and the Stripe webhook URL then use your public domain automatically.
@@ -215,9 +234,9 @@ the app, so it works with no internet.
   at different content.
 - The admin password is stored as a **scrypt hash**; sessions are signed, HTTP-only,
   SameSite cookies that become `Secure` over HTTPS.
-- Full [security and code-health audits](docs/audit/) were carried out on 2026-08-03 and
-  2026-08-13 — the reports, the remediation notes, what was fixed and what is still open
-  are all in the repo rather than in someone's head.
+- Full [security and code-health audits](docs/audit/) were carried out on 2026-08-03,
+  2026-08-13 and 2026-08-18 — the reports, the remediation notes, what was fixed and what is
+  still open are all in the repo rather than in someone's head.
 
 ---
 

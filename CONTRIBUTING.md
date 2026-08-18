@@ -52,10 +52,45 @@ shows a **TEST MODE** badge whenever a test key is in use.
 
 You do **not** need OpenMasjidOS to develop: with no `OPENMASJID_*` environment variables the
 app runs fully standalone behind its own admin password, and every platform integration
-(sign-in, theme, vaulted Stripe keys, email, alerts, tuition) fails soft.
+(sign-in, theme, vaulted Stripe keys, email, alerts, WhatsApp, admin commands, tuition) fails
+soft — the donation site works regardless, which is the property to preserve.
 
-Useful environment variables: `PORT` (8080), `DATA_DIR` (where the SQLite file and uploads
-go), `PUBLIC_DIR` (the built web app), `LOG_LEVEL` (`debug`/`info`/`warn`/`error`).
+| Variable | What it does |
+|---|---|
+| `PORT` | Listen port (default 8080) |
+| `DATA_DIR` | Where the SQLite file and uploaded images live (default `/data` in the image) |
+| `PUBLIC_DIR` | The built web app to serve (default the image's own copy) |
+| `LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
+| `OPENMASJID_BASE_URL` + `OPENMASJID_APP_SECRET` | Injected by the platform. Both present = "embedded": SSO, the Stripe vault, email, alerts, WhatsApp and the tuition broker switch on |
+| `STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `CURRENCY` | **First-run seeds only**, for running the container by hand. Nothing injects them, and a value saved in the app always wins |
+
+### The platform-only features, without a platform
+
+Anything behind the Fabric (WhatsApp, admin commands, email receipts, vaulted Stripe keys) needs
+`OPENMASJID_BASE_URL` + `OPENMASJID_APP_SECRET`. Point the base URL at a real OpenMasjidOS to
+exercise them properly; point it at a dead address to check the fail-soft path, which is the one
+that actually ships to a masjid whose platform is briefly down.
+
+**Admin commands** (`POST /fabric/commands/run`) are the easy exception — they read only local
+SQLite, so a dead base URL is fine. The two headers **are** the authentication, so both are
+required:
+
+```bash
+curl -X POST http://localhost:8080/fabric/commands/run \
+  -H 'content-type: application/json' \
+  -H "x-openmasjid-app-secret: $OPENMASJID_APP_SECRET" \
+  -H 'x-openmasjid-caller-app: omos:platform' \
+  -d '{"command":"totals","requestId":"dev-1"}'
+```
+
+Drop either header and it must be a flat `403`. Every command is read-only and aggregate, and
+**no reply may ever name a donor** — see `CLAUDE.md` §13 and `server/src/commands.test.ts`, which
+fails if a parameter that could carry one is added to the reply surface.
+
+**WhatsApp** cannot be exercised without a real gateway, and that is deliberate: the number
+belongs to a masjid and the ban risk is theirs. `server/src/whatsapp.test.ts` pins the wire
+contract (the three details that otherwise fail silently) against a stubbed `fetch`, which is the
+right place to work on it.
 
 ## Before you open a PR
 
@@ -89,8 +124,14 @@ All three must be clean. If you add a `*.test.ts` file, **add it to the `test` s
 
 | Path | What it is |
 |---|---|
-| [`server/src/index.ts`](server/src/index.ts) | Every route, and the background jobs |
+| [`server/src/index.ts`](server/src/index.ts) | Every route, the `raise()` notification door, and the background jobs |
 | [`server/src/store.ts`](server/src/store.ts) | SQLite schema + the whole data layer |
 | [`server/src/fabric.ts`](server/src/fabric.ts) | The OpenMasjidOS integration (SSO, Stripe vault, email, alerts, public URL) |
+| [`server/src/whatsapp.ts`](server/src/whatsapp.ts) | The WhatsApp channel — status, approved groups, and one queued message at a time |
+| [`server/src/commands.ts`](server/src/commands.ts) | Admin commands: the two-header check, and every reply, as pure functions |
+| [`server/src/plans.ts`](server/src/plans.ts) · [`server/src/refunds.ts`](server/src/refunds.ts) | Monthly plans over live Stripe state; refunds as an amount |
+| [`server/src/students.ts`](server/src/students.ts) | The tuition (Students-billing) contract |
 | [`web/src/donate.tsx`](web/src/donate.tsx) · [`web/src/admin.tsx`](web/src/admin.tsx) | The donor page and the admin panel |
+| [`web/src/changelog.ts`](web/src/changelog.ts) | "What's new" — and it has a different shape per branch (see `CLAUDE.md` → Branching policy) |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Why things are the way they are |
+| [`docs/audit/`](docs/audit/) | The audits, and what is still open |

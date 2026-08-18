@@ -855,3 +855,257 @@ to Stripe's own receipt. One donation, once, against every donation, for ever.
 Do not tighten this back to "a previous send succeeded". If a cheap authoritative "is email set up?"
 probe ever appears on the Fabric, that is the right way to close the remaining gap; a success
 requirement is not.
+
+## WhatsApp: an admin channel, deliberately (v0.43.0)
+
+The masjid installs the OpenWA gateway and links **their own** phone number in OpenMasjidOS. We POST
+`/api/fabric/whatsapp`; the platform sends. We never see the gateway, its credentials, or the number.
+
+### Why it carries admin notifications and not donor receipts
+
+The platform's alerts matrix has no WhatsApp column for an app, on the reasoning that it routes to
+the admin's one number while an app's messages are generally for donors — so "which events, and to
+whom" is a setting in the app. In Donations that setting resolves the other way: **the recipients are
+the masjid's own people.**
+
+That is not a smaller version of the donor feature; it is a different one, and it is the reason
+nothing in this app collects a donor's phone number. A donation page asks for as little as it can —
+name and email are already optional — and a phone number is the field most likely to make someone
+abandon a gift. It would also put us one bug away from messaging a stranger on an unofficial client
+that gets numbers banned for exactly that.
+
+### Never load-bearing (and, from v0.43.0, not necessarily additive)
+
+Until v0.43.0 this section claimed WhatsApp was always a *second* copy of something that had already
+gone out by email or webhook. Per-event notification settings make that false: `{os: false,
+whatsapp: '…'}` is one click, and an admin who wants refunds on WhatsApp and nowhere else is entitled
+to that. The weaker claim is the one that was doing the real work, and it still holds — **nothing
+depends on a WhatsApp message arriving.** The donation is in the database and in the panel either way,
+no money movement and no donor outcome hangs on a notification, and every event is still reachable
+through the alerts matrix if the admin wants it there. So:
+
+- the send is fire-and-forget and never blocks a donor, a payment or a receipt;
+- a failure is logged at warn and dropped — the alert that did go out is unaffected;
+- nothing auth-critical rides on it, ever. It is an unofficial client whose number can be restricted
+  or banned without notice, and email has a real provider behind it.
+
+### `queued` is not `sent`, and the pacing is why
+
+Ban risk attaches to the **number**, not to whoever sent a message — so one platform-wide queue paces
+every app at once: randomised 6–20s gaps, per-recipient cooldowns, hourly and daily caps, a warm-up
+ramp for a freshly linked number, and quiet hours that queue rather than drop. A success is
+`202 {queued:true}` and there is no delivery receipt.
+
+The panel therefore says **"Queued ✓ — … it may take a few minutes to arrive"** after a test, never
+"Sent". An admin told "sent" who then watches a silent phone concludes the feature is broken, when
+the truth is that it is working exactly as designed.
+
+The shared daily cap is also why the "a donation was received" event has a **`minAmount` floor**
+(default 0 = every donation, but prominent in the UI). A busy Friday of small gifts would otherwise
+spend the masjid's entire allowance on good news and push the refund and payment-failure messages —
+the ones that need someone to act — behind hours of queue.
+
+### One recipient per call, and never a client-chosen target
+
+The platform takes one `to` **or** one `group` per call and 400s on both or neither. The array it
+does not accept is the point: the API shape is the first place a cold blast is discouraged, and a
+cold blast is the single most reliable way to get a masjid's number banned. We loop, and the queue
+paces the loop.
+
+- **Numbers** go through `toWhatsAppDigits`, which mirrors the platform's own `toDigits`: strip to
+  digits, require 8–15, and **refuse a number with no country code rather than guessing one.**
+  "07700900123" is a real number in the UK and a different real number elsewhere; prefixing our guess
+  would send a masjid's donation figures to a stranger. The admin is told to add the code instead.
+- **Groups** come only from `GET /api/fabric/whatsapp/groups` — the ones the *platform* admin
+  approved for this app, never the gateway's own list, which would name every group the masjid's
+  phone is in, the imam's family chat included. The id is re-verified against that list before it is
+  saved, because the platform's 403 for an unapproved id would otherwise arrive silently at send
+  time, long after the admin left the screen believing it was set up.
+
+### Three wire details that fail silently
+
+Found by reading `packages/core/src/api/fabric.ts` rather than the summary this was built from, and
+each one would have left a feature that looks correct and never messages anybody. All three are
+pinned by `whatsapp.test.ts`:
+
+| | The trap |
+|---|---|
+| `/groups` | Returns **`{ groups: [...] }`**, not a bare array. Parsed as an array it yields nothing, and the admin concludes no groups were approved. |
+| `reason` | Always a word, never `null`; **`"ready"`** is what available looks like. Treating a null reason as "available" inverts the check. |
+| `media` | **Absent means no.** An older platform omits it entirely. |
+
+The availability probe is cached for a minute so the Settings screen is cheap, but an **outage is
+never cached** — one dropped packet would otherwise hide the feature from the admin for a full
+minute — and `?refresh=1` forces a re-probe, which is what the admin presses after linking the phone,
+when watching the answer change is the whole point.
+
+## Admin commands: stats only, and why that is the whole design (v0.43.0)
+
+An admin messages the masjid's number with `!donations`; the platform renders the menu, authorises
+the sender, and POSTs the chosen command to `/fabric/commands/run` on our own port. Five are
+declared — `today`, `month`, `totals`, `appeal`, `monthly` — and every one of them only reads.
+
+### Three constraints, and the design falls out of them
+
+**It is an informal channel.** A WhatsApp message is typed on a phone, often one-handed, by whoever
+happens to be holding it. So the blast radius of a mistake should be a wrong figure on a screen, not
+a closed appeal or a refunded donation. `confirm: true` exists in the contract for exactly the
+commands we chose not to have; the safer answer was to have none of them. Nothing here writes.
+
+**A message is forwardable.** It gets screenshotted into a family group, quoted in a committee
+thread, and backed up to somebody's cloud. The donor never agreed to any of that — so a command
+answers *"£312 from 9 donations"* and never who gave it. This is structural rather than a habit: the
+formatters in `commands.ts` are given counts and totals, and there is no parameter anywhere in that
+surface that *could* carry a name, an email or a reference. `commands.test.ts` asserts it, so adding
+one fails a test rather than shipping.
+
+**Ten seconds, and somebody is waiting.** Every figure comes from SQLite. Nothing calls Stripe —
+which is why `monthly` reports what the local recurring rows say (donors who have actually paid,
+what they most recently gave, what arrived this month) rather than syncing plan state. A stat that
+is a few minutes stale is fine; a command that times out is not.
+
+That constraint has one sharp consequence, found in the v0.44.0 sweep and worth writing down.
+**Nothing local records that a monthly plan ENDED.** A cancellation happens at Stripe, and a
+LAN-only masjid may never see the webhook — so the succeeded rows of a plan stopped two years ago
+are still sitting in `donations`, indistinguishable by themselves from a live one. Counting every
+subscription that ever took money, a masjid three years in would be told it had *fifty monthly
+donors giving about £2,000 a month* when the truth was ten and £400. Confidently wrong, about money,
+in the flattering direction — which is the worst of the three.
+
+The fix stays inside the constraint: a live monthly plan is charged every month, so **"nothing
+charged in the last two months" is the one local signal that a plan is no longer running.**
+`monthlyGiving` takes that cutoff and returns those separately as `dormant`, and the reply says so
+("*6 other plans haven't been charged in the last two months — stopped, paused, or a card worth
+looking at*"). Reported rather than dropped, because a figure that quietly shrank is unexplainable
+from a phone, and two months rather than one because a plan the day before its renewal is not
+dormant and a retry after a declined card needs room.
+
+### The two headers are the authentication
+
+`/fabric/commands/run` is outside every `/api` guard and carries no cookie, by the platform's own
+convention. `isPlatformCall` therefore checks **both** headers: the secret against our own, in
+constant time, and the caller against exactly `omos:platform`.
+
+That second check is not belt-and-braces. `omos:platform` is the one caller id **no app can ever
+present**, because the colon is outside the charset app ids are validated against — so it is what
+separates "the platform is asking" from "an app that learned our secret is asking through the
+app-to-app broker", which is a different trust boundary sharing the `/fabric` prefix. The platform
+refuses `commands` in `fabric.provides` for the same reason.
+
+### The one conversation, and the thing that will bite
+
+`appeal` is the only command that asks a follow-up, and it earns it: a treasurer will not remember
+whether the appeal is called "Ramadan Appeal" or "Ramadan 2026". It accepts an argument on the first
+message (`!donations appeal zakat`), answers immediately when there is only one appeal, and otherwise
+posts a numbered list and keeps the exchange open with a token.
+
+**The exchange can end without us** — three minutes idle, fifteen total, twelve turns, `cancel`, or
+any new `!` command — with no notification; the answers simply stop arriving. The token therefore
+carries a step name and an attempt counter and **nothing a later turn needs in order to be correct**.
+Because every command is read-only, there is nothing that could be left half-applied either; that is
+the strong form of the same guarantee, and it is a reason to keep commands read-only even if a
+tempting write one is proposed later.
+
+Two smaller decisions inside it:
+
+- **The appeal list is re-derived on the second turn, not encoded in the token.** 128 characters will
+  not hold a dozen campaign ids, and the failure it guards against — the admin reordering their
+  appeals inside a three-minute window — is both vanishingly rare and *visible*, because **the reply
+  always names the appeal it is reporting on.**
+- **The menu is capped at twelve; the list that gets SEARCHED is not.** One WhatsApp message has to
+  stay readable, and capping the printed list is the obvious way to get that. Capping the list being
+  *matched against* was the bug (v0.44.0): a masjid with thirteen appeals could not reach the
+  thirteenth by any route at all — not by number, because it was never printed, and not by name
+  either, because it was not in the list being searched. So a **number** may only ever index a line
+  that was actually shown, a **name** is matched against every appeal the masjid has, and the menu
+  says how many did not fit, since an appeal that is simply missing from a list reads as one the app
+  has lost.
+- **A miss re-asks once with `ok:true`, then gives up with `ok:false`.** Any `ok:false` ends the
+  exchange, so it is the right answer for "I give up" and the wrong one for "try again" — but
+  re-asking for ever would leave a confused sender captured until the platform's timeout, with their
+  ordinary conversation being read as answers.
+
+## Notification settings live in this app (v0.43.0)
+
+Six events, three channels each, chosen per event: the OpenMasjidOS alert, a specific email address,
+and a WhatsApp destination. One helper — `raise()` in `index.ts` — is the only door any of it leaves
+through, and `NOTIFY_ALERT_ID` beside `NOTIFY_EVENTS` is the only place an event's manifest alert id
+is written down.
+
+### Why the settings are here and not only in OpenMasjidOS
+
+The platform's alerts matrix is good at exactly one thing: reaching **the admin's own** address. It
+cannot email the treasurer, it cannot send anybody a WhatsApp message, we can never read what it is
+set to (it is tRPC-only, behind the admin's session), and it is not where a masjid would look for
+"tell Yusuf about refunds". So the platform keeps owning *delivery* and this app owns the *choice*.
+
+That is also why the first channel is labelled **"your OpenMasjidOS inbox"** and never "email me". It
+is an **AND** with the admin's matrix: ticking it means *we will raise this*, never *this will
+arrive*. Worse, a `delivered: false` comes back with no reason, so not-routed, no-address-configured
+and attempted-but-failed are indistinguishable — `disabled_by_admin` is the one honest signal, and the
+per-row test reports it in those words. An admin who reads the tick as a guarantee stops looking for
+the real switch, which is the failure this wording exists to prevent.
+
+### `notify()` is gone
+
+"A donation arrived" used to go out through `POST /api/fabric/notify`, which reaches the masjid's
+**webhook only**. So the notification every masjid actually wants could never reach an inbox, however
+the alerts matrix was set. Two new declared alert ids — `donation-received` and `donation-recovered` —
+are what make "email is on by default" true rather than aspirational, and the alert channel then
+strictly dominates the relay: same webhook, plus the admin's email, per event, with an admin on/off.
+Keeping both would have posted twice to one webhook for one event, so the relay and its diagnostic
+route were removed.
+
+### The OS channel is on by default for every event, and the volume risk that comes with it
+
+This was decided explicitly, against a raised objection, so the reasoning is worth keeping.
+
+`donation` fires on every transaction, and the platform **defaults a newly-declared alert id to
+email+webhook ON**, persisting only non-defaults — so a masjid updating into this gets an email per
+donation without having asked, and during a Ramadan appeal that is hundreds. Alert mail is also
+rate-limited on a bucket shared with the platform's own alerts and with this app's, so a flood of good
+news can push `payment-failed` — *nobody can give at all* — behind it.
+
+The decision was to keep the default consistent (every event on) and rely on **`minAmount`**, which is
+why the donation row carries "only if it's at least…" beside its switches rather than in a sub-menu.
+If a masjid reports being buried, that field — or turning that one row off — is the answer. Changing
+the default is not, without saying so in a release note.
+
+WhatsApp is the opposite and is not a matter of taste: **off for every event**, always. An update must
+never begin sending messages from a masjid's phone number on their behalf.
+
+### The WhatsApp switch is separate from the number
+
+`whatsappOn` is its own boolean rather than "a non-empty number means on". Two reasons: an admin can
+mute the channel for a month without losing what they typed, and a tick box gets to mean what a tick
+box normally means. Both must be true to send, clearing the number also clears the switch (so a tick
+never sits beside an empty field), and a row written before the switch existed reads a stored number
+as **on** — otherwise the upgrade that added the switch would have silently stopped the very messages
+it was meant to make clearer.
+
+### Two floods that were already there
+
+`alertAccountRefusal` had a once-per-campaign-per-day guard. The two **intent-failure** sites had
+nothing at all — one notification per failed attempt, from an unauthenticated public endpoint. That
+was survivable at one channel and is not at three, so both are capped at one an hour. The email
+channel also shares this app's mail budget with **donor receipts and refund notices**, and the refund
+notice deliberately has no outbox — so it is what a flood would silently lose. That is the second
+reason the per-donation event is opt-in.
+
+### What the recipients may see
+
+`raise()`'s `title` and `text` are read by somebody **outside** the masjid's admin account, whom the
+platform never vetted. No body names a donor — §13 and §11.3 already required that, and this channel
+makes it load-bearing for a third party. Adding `${donorName}` to a title would be the leak. The
+audit line records counts only, never an address and **not a masked number either**: in a small
+community the last two digits still name somebody.
+
+### Refuse, never repair — including a leading zero
+
+An address must be exactly one address: the platform's own check is a strict single-address regex and
+a comma list comes back `bad_recipient`, which `raise()` swallows, so an admin who types
+`treasurer@x, chair@x` would get total silence. And a number keeps the country-code rule, now with the
+check that makes the error message honest: **a leading zero is a national trunk prefix, never a
+country code.** The length floor alone accepts `07700900123` — eleven digits — and the platform would
+address it as `07700900123@c.us`, somebody else's number or nobody's. Found by probing the live route,
+not by reading the code.

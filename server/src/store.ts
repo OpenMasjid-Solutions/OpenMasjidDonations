@@ -172,6 +172,126 @@ export const EMAIL_RECEIPT_DEFAULT: EmailReceipt = {
   accent: '',
 };
 
+// ── Who gets told what ────────────────────────────────────────────────────────
+/**
+ * Every notification this app can raise. One id per real EVENT, not per channel — the channels are
+ * chosen per event below, so adding a channel later never means renaming these.
+ *
+ * Each maps to a declared alert id in `manifest.yaml` (kebab-case there, camelCase here); the
+ * platform 400s an alert id it was not told about, so the two lists must stay in step.
+ */
+export const NOTIFY_EVENTS = ['donation', 'donationRecovered', 'refund', 'planStopped', 'paymentFailed', 'tuitionFailed'] as const;
+export type NotifyEventId = (typeof NOTIFY_EVENTS)[number];
+
+/**
+ * The declared `alerts:` id in `manifest.yaml` for each event.
+ *
+ * Kept here, beside the event list, because the platform **400s an alert id it was not told about**
+ * — so these two lists and the manifest are one contract in three places, and a rename that misses
+ * one turns a notification into a silent failure. `store.test.ts` asserts every event has an id.
+ *
+ * Note `donation` and `donationRecovered` were added to the manifest in v0.43.0. Before that, "a
+ * donation arrived" went out through `notify()`, which reaches the masjid's **webhook only** — so
+ * there was no way for the most-wanted notification of all to reach an inbox. Giving it an alert id
+ * is what makes "email is on by default" true rather than aspirational.
+ */
+export const NOTIFY_ALERT_ID: Record<NotifyEventId, string> = {
+  donation: 'donation-received',
+  donationRecovered: 'donation-recovered',
+  refund: 'donation-refunded',
+  planStopped: 'plan-stopped',
+  paymentFailed: 'payment-failed',
+  tuitionFailed: 'tuition-record-failed',
+};
+
+/**
+ * The three ways one event can reach a person, chosen independently.
+ *
+ * Independent, not a priority list: a masjid may well want the treasurer messaged on WhatsApp AND
+ * the record kept in the admin inbox. A channel that is off or unavailable never suppresses another.
+ */
+export interface NotifyChannels {
+  /**
+   * Raise the OpenMasjidOS **alert** for this event, which reaches the admin's own email and webhook.
+   *
+   * ON by default for every event — this is the channel a masjid already has, and the one that needs
+   * no setup. Note it is an **AND** with the admin's own matrix in OpenMasjidOS → Settings → Alerts:
+   * we ask the platform to deliver, the platform still honours the admin's per-alert channel
+   * choices, and `disabled_by_admin` is a normal answer. Turning this on here therefore means "we
+   * will raise it", never "it will definitely arrive" — and the panel says so, because an admin who
+   * reads it as a guarantee would stop looking for the real switch.
+   */
+  os: boolean;
+  /**
+   * A specific email address, sent through the platform's email provider. '' = off, and off by
+   * default: the OS alert already reaches the admin, so this is for somebody who is NOT them — the
+   * treasurer, the school office — and we cannot guess who that is.
+   */
+  email: string;
+  /**
+   * A specific WhatsApp destination: digits with a country code, or an approved group id.
+   *
+   * `whatsappOn` is a SEPARATE switch rather than "non-empty means on", so an admin can turn the
+   * channel off for a month without losing the number they typed — and so the tick box in the panel
+   * means what a tick box normally means. Both must be true to send.
+   *
+   * Off by default for every event, deliberately: WhatsApp is an unofficial client whose number can
+   * be banned, and the platform paces every message under a daily cap shared with every other app —
+   * so it is something a masjid opts into per event, never something an update switches on for them.
+   */
+  whatsapp: string;
+  whatsappOn: boolean;
+}
+
+export interface NotifySettings {
+  /** Prefill for the form only. NEVER consulted when sending: an event with an empty `email` is off,
+   *  full stop. A default that silently became the recipient would be how a masjid discovers they
+   *  have been emailing the wrong person for a month. */
+  defaultEmail: string;
+  defaultWhatsapp: string;
+  /** Don't raise `donation` below this, in MINOR units. 0 = every donation.
+   *
+   *  Matters most for WhatsApp, where the platform spaces messages 6–20s apart under hourly and
+   *  daily caps shared with every other app on the box: a busy Friday of £2 gifts would spend the
+   *  whole allowance on good news and push the refunds and failures behind it. Applied to all three
+   *  channels so the three never disagree about what happened. */
+  minAmount: number;
+  events: Record<NotifyEventId, NotifyChannels>;
+}
+
+/** A partial update — `events` and each channel set within it are themselves partial, so a form can
+ *  send one toggle without restating everything (and a new event can be added without an older
+ *  client wiping it). */
+export type NotifyPatch = Partial<Omit<NotifySettings, 'events'>> & {
+  events?: Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+};
+
+/** OS alert on, the other two off — "the channel you already have, and nothing switched on for you". */
+const CHANNELS_DEFAULT: NotifyChannels = { os: true, email: '', whatsapp: '', whatsappOn: false };
+
+/**
+ * The OS channel is ON for every event, `donation` included — Hasan's call, made after the risk
+ * below was put to him.
+ *
+ * The risk, recorded so nobody has to rediscover it: `donation` fires on every transaction, and the
+ * platform defaults a newly-declared alert id to email+webhook ON while persisting only non-defaults
+ * — so a masjid updating into this gets an email per donation without having asked, and during a
+ * Ramadan appeal that is hundreds. Alert mail is also rate-limited on a bucket shared with the
+ * platform's own alerts and with this app's, so a flood of good news can push `payment-failed` — the
+ * one that means nobody can give at all — behind it.
+ *
+ * `minAmount` is what keeps that in hand, and it is why the donation row carries the "only tell me
+ * about donations of at least…" field right beside its switches rather than somewhere in a
+ * sub-menu. If a masjid ever reports being buried, that field (or turning this one row off) is the
+ * answer — not a change of default, which was considered and decided against.
+ */
+export const NOTIFY_DEFAULT: NotifySettings = {
+  defaultEmail: '',
+  defaultWhatsapp: '',
+  minAmount: 0,
+  events: Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, { ...CHANNELS_DEFAULT }])) as Record<NotifyEventId, NotifyChannels>,
+};
+
 export interface Donation {
   id: string;
   campaignId: string;
@@ -687,6 +807,95 @@ export class Store {
   }
   setEmailStatus(status: string): void {
     this.setRaw('email_status', status);
+  }
+
+  /**
+   * Who gets told what. Never holds a donor's address or number — every recipient here is somebody
+   * the admin typed in themselves (see NotifySettings).
+   *
+   * Reads from `notify`, and MIGRATES the old `whatsapp` key on first read if `notify` is absent.
+   * That migration matters even though the old shape only ever shipped on 0.43.0-dev.2/3: a masjid
+   * on the development channel configured real recipients, and losing them silently would mean the
+   * refund notification they set up simply stops arriving with nothing to see.
+   */
+  getNotify(): NotifySettings {
+    // `getJson` answers {} for a value that will not parse, so "present" is not enough: a truncated
+    // write would otherwise drop a dev.3 masjid onto all-defaults AND skip the migration, losing the
+    // recipients they configured with nothing to show why.
+    const stored = this.getRaw('notify') ? this.getJson<NotifySettings>('notify') : {};
+    const s: NotifyPatch = Object.keys(stored).length > 0 ? stored : this.migrateWhatsAppSettings();
+    const events = {} as Record<NotifyEventId, NotifyChannels>;
+    const given = (s.events ?? {}) as Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+    for (const id of NOTIFY_EVENTS) {
+      const c = given[id] ?? {};
+      events[id] = {
+        // An event the stored settings say nothing about — a fresh install, or one added by an
+        // update — takes the same default as a new install would, so there is exactly one answer to
+        // "is this on?" and `donation` cannot become a flood by the back door.
+        os: typeof c.os === 'boolean' ? c.os : NOTIFY_DEFAULT.events[id].os,
+        email: typeof c.email === 'string' ? c.email.trim().slice(0, 200) : '',
+        whatsapp: typeof c.whatsapp === 'string' ? c.whatsapp.trim().slice(0, 64) : '',
+        // Absent on a row written before the switch existed: a stored number meant "on" then, and
+        // must keep meaning it now, or an upgrade silently stops a masjid's WhatsApp messages.
+        whatsappOn: typeof c.whatsappOn === 'boolean' ? c.whatsappOn : !!(typeof c.whatsapp === 'string' && c.whatsapp.trim()),
+      };
+    }
+    return {
+      defaultEmail: typeof s.defaultEmail === 'string' ? s.defaultEmail.trim().slice(0, 200) : '',
+      defaultWhatsapp: typeof s.defaultWhatsapp === 'string' ? s.defaultWhatsapp.trim().slice(0, 64) : '',
+      minAmount: Math.max(0, Math.round(s.minAmount ?? 0)),
+      events,
+    };
+  }
+
+  /**
+   * Carry a 0.43.0-dev WhatsApp configuration into the per-event model. Read-only — the result is
+   * persisted by the next `setNotify`, so a masjid that never opens the screen keeps being migrated
+   * consistently on every boot rather than depending on a write having happened.
+   *
+   * The old shape had ONE list of numbers plus an optional group, and per-event booleans. A single
+   * destination per event is the new shape, so we take the first number if there was one and fall
+   * back to the group — and only for events that were actually switched on, and only if the whole
+   * feature was enabled. `os` comes out true throughout, which is the new default and matches what
+   * those masjids were already getting from the alerts matrix.
+   */
+  private migrateWhatsAppSettings(): NotifyPatch {
+    const old = this.getJson<{
+      enabled?: boolean;
+      numbers?: unknown;
+      groupId?: string;
+      events?: Partial<Record<string, boolean>>;
+      minAmount?: number;
+    }>('whatsapp');
+    if (!old || Object.keys(old).length === 0) return {};
+    const numbers = (Array.isArray(old.numbers) ? old.numbers : []).filter((n): n is string => typeof n === 'string' && !!n.trim());
+    const target = old.enabled ? (numbers[0] ?? (old.groupId || '')) : '';
+    const events: Partial<Record<NotifyEventId, Partial<NotifyChannels>>> = {};
+    for (const id of NOTIFY_EVENTS) {
+      // `donationRecovered` is new and had no old toggle; it follows the `donation` choice, which is
+      // the same kind of news about the same money.
+      const wasOn = !!old.events?.[id === 'donationRecovered' ? 'donation' : id];
+      // `os` takes the SAME default a fresh install would, rather than being hardcoded, so there is
+      // exactly one answer anywhere to "is this channel on by default?".
+      events[id] = { os: NOTIFY_DEFAULT.events[id].os, email: '', whatsapp: wasOn ? target : '', whatsappOn: wasOn && !!target };
+    }
+    // Deliberately silent. `raise()` reads these settings on EVERY notification, and this runs until
+    // something writes `notify` — so a line here would print once per donation, for ever, on a box
+    // whose admin never opens the screen.
+    return { minAmount: Math.max(0, Math.round(old.minAmount ?? 0)), defaultWhatsapp: target, events };
+  }
+
+  setNotify(patch: NotifyPatch): NotifySettings {
+    const cur = this.getNotify();
+    const events = { ...cur.events };
+    for (const [id, c] of Object.entries(patch.events ?? {})) {
+      if (!(NOTIFY_EVENTS as readonly string[]).includes(id)) continue; // ignore an unknown event id
+      events[id as NotifyEventId] = { ...events[id as NotifyEventId], ...clean(c ?? {}) };
+    }
+    const merged: NotifySettings = { ...cur, ...clean({ ...patch, events: undefined }), events };
+    merged.minAmount = Math.max(0, Math.round(merged.minAmount));
+    this.setRaw('notify', JSON.stringify(merged));
+    return merged;
   }
 
   /** Cached Stripe Product id per account + mode (test/live), for recurring prices. */
@@ -1426,6 +1635,73 @@ export class Store {
    *  a refunded donation was still a donation that arrived, and quietly deducting it from the
    *  count would make the ledger (which still lists the row) disagree with the headline.
    *  `totalRefunded` is reported separately so the difference is never a mystery. */
+  /** Money and count for one day or month, net of refunds, from the LOCAL ledger.
+   *
+   *  `prefix` is matched against `created_at` — 'YYYY-MM-DD' for a day, 'YYYY-MM' for a month.
+   *  Timestamps are stored as the server's own ISO strings, so this is the same day boundary the
+   *  panel's "this month" figure uses; a masjid and its box are in the same place.
+   *
+   *  Exists for the WhatsApp commands, which have a ten-second budget and someone holding a phone:
+   *  two indexed prefix scans, no Stripe, no full table read. */
+  raisedInPeriod(prefix: string): { raised: number; count: number } {
+    const r = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(amount - refunded_amount), 0) AS s, COUNT(*) AS n
+         FROM donations WHERE status = 'succeeded' AND created_at LIKE ?`,
+      )
+      .get(`${prefix}%`) as { s: number; n: number };
+    return { raised: Number(r.s), count: Number(r.n) };
+  }
+
+  /** Monthly giving, from LOCAL rows only — no Stripe call, so it is safe on a command's clock.
+   *
+   *  "Donors" counts distinct subscriptions that have actually TAKEN money: a recurring row is
+   *  written at /intent, before the card is entered, so counting every one would report every
+   *  abandoned checkout as a monthly donor. `perMonth` sums the most recent payment on each of
+   *  those, which is what they are currently giving; `thisMonth` is what has arrived this month.
+   *
+   *  `activeSince` is what keeps the answer TRUE as the years pass, and it is the reason this is
+   *  not a one-line SUM. Nothing local records that a plan ENDED — a cancellation happens at
+   *  Stripe, and a masjid on a LAN may never see the webhook — so a plan stopped two years ago
+   *  still has its succeeded rows sitting in this table. Counting those, a masjid three years in
+   *  would be told it had fifty monthly donors giving about £2,000 a month when the truth was ten
+   *  and £400: confidently wrong, about money, in the flattering direction.
+   *
+   *  A live monthly plan is charged every month, so "nothing since `activeSince`" is the one local
+   *  signal that a plan is no longer running. Those are returned separately as `dormant` rather
+   *  than dropped, so a caller can explain the smaller figure instead of just presenting it. Pass
+   *  nothing to count every plan ever, which is the old behaviour. */
+  monthlyGiving(monthPrefix: string, activeSince = ''): { donors: number; perMonth: number; thisMonth: number; dormant: number } {
+    const rows = this.db
+      .prepare(
+        `SELECT subscription_id AS sub, amount - refunded_amount AS net, created_at AS at
+         FROM donations
+         WHERE status = 'succeeded' AND recurring = 1 AND subscription_id <> ''
+         ORDER BY created_at ASC`,
+      )
+      .all() as { sub: string; net: number; at: string }[];
+    // Ascending, so the last write for a subscription wins = its most recent payment.
+    const latest = new Map<string, { net: number; at: string }>();
+    let thisMonth = 0;
+    for (const r of rows) {
+      latest.set(String(r.sub), { net: Number(r.net), at: String(r.at) });
+      if (String(r.at).startsWith(monthPrefix)) thisMonth += Number(r.net);
+    }
+    let donors = 0;
+    let perMonth = 0;
+    let dormant = 0;
+    for (const v of latest.values()) {
+      // ISO-8601 throughout, so a lexical compare IS a chronological one.
+      if (activeSince && v.at < activeSince) {
+        dormant += 1;
+        continue;
+      }
+      donors += 1;
+      perMonth += v.net;
+    }
+    return { donors, perMonth, thisMonth, dormant };
+  }
+
   metrics(): {
     totalRaised: number;
     count: number;

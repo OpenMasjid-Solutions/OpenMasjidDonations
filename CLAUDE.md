@@ -32,7 +32,7 @@ If it prints anything else, `git checkout dev` first. If you are on `main`, you 
 2. **Never commit to `main`.** Not for a hotfix, not for a typo, not for a one-line docs fix, not because something is urgent. There is no exception that does not start with Hasan saying so.
 3. **Never merge, rebase onto, cherry-pick into, or fast-forward `main` autonomously.** Not even when `dev` is green and `main` is behind. Being obviously-correct is not authorisation.
 4. **`main` moves only on the explicit words "push to main"** (or "merge to main") from Hasan. Nothing else counts — not "ship it", not "release it", not approving a diff, not merging a PR into `dev`. If you think a release is due, *say so and wait*.
-5. **That push is a release.** When told, do the full runbook in §16: bump `manifest.yaml` + both `package.json` files, add the `web/src/changelog.ts` entry, merge `dev` into `main`, tag `vX.Y.Z`, let CI publish the stable image, digest-pin `docker-compose.yml`, then update the OpenMasjidAPPS `registry.yaml` entry.
+5. **That push is a release.** When told, do the full runbook in **§16.1**, whose step order is load-bearing: bump the version, let CI publish the image, commit the `@sha256` digest, and **tag the digest-pin commit — not the commit before it.** Then open a **pull request** against the catalog's `dev`, never a push to the catalog's `main`.
 6. **Restore the pinned image line when merging to `main`.** On `dev`, `docker-compose.yml` points at the moving `:dev` tag with no digest. `main` must always carry `:<version>@sha256:<digest>`. A merge that carries the `:dev` line into `main` would point every stable install at a development build — check this line explicitly, every time.
 
 ### After every push to `dev`, ask (required)
@@ -122,8 +122,11 @@ You are building an OpenMasjidOS app. Two repositories define how that is done. 
   ```yaml
   - id: donations
     repo: OpenMasjid-Solutions/OpenMasjidDonations
-    ref: v0.1.0
+    ref: vX.Y.Z          # the human label
+    commit: <40-char SHA> # what is actually fetched
+    dev_ref: dev          # the development channel, tracked automatically
   ```
+  That entry is changed **only by a pull request against the catalog's `dev` branch** — see **§16.1**. Never a push to the catalog's `main`.
 - Container image published to **GHCR** (match Display's naming convention, e.g. `ghcr.io/openmasjid-solutions/openmasjiddonations:<version>`). Confirm Display's exact image path and mirror it.
 
 ---
@@ -218,7 +221,7 @@ Login-protected (platform SSO when embedded; local password fallback). **Eight t
 - **Thank-you** — the on-screen thank-you and the emailed receipt's design, with "send me a test".
 - **Large gifts** — the threshold, wording and QR image for the bank-transfer suggestion.
 - **Payments** — Stripe accounts (local and vaulted), the site default, currency, test/live indicator, and the optional per-account webhook URL.
-- **Settings** — masjid details, appearance, notifications, email receipts on/off, public access.
+- **Settings** — masjid details, appearance, notifications, email receipts on/off, **WhatsApp** (admin notifications, hidden unless the platform says it is available), public access.
 
 Plus a guided first-run setup, and an account menu carrying the version, **"What's new"**, and the AGPL **"Source code"** link to this repo.
 
@@ -242,7 +245,9 @@ Uploaded images and all settings/records live on the data volume (`/data` in the
 
 > **The files on disk are the specification; this section describes them.** `manifest.yaml` and `docker-compose.yml` are read verbatim by the OpenMasjidAPPS catalog, and both **deliberately deviate from APP_MANIFEST_SPEC where Display and the platform actually differ from it** (the §2 prime directive). Those deviations are enumerated once, with reasons, in `docs/ARCHITECTURE.md` → *Where this app intentionally differs from the platform contract / Display*. Read that before "fixing" either file to match the spec — the last audit raised the mismatch as DONATIONS-049 and the answer was that the spec had drifted, not the app.
 
-**`manifest.yaml`** — as shipped: `id: donations`, `author: OpenMasjid-Solutions`, `license: AGPL-3.0-only`, `icon: icon.svg`, `screenshots: [screenshots/1.svg]`, a long `description`, and the capability flags `sso`, `notifications`, `https`, `stripe`, `domain`, `email`, plus `alerts:` (five declared ids) and `fabric.consumes: [students/billing]`.
+**`manifest.yaml`** — as shipped: `id: donations`, `author: OpenMasjid-Solutions`, `license: AGPL-3.0-only`, `icon: icon.svg`, `screenshots: [screenshots/1.svg]`, a long `description`, and the capability flags `sso`, `notifications`, `https`, `stripe`, `domain`, `email`, `whatsapp`, plus `fabric.consumes: [students/billing]`, `alerts:` (**seven** declared ids — the six events in §8's Settings tab, plus `test`) and `commands:` (**five**, all read-only: `today`, `month`, `totals`, `appeal`, `monthly`).
+
+Two of those lists are contracts with code, not decoration, and a rename that misses a file fails **silently** — the platform 400s an alert id it was not told about, so the switch says on and nothing ever arrives. `server/src/notify.test.ts` reads this file and fails when an event has no declared id, which is the only thing that makes that loud. `commands:` must **never** appear in `fabric.provides` (§13).
 
 Three absences are deliberate and each is load-bearing:
 
@@ -254,7 +259,7 @@ Three absences are deliberate and each is load-bearing:
 
 Known gap, recorded not hidden: the container still **runs as root** and the root filesystem is not `read_only`. Both need an entrypoint that chowns the volume plus one real container start to prove the database is still writable — see `docs/audit/ACTION_REQUIRED.md` §4d.
 
-**Registry.** The app is listed in OpenMasjidAPPS `registry.yaml` with `ref:` (the stable `vX.Y.Z` tag, plus an immutable `commit:`) and `dev_ref: dev`. Updating that entry is the last step of the release runbook (§16).
+**Registry.** The app is listed in OpenMasjidAPPS `registry.yaml` with `ref:` (the stable `vX.Y.Z` tag) plus the `commit:` that is actually fetched, and `dev_ref: dev`. That entry is changed by **a pull request against the catalog's `dev`** — the last step of the release runbook, **§16.1**. A catalog maintainer, not us, moves the catalog's `main`.
 
 ---
 
@@ -303,6 +308,19 @@ Match the OpenMasjid family — the polish must equal Display and the dashboard.
 - **Monthly plans act only on subscriptions WE created, and their catch-up may only add real money (v0.38.0):** the plans index is the LOCAL `donations` rows (`recurring = 1` + a `subscription_id`), and **every plan write path — admin *or donor* —** resolves the id through that index before touching Stripe: the `/api/admin/plans…` list and all four write routes, **and the donor's own `/api/public/plan/{lookup,cancel}` (v0.42.0), which must use `findSeed(planSeeds(), …)` and NOT `getDonationBySubscription` — the latter lacks the `recurring = 1 AND subscription_id <> ''` filter that makes the index trustworthy.** That donor path is unauthenticated (a 128-bit token emailed to the donor), so it must also never reach `syncPlan` — that helper lists invoices and INSERTs donation rows, and its only guard is a `Sec-Fetch-Site` check that cannot hold for a link in an email, so a mail scanner's prefetch would drive writes against the masjid's Stripe account. Read state with `fetchPlanState` alone, and never write an audit line with `audit(req, …)` there (its actor falls back to `local admin`, which would file a donor's cancellation as the masjid's own action). Never widen it to `subscriptions.list`: a Fabric-vaulted Stripe account is **shared** with the platform's other apps, so that would show (and let an admin cancel) another app's subscriptions, and it is also the mechanism that keeps tuition out (tuition is written to `student_payments`, never `donations` — structurally absent, not filtered). Renewal **reconciliation** may only INSERT a donation for a **paid** invoice, keyed on its PaymentIntent (UNIQUE = idempotent), stamped with the date the money actually arrived; never for a failed/open one, and it must stay **silent** (no receipt email, no `notify`) — it is a catch-up, not an event. Abandoned monthly sign-ups (a `/intent` row whose card was never entered) may only be **hidden after** a sync that was allowed to reconcile — never filtered out of the index that *feeds* the sync, because a first payment that succeeded but was never confirmed looks identical locally and reconciliation is the only thing that can rescue it. And `cancel_at_period_end` is not a "take one more payment" option (Stripe raises no further invoice) — never reintroduce it as one.
 - **Refunds: Stripe owns how much is left, and nothing is written until it confirms (v0.42.0).** A refund is recorded as an **amount** (`donations.refunded_amount`), never as a status — `status` stays the *payment's* outcome, because the money really did arrive and a status cannot express a part refund. Every money figure the masjid sees is therefore `amount - refunded_amount`. The route must **read the charge from Stripe first** and sync our row to it before deciding anything: a masjid can refund from Stripe's own dashboard and a LAN-only box may never see the `charge.refunded` webhook, so our row is not evidence. `setDonationRefund` is monotonic and clamped to `amount`, which is what makes a replayed or out-of-order webhook harmless. The idempotency key is **derived** (`refund:<pi>:<already>:<amount>`), never random. And the account is resolved by the id **recorded on the donation** (`accountById`), never by the campaign's current choice — money taken on account A is refunded on account A for ever.
 - **Per-appeal Stripe accounts: an existing appeal's destination depends only on data that existed before the upgrade (v0.42.0).** `campaigns.payment_account` defaults to `''` with **no backfill and no inference** from `stripe_account_id`, and the `''` branch of `resolveAccountFor` is the pre-v0.42.0 resolver verbatim — the globally-chosen vault account when configured, else the campaign's legacy local account read *straight from the local table*, not through the widened `accountById`. An explicit choice is **honoured or refused**, never substituted: an unresolvable or unparseable reference stops that appeal taking cards rather than quietly settling elsewhere (`fabric:` with an empty id would reach the platform as `?account=` omitted, which it answers with its **first** account, and the ledger would then record the substitute's id — nothing would look wrong). `accountById` is **bounded by `store.knownAccountIds()`**: `/api/stripe/webhook/:accountId` is unauthenticated by necessity, so without the bound a stranger could name arbitrary accounts and make us fetch each from the platform vault. A vault account must **never** be written into `stripe_accounts` (local resolves first, so a stale copy would shadow the real one for ever). And `fetchFabricStripeDetailed` must keep splitting non-ok by status — 404/403 is an answer worth caching, 429/5xx is *no information* and must serve the last-good copy, or one throttled request becomes a donation outage and the reboot watcher restarts a box mid-donation.
+- **WhatsApp is an ADMIN channel and never LOAD-BEARING (v0.43.0).** The masjid links their own number via the OpenWA gateway in OpenMasjidOS; we POST `/api/fabric/whatsapp` and never see the gateway, its credentials or the number. Three rules, and none is ours to relax because the risk lands on the masjid's phone number:
+  - **Never anything auth-critical, and never a donor.** No codes, no password resets, no payment confirmation a donor is waiting on. It is an unofficial client whose number can be restricted or banned at any moment. This app deliberately **collects no donor phone number at all**, so there is nothing here that could message one even by mistake.
+  - **WhatsApp is OFF by default for every event, and that one is not a matter of taste.** The OS alert channel defaults on; WhatsApp never does. An update must not begin sending messages from a masjid's own phone number on their behalf — the ban risk is theirs, not ours. `whatsappOn` is a separate boolean from the number so the switch means what it says, and a row predating it reads a stored number as on rather than silently going quiet.
+  - **This invariant was rewritten in v0.43.0, deliberately.** It used to say WhatsApp is "only ever a *second* copy of something that already went out" — which per-event notification settings make false, because `{os: false, whatsapp: '…'}` is now one click and an admin is entitled to choose it. The claim that survives, and the one that actually matters, is that **nothing depends on the message arriving**: the donation is in the database and in the panel regardless, no donor outcome and no money movement hangs on a notification, and every event remains reachable through the alerts matrix. Do not "restore" the old wording by forbidding the combination; the honest version is the one above.
+  - **`202 {queued:true}` is the only success, and it means QUEUED.** Never "sent", never a delivery receipt. The platform paces every message for every app at once — randomised 6–20s gaps, per-recipient cooldowns, hourly/daily caps, quiet hours that defer for hours — because ban risk attaches to the NUMBER rather than to the sender. So nothing may block on a send, retry a 4xx, or tell an admin a message was delivered. The daily cap is shared, which is why the "a donation was received" event has a `minAmount` floor: a Friday of £2 gifts would otherwise spend the masjid's whole allowance and push the refunds and failures behind it.
+  - **One recipient per call, and never a client-chosen target.** A group id comes only from `GET /api/fabric/whatsapp/groups` (the ones the *platform* admin approved — not the gateway's own list, which names every group the masjid's phone is in) and is re-verified against that list before we save it. A phone number is normalised with `toWhatsAppDigits`, which **refuses a number with no country code rather than guessing one** — a guess would send the masjid's donation figures to a stranger who happens to hold that number in the platform's default country.
+
+  Three wire details are easy to get backwards and every one of them fails *silently* — `whatsapp.test.ts` pins all three: `/groups` returns **`{ groups: [...] }`, not a bare array**; `reason` is always a word and is **`"ready"`** when available, never null; and `media` **absent means no**.
+- **WhatsApp admin commands are read-only, aggregate, and authenticated by two headers (v0.43.0).** `POST /fabric/commands/run` sits **outside every `/api` guard and carries no cookie** — the headers *are* the authentication, so `isPlatformCall` must keep checking **both**: `x-openmasjid-app-secret` equal to our own secret in **constant time**, and `x-openmasjid-caller-app` **exactly `omos:platform`**. That value is the one caller id no app can present (the colon is outside the charset app ids are validated against), and without it any app that learned our secret could reach this handler through the app-to-app broker — a different trust boundary sharing the `/fabric` prefix. For the same reason `commands` must **never** appear in `fabric.provides`; the platform refuses it at install.
+  - **Every command is read-only and aggregate, and that is a security property, not a scope decision.** In a channel this informal the blast radius of a mistake should be a wrong figure on a screen, never a closed appeal or a refunded donation. **No donor is ever named** — no name, email or reference — because a WhatsApp message is forwardable and screenshottable and the donor never agreed to be in one. The formatters in `commands.ts` are given counts and totals and nothing else, which makes that structural rather than a habit; `commands.test.ts` fails loudly if a parameter that could carry a donor is ever added.
+  - **Local data only.** Ten-second timeout, someone holding a phone: every figure comes from SQLite. Nothing here may call Stripe — `monthly` deliberately reports what the local recurring rows say rather than syncing plans. **Which is exactly why `monthlyGiving` takes a recency window:** nothing local records that a plan ENDED (that happens at Stripe, and a LAN box may never see the webhook), so counting every subscription that ever took money would tell a masjid three years in that it had fifty monthly donors giving £2,000 a month when the truth was ten and £400. A live plan is charged monthly, so "nothing in two months" is the one local signal that it stopped; those are reported as dormant rather than dropped, because a figure that quietly shrank is unexplainable from a phone.
+  - **The menu may be capped; the SEARCH may not.** One WhatsApp message has to stay readable, so `appeal` lists twelve — but a name is matched against every appeal the masjid has, and the reply says how many did not fit. Capping the list that gets *searched* made the thirteenth appeal unanswerable by every route at once: not by number (never printed) and not by name (not in the list being matched). A number, conversely, may only ever index a line that was actually shown.
+  - **A follow-up exchange can end without us** (3 minutes idle, 15 total, 12 turns, `cancel`, or any new `!` command) and we are not told. So the token carries a step and an attempt and **nothing a later turn needs to be correct**, and nothing is ever left half-applied waiting for a reply that may not come — which read-only commands guarantee outright. Any `ok:false` also ends the exchange, so it is the right answer for "I give up", never for "try again".
 - **Suppressing Stripe's receipt requires believing we can send our own (v0.42.0).** `receipt` is decided ONCE at intent and never re-evaluated at confirm (re-deciding was the double/zero-receipt bug). Going branded suppresses Stripe's built-in receipt, so it is gated on `emailLikelyAvailable()` — true unless we hold *positive* evidence email cannot work (`not_configured` / `no-fabric`), persisted across restarts via `store.setEmailStatus`. It must **not** be tightened back to "a previous send succeeded": that was a closed loop (only a permitted send could set `'ok'`, and only `'ok'` permitted a send) which made the branded receipt unsendable on every fresh container. The monthly setup letter deliberately bypasses this gate *and* the receipts toggle — there is no Stripe receipt to suppress on that branch, and that letter carries the donor's only self-service way to stop a charge on their card.
 
 ---
@@ -342,9 +360,75 @@ For local dev run the server on :8080 and `cd web && npm run dev` on :5173 (Vite
 - **Add a `web/src/changelog.ts` entry with every release** — it's what the "What's new" item in the account menu shows. Plain, non-technical, what changed *for the masjid*; same voice as the App Store note in OpenMasjidAPPS `registry.yaml`, since they see both. **Only the major changes go in a release entry**; the running detail lives in `dev`'s `Unreleased` entry — see the Branching policy. It is loaded on demand, so never import it eagerly (that would put admin-only text in the donation page's bundle).
 - **The version lives in FOUR files and they must agree**: `manifest.yaml` `version:` (the one CI reads and the catalog publishes), `server/package.json`, `web/package.json`, and the image tag in `docker-compose.yml`. There is deliberately **no `VERSION` file** (see `docs/ARCHITECTURE.md`); the server reports its version by reading the `package.json` shipped beside the runtime.
 - **Semver, `0.x` = pre-release.** Tag releases `vX.Y.Z`.
-- **GitHub Actions:** on a `v*` tag, build the multi-arch (amd64 + arm64) image and **push to GHCR** with the version tag (mirror Display's workflow). Then the app is added/updated in OpenMasjidAPPS `registry.yaml` with the new `ref`.
-- **Two channels.** The same workflow also publishes the moving `:dev` (+ immutable `:dev-<sha>`) pair from the `dev` branch. Stable tags come only from `main`/`v*`. See **Branching policy** at the top of this file — a release is the *only* thing that moves `main`, and only on Hasan's explicit "merge to main".
+- **GitHub Actions:** builds the multi-arch (amd64 + arm64) image and pushes it to GHCR. Both channels publish the exact `manifest.yaml` version as an immutable tag; only the moving alias differs (`:latest` for stable, `:dev` for development). The channel is decided by the git **ref**, not the event, so a manual run on `dev` can never publish `:latest`.
+- **Two channels.** The same workflow publishes the moving `:dev` (+ immutable `:dev-<sha>`) pair from the `dev` branch. Stable comes only from `main`/`v*`. See **Branching policy** at the top of this file — a release is the *only* thing that moves `main`, and only on Hasan's explicit "merge to main".
 - **A push to `dev` that touches only documentation needs no version bump.** `build-image.yml`'s `paths-ignore` covers `**/*.md`, `docs/**`, `screenshots/**`, `LICENSE` and `docker-compose.yml`, so those pushes publish nothing and there is no tag to collide with. Anything else — including a workflow-only change — needs a fresh `-dev.N`.
+
+---
+
+## 16.1 Getting a stable release into the OpenMasjidOS catalog
+
+**You cannot push to the catalog's `main`. Stable moves only through a catalog release, run by a catalog maintainer.** This section is the whole job; do not improvise around it.
+
+### Step order in THIS repo — the order is the point
+
+1. **Bump `manifest.yaml`** to the release version (plus both `package.json` files, and the image tag in `docker-compose.yml`).
+2. **Let CI build and publish the image.** Wait for it to go green.
+3. **Commit `docker-compose.yml` with the published image's `@sha256` digest.**
+4. **Tag the digest-pin commit — not the commit before it.** `git tag -a vX.Y.Z` on the step-3 commit itself. The tag goes on the commit that *contains* the `@sha256`, never on the merge commit that precedes it.
+
+> ### Tag the digest-pin commit, not the commit before it
+>
+> This is the single most-repeated mistake in this repo's release history, so it gets its own box.
+>
+> The merge commit and the digest-pin commit look interchangeable — the merge is where the version number changes, so it feels like "the release". It is not. **A tag on the merge commit names a `docker-compose.yml` that carries the *previous* release's digest, or no digest at all**, so anyone pinning your tag ships the wrong code under the new version number.
+>
+> ```bash
+> # WRONG — the tag names the merge; the digest lands in the NEXT commit
+> git merge --no-ff dev && git tag -a v0.12.0 && <CI publishes> && git commit -m "digest-pin"
+>
+> # RIGHT — the digest is already in the commit the tag names
+> git merge --no-ff dev && <CI publishes> && git commit -m "digest-pin" && git tag -a v0.12.0
+> ```
+>
+> **Verify before pushing the tag — it takes one command and there is no excuse for skipping it:**
+>
+> ```bash
+> git show vX.Y.Z:docker-compose.yml | grep image:   # MUST already contain @sha256:
+> git rev-list -n1 vX.Y.Z                            # MUST equal the digest-pin commit
+> ```
+>
+> If the tag is already pushed and wrong, **do not paper over it in the catalog PR**: `git tag -f` it onto the digest-pin commit, force-push the tag, and say so — or, if the tag cannot be moved, pin the correct `commit:` in the PR *and* flag in the PR description that `ref:` and `commit:` disagree and why.
+>
+> **This has already happened twice** — and a third time on **v0.42.0**, where the tag landed on the merge commit (compose reading a bare `:0.42.0`) and the digest pin went into the commit after it. Only the registry's `commit:` pointing at the right SHA kept masjids fetching correct content.
+
+### Step 2 — a PR against the catalog's `dev`
+
+Open a pull request against **`OpenMasjid-Solutions/OpenMasjidAPPS`, base branch `dev`, never `main`.** Change **only this app's own entry** in `registry.yaml` — never another app's, never `catalog.json`:
+
+```yaml
+  - id: donations
+    ref: v0.12.0        # the tag you just published — the human label
+    commit: <40-char SHA of the tagged commit>
+```
+
+**`commit:` is what actually gets fetched; `ref:` is only the human label.** Get it with:
+
+```bash
+git rev-list -n1 v0.12.0
+```
+
+If you followed the step order above, `ref` and `commit` are the same commit. **If they are not, pin the commit that has the correct digest** — the fetched content matters more than the label — and say so in the PR, because it means the tag is wrong and wants moving.
+
+### Step 3 — stop
+
+**A catalog maintainer runs the release that moves `main`.** Do not commit to the catalog's `main`, and **do not merge the catalog's `dev` into its `main`**: the two branches legitimately hold different builds of `catalog.json`, and merging them corrupts the stable column. Open the PR, say it is ready, and wait.
+
+### The dev channel needs none of this
+
+`dev_ref: dev` tracks this repo's `dev` branch automatically and the catalog rebuilds hourly, so **a dev build never needs a catalog PR**. Just keep the prerelease version (`X.Y.Z-dev.N`) and the version-tagged image current, and make sure **the image is published before the catalog can read the version that names it**.
+
+That last clause is the one thing our current flow only approximates. Version and compose move in ONE commit (see *Publishing a dev build*), so between the push and the build going green (~10 min) the tip of `dev` names a tag that does not exist yet; an hourly-cron rebuild landing in that window offers an image that cannot be pulled. It fails visibly and the post-publish `repository_dispatch` corrects it. If that window ever needs closing properly, the fix is to publish first via `workflow_dispatch` and push the bump after — not to split the commit, which breaks the dispatch (see the reasoning under *Publishing a dev build*).
 
 ---
 
@@ -365,5 +449,5 @@ Builds via the documented commands and `docker compose up -d`; `tsc`/lint clean;
   7. **Recurring (monthly)** subscriptions (+ optional webhook path).
   8. Donations log + stats + CSV export.
   9. Appearance/theming polish, animations, empty/edge states, friendly errors.
-  10. README.md (user-facing, in Display's style), screenshots, docs/ARCHITECTURE.md; tag `v0.1.0`; add the `registry.yaml` entry to OpenMasjidAPPS.
+  10. README.md (user-facing, in Display's style), screenshots, docs/ARCHITECTURE.md; tag `v0.1.0`; open a catalog PR for the `registry.yaml` entry (§16.1).
 - **Never** put the Stripe secret in the client or logs. **Never** assume inbound webhooks for the core flow. Ask before adding heavy dependencies or deviating from the contract.

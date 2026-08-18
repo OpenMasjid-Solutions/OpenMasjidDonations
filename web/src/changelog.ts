@@ -52,6 +52,19 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.43.0',
+    date: '2026-08-18',
+    notes: [
+      '**New: WhatsApp, for the people who look after the money.** If your masjid runs the WhatsApp gateway in OpenMasjidOS, the app can now send a message to a number you enter — or to a group your OpenMasjidOS admin has approved — when something happens worth knowing about. **Donors are never messaged, and this app never asks anyone for a phone number**: every number here is one of your own people. It is never switched on for you either, since it sends from your masjid’s own number, so that has to be your choice.',
+      '**You can also ask it for figures.** Message your masjid’s number with `!donations` and pick from the menu: what has come in today, this month next to the whole of last month, your overall totals, how a particular appeal is doing against its goal, or how many people give every month. Everything it answers is a **total** — no donor is ever named, because a WhatsApp message gets forwarded and screenshotted and that was never theirs to agree to. And nothing you can send it changes anything: it reads your figures back, it cannot close an appeal or refund a donation. Who is allowed to use it is set in OpenMasjidOS.',
+      '**All your notification settings are now in this app, under Settings → Notifications.** Six things you can be told about — a donation arriving, a refund, a monthly donor stopping their gift, donations breaking altogether, a tuition payment that didn’t reach OpenMasjid Students, and a donation that was found and added — and for each one you choose who hears it: your OpenMasjidOS inbox, a specific email address, a WhatsApp number, or an approved group. Any combination, or none, with a **Test** on every line. So refunds can reach whoever keeps the accounts while a broken payment setup reaches whoever fixes things.',
+      'Beside “a donation was received” there is a *only if it’s at least…* figure, worth setting if you would rather not hear about every £2 gift — it is the one notification that happens every single time somebody gives. Remember that OpenMasjidOS has its own switches too (Settings → Alerts) and both have to be on, which is why the panel says “your OpenMasjidOS inbox” rather than promising you an email.',
+      '**Light mode looks like it should now.** The page behind your panel stayed dark when you switched to light, so the panel was pale cards floating on a near-black background, with text that was hard to read. Light mode now has a light background of its own, and each of the nine wallpapers has a light version that keeps its colour: ocean is still blue, forest still green. Dark mode is untouched.',
+      '**A full security and code-health review went over the whole app**, including everything above. No new weakness was found; what it did find is fixed, and everything still outstanding is written up in the project’s own `docs/audit/` folder rather than kept in somebody’s head.',
+      'Nothing you have set up needs redoing, and your donations, appeals and monthly plans are all exactly as they were.',
+    ],
+  },
+  {
     version: '0.42.0',
     date: '2026-08-13',
     notes: [
