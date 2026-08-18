@@ -371,6 +371,22 @@ For local dev run the server on :8080 and `cd web && npm run dev` on :5173 (Vite
 
 **You cannot push to the catalog's `main`. Stable moves only through a catalog release, run by a catalog maintainer.** This section is the whole job; do not improvise around it.
 
+### The three things this runbook forgot, and what they cost
+
+Recorded here because each one was learned the expensive way, on 2026-08-18:
+
+1. **A tag is not a release.** `git tag` + `git push` leaves GitHub's Releases page empty. This repo
+   had **eight tags and zero published releases** — every one of them a release nobody could read the
+   notes for. Step 5 below now exists.
+2. **A release is not a catalogue entry.** OpenMasjidOS installs from
+   `OpenMasjidAPPS/main/catalog.json` **and nothing else**. Until a catalogue maintainer releases,
+   masjids keep getting the previous version however green this repo looks. Step 7 is the only check
+   that answers *"did it ship?"* — and it is not ours to make pass.
+3. **`commit:` must be the COMMIT sha, not the tag object's.** An annotated tag is its own object, so
+   `gh api …/git/ref/tags/vX.Y.Z --jq .object.sha` returns the **tag**, and the catalogue build then
+   404s. Use `git rev-parse vX.Y.Z^{commit}`. For v0.43.0 those were `2a1f947…` (tag) and `298702f…`
+   (commit) — one of them fetches nothing.
+
 ### Step order in THIS repo — the order is the point
 
 1. **Bump `manifest.yaml`** to the release version (plus both `package.json` files, and the image tag in `docker-compose.yml`).
@@ -378,7 +394,29 @@ For local dev run the server on :8080 and `cd web && npm run dev` on :5173 (Vite
 3. **Commit `docker-compose.yml` with the published image's `@sha256` digest.**
 4. **Tag the digest-pin commit — not the commit before it.** `git tag -a vX.Y.Z` on the step-3 commit itself. The tag goes on the commit that *contains* the `@sha256`, never on the merge commit that precedes it.
 
-> **Why the tag push must publish nothing.** This order only works because pushing the tag does not rebuild. It used to: `build-image.yml` triggered on `tags: ['v*']`, so the tag push republished `:X.Y.Z` at a fresh digest and the tag stopped resolving to the digest its own commit had just pinned. Every release before v0.43.0 hid this by tagging *first* and pinning after — which is the mistake in the box below, so the two faults were covering for each other. The trigger was removed in v0.43.0; if it ever comes back, this step order silently breaks again. **v0.43.0 itself was published under the old trigger, so its `:0.43.0` tag resolves to a rebuild (`sha256:a9aed99…`) while the compose pins the audited build (`sha256:285ce87…`). Both were built from the tagged commit and the pinned one is what every masjid pulls; nothing needs fixing, but do not be surprised by it.**
+> **Why the tag push must publish nothing.** This order only works because pushing the tag does not rebuild. It used to: `build-image.yml` triggered on `tags: ['v*']`, so the tag push republished `:X.Y.Z` at a fresh digest and the tag stopped resolving to the digest its own commit had just pinned. Every release before v0.43.0 hid this by tagging *first* and pinning after — which is the mistake in the box below, so the two faults were covering for each other. The trigger was removed in v0.43.0; if it ever comes back, this step order silently breaks again.
+>
+> **v0.43.0 was published under the old trigger, so it carries the divergence — and the diagnosis is worth keeping, because the obvious guess is wrong.** `:0.43.0` resolves to `sha256:a9aed99…`; the compose pins `sha256:285ce87…`. The two indexes name the **same amd64 manifest** and **different arm64 manifests**, which looks like a Raspberry Pi getting different code. It is not. Fetched and compared blob by blob:
+>
+> | | pinned `285ce87…` | tagged `a9aed99…` |
+> |---|---|---|
+> | amd64 manifest | `c528ccc6…` | `c528ccc6…` — identical |
+> | arm64 manifest | `e2223dfb…` | `aed1a1f7…` — differs |
+> | arm64: all 12 layer digests | | **identical** |
+> | arm64: `rootfs.diff_ids` | | **identical** |
+> | arm64: runtime config (env, entrypoint, cmd) | | **identical** |
+> | arm64: top-level `created` | | **identical** |
+> | arm64: `history[13].created` | `…40.5628424Z` | `…40.56031202Z` |
+>
+> **The entire difference is 2.5 milliseconds in one build-step timestamp**, which changes the config blob's digest, which changes the arm64 manifest digest, which changes the index digest. The filesystem a Pi runs is byte-for-byte the same. So nothing shipped wrong and there is nothing to re-cut — but the tag and the pin do name different indexes, and making them agree needs a **retag, not a rebuild** (a rebuild produces a third digest):
+>
+> ```bash
+> # needs a token with write:packages — the gh CLI's default scopes do NOT include it
+> docker buildx imagetools create \
+>   --tag ghcr.io/openmasjid-solutions/openmasjiddonations:0.43.0 \
+>   --tag ghcr.io/openmasjid-solutions/openmasjiddonations:latest \
+>   ghcr.io/openmasjid-solutions/openmasjiddonations@sha256:285ce876721785a43e488fa963185c36d84547963902f9327236a4b18c06fa0e
+> ```
 
 > ### Tag the digest-pin commit, not the commit before it
 >
@@ -405,6 +443,17 @@ For local dev run the server on :8080 and `cd web && npm run dev` on :5173 (Vite
 >
 > **This has already happened twice** — and a third time on **v0.42.0**, where the tag landed on the merge commit (compose reading a bare `:0.42.0`) and the digest pin went into the commit after it. Only the registry's `commit:` pointing at the right SHA kept masjids fetching correct content.
 
+5. **Publish the GitHub release for that tag.** Notes in the masjid's language — an admin reads
+   these, not a changelog. Distil them from the `X.Y.Z` changelog entry you just wrote, since that is
+   already in the right voice.
+
+   ```bash
+   gh release create vX.Y.Z --title "vX.Y.Z — <the headline>" --notes-file notes.md --verify-tag
+   ```
+
+   `--verify-tag` refuses to invent a tag that does not exist, which is the failure mode worth
+   guarding: a release created against a missing tag silently makes one at the current branch tip.
+
 ### Step 2 — a PR against the catalog's `dev`
 
 Open a pull request against **`OpenMasjid-Solutions/OpenMasjidAPPS`, base branch `dev`, never `main`.** Change **only this app's own entry** in `registry.yaml` — never another app's, never `catalog.json`:
@@ -426,6 +475,20 @@ If you followed the step order above, `ref` and `commit` are the same commit. **
 ### Step 3 — stop
 
 **A catalog maintainer runs the release that moves `main`.** Do not commit to the catalog's `main`, and **do not merge the catalog's `dev` into its `main`**: the two branches legitimately hold different builds of `catalog.json`, and merging them corrupts the stable column. Open the PR, say it is ready, and wait.
+
+### Step 7 — check the only thing that answers "did it ship?"
+
+Not the tag, not the release, not the merged PR. **The live stable catalogue.**
+
+```bash
+curl -s https://raw.githubusercontent.com/OpenMasjid-Solutions/OpenMasjidAPPS/main/catalog.json \
+  | python -c "import json,sys; print([a['version'] for a in json.load(sys.stdin)['apps'] if a['id']=='donations'])"
+```
+
+Until that prints the new version, **no masjid has it**, whatever this repo says. It flips when a
+catalogue maintainer releases the stable column — which is step 3's "stop", so expect a gap, and
+expect to have to ask. Do not read a merged PR against the catalogue's `dev` as shipped: `dev` and
+`main` legitimately carry different builds of `catalog.json`.
 
 ### The dev channel needs none of this
 
