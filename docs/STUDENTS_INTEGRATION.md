@@ -94,6 +94,79 @@ pay just the book fee.
   that child rather than rejected, because the card is already captured by then. `lines` is strict by
   contrast, since we build it from ids Students just gave us.
 
+## 0d. Additive since v2 — Students 0.51.0: the PAYER can cover the fee (§11.2 `info.fee`)
+
+One new object on `info`, no version bump. A madrasah may decide the payer covers Stripe's cut rather
+than the school. **`fee.enabled: false` is what almost every install returns, and it means change
+nothing** — charge the tuition, report the tuition, exactly as before.
+
+```jsonc
+"fee": { "enabled": true,
+         "card": { "percentBps": 290, "fixedCents": 30 },
+         "bank": { "percentBps": 80, "fixedCents": 0, "capCents": 500 } }
+```
+
+**The arithmetic is a division, and it rounds up.** The fee is a percentage **of the gross**, because
+that is what Stripe takes its cut of:
+
+```
+gross = ceil((tuitionCents + fixedCents) / (1 - percentBps / 10000))
+fee   = gross - tuitionCents
+```
+
+A naive markup — a percentage of the *tuition* — quotes $103.20 on a $100 bill where the right answer
+is $103.30. That is not rounding noise: Stripe then takes $3.29 and the school banks $99.91, so a $100
+invoice never settles, stays open for ever, and shows a family as unpaid over ten cents. `grossUpTuition`
+in `server/src/students.ts` does it in **integers** for the same reason — `10030 / 0.971` in binary
+floating point can land a hair either side of the true value, and `Math.ceil` of a hair too much charges
+a whole extra cent. `capCents` (the bank rate carries one) is applied last: over the cap the answer is
+simply `tuition + cap`, so a $2,000 payment does not get $16 added to cover a $5 charge.
+
+The contract's worked examples are asserted verbatim in `server/src/tuitionFee.test.ts`:
+
+| Tuition | Gross | Fee |
+| --- | --- | --- |
+| $100.00 | $103.30 | $3.30 |
+| $250.00 | $257.78 | $7.78 |
+| $2,000.00 by bank (80 / 0, cap 500) | $2,005.00 | $5.00 |
+
+**Three things we do when it is on.**
+
+1. **Show the payer the breakdown before they commit** — tuition, fee, total, as three lines, plus the
+   sentence saying whose money it is. Required, not a nicety: see §5.
+2. **Write `students_fee_cents` on the PaymentIntent.** Not bookkeeping. Students' reconciliation reads
+   succeeded PaymentIntents a day later, on a job that never saw our request and may find the setting
+   switched off or the rate changed — without this key it cannot tell a $103.30 charge covering $100 of
+   tuition from a family who genuinely paid $103.30. An amount is not identifying, so this breaks none
+   of §11.3's privacy rules, and the ban on a Student ID or a child's name still stands absolutely.
+3. **Report the NET in `record-payment`** — `amountCents` is the tuition, `feeCents` is informational.
+
+> **The failure directions are lopsided, so the storage is shaped to suit.** Forget the metadata key
+> and reconciliation credits one family a little too much. Put a **gross** in `amountCents` and Stripe's
+> cut is credited to the family as an overpayment, leaving a credit that silently eats into their next
+> bill and compounds for as long as the setting is on — wrong until a human notices. So
+> `student_payments.amount` holds **the tuition** and the fee lives in its own column: the money path
+> does no arithmetic at all, and no bug in the fee code can reach the ledger. "When in doubt, send the
+> tuition" — and the way never to be in doubt is to store the tuition.
+
+**We quote the CARD rate and never the bank one — a deliberate, documented choice.** The fee has to be
+fixed when the PaymentIntent is created, which is *before* the payer has chosen anything; this page uses
+Stripe's Payment Element with `automatic_payment_methods`, so whether the money arrives by card or by
+bank debit is not knowable at the moment we must decide the amount. Quoting the card rate and calling it
+a *card processing fee* is honest about the common case. Quoting the bank rate would under-collect the
+instant somebody used a card, which leaves the school short — the exact failure the gross-up prevents.
+`fee.bank` belongs to a flow that **knows** it is a bank debit (the school's own portal, or a kiosk with
+an ACH button). We parse it, and never apply it.
+
+**The rate is captured once per visit, into the server-side session.** Read from `info` every time —
+never hard-coded, since an office can change it — but read at **lookup**, not again at intent, because
+the payer must be charged what they were shown. `info` is cached ~5 minutes and a session lives 15, so
+re-reading could quote one total on the balance screen and charge another after the office changed the
+rate mid-visit.
+
+**The floor applies to the tuition, not to the total.** 99¢ is refused even though the grossed-up charge
+would clear $1 — otherwise a fee would quietly lift a too-small payment over the line.
+
 ## 0. What the parent sees (the required flow)
 
 A `tuition` campaign renders **exactly this**, nothing more:
@@ -238,7 +311,12 @@ purpose             = students-billing        (REQUIRED — the reconciliation d
 omos_app            = donations
 students_family_id  = fam_x1                   (REQUIRED, from lookup)
 students_student_id = stu_1                     (optional, matchedStudent.id)
+students_fee_cents  = 330                      (REQUIRED whenever we grossed up — §0d)
 ```
+`students_fee_cents` is omitted entirely when nothing was added, which is the shape a school with the
+setting off has always seen. Note what it is *not*: an internal `stu_1` is an opaque id, while the
+**typed** Student ID (`YUS1234`) and any child's name are banned outright — the fee key is an amount,
+and an amount identifies nobody.
 Description: `School balance — <family label>`. **Never** put a Student ID or a child's name in
 metadata, a description, or the URL (§11.3 — metadata is visible in Stripe dashboards and exports).
 Confirm with Elements exactly like a normal donation (confirm-on-return).
@@ -324,6 +402,25 @@ reconciliation, which scans that account for `purpose=students-billing` PIs).
 
 ---
 
+### Whose money the fee is (§11.2 — required wording)
+
+When a processing fee is passed on, the payer is told **plainly that it is not the masjid's**. Shown as
+its own line with the total, before they commit — a total that first appears on Stripe's own form is
+what generates a phone call to the office. Our wording, matching the parent portal's in substance:
+
+> **Tuition** $100.00
+> **Card processing fee** $3.30
+> **Total charged** $103.30
+>
+> The processing fee is not the masjid's — it is what Visa, Mastercard and American Express charge to
+> accept a card, and it goes straight to the payment processor. Paying by cash or cheque at the office
+> avoids it.
+
+`TuitionFeeLines` in `web/src/donate.tsx` renders it, and renders **nothing at all** when the fee is
+zero. It appears on all three screens a payer can commit from: the balance step, the "add money for a
+child" step, and the pay step — the last using the server's own authoritative figures from the intent
+response rather than re-deriving them.
+
 ## 6. Security (§14)
 
 - **Rate-limit `identify` + `lookup` per peer** on our side, in **one shared bucket** (40/min — an
@@ -358,3 +455,8 @@ reconciliation, which scans that account for `purpose=students-billing` PIs).
 - Everything **fails soft** when Students is unreachable / `enabled:false` / a `fabric_error` arrives.
 - `identify` + `lookup` share one per-peer rate limit; the Student ID never appears in
   logs/URLs/metadata.
+- With `info.fee.enabled: false` (almost every school) **nothing** about the flow differs from before
+  it existed: no gross-up, no `students_fee_cents`, no `feeCents` on the wire.
+- With it on: the payer sees tuition / fee / total **and the sentence** before committing, the
+  PaymentIntent carries `students_fee_cents`, and the balance in Students goes down by the **tuition**.
+  Then the daily reconciliation runs over the same payment and the balance does **not** move again.

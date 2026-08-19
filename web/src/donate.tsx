@@ -17,6 +17,7 @@ import {
   identifyStudent,
   lookupStudent,
   money,
+  tuitionFeeFor,
   type ConfirmResponse,
   type IntentResponse,
   type PublicCampaign,
@@ -665,6 +666,11 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
       : mode === 'full'
         ? fam.balance
         : payRows.filter((r) => checked[r.key]).reduce((s, r) => s + r.amount, 0);
+  // What the card will actually be charged, when the school has asked the payer to cover the
+  // processing fee. Computed with the same integer formula the server uses, from the rate the
+  // server sent, so the figure quoted here is the figure charged. `fee` is 0 for almost every
+  // school and every line below then renders as it always has.
+  const charge = tuitionFeeFor(selectionAmount, fam?.fee ?? null, ccy);
 
   // Step 1 — who does this Student ID belong to? No balance is revealed yet.
   const runIdentify = async (e: React.FormEvent) => {
@@ -798,9 +804,10 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
               : `It sits on ${advanceKid.firstName || 'this child'}’s account as credit and comes off their next bill. Smallest payment ${money(minAmount, ccy)}.`}
           </p>
         </div>
+        <TuitionFeeLines tuition={charge.tuition} fee={charge.fee} total={charge.total} ccy={ccy} />
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
-          {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}
+          {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(charge.total)}
         </button>
         <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={closeAdvance}>Back</button>
       </section>
@@ -910,9 +917,12 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
         {fam.balance <= 0 && !canAdvance ? (
           <p className="hint">This school isn’t taking payments in advance right now — there’s nothing to pay today.</p>
         ) : fam.balance > 0 ? (
-          <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
-            {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}
-          </button>
+          <>
+            <TuitionFeeLines tuition={charge.tuition} fee={charge.fee} total={charge.total} ccy={ccy} />
+            <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
+              {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(charge.total)}
+            </button>
+          </>
         ) : null}
         <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={startOver}>Look up a different student</button>
       </section>
@@ -971,6 +981,36 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   );
 }
 
+/**
+ * The processing fee, itemised, before the payer commits.
+ *
+ * This is a REQUIREMENT of the students/billing contract (§11.2 `info.fee`), not a nicety, and it
+ * is the part most likely to be skipped. Two things have to be true:
+ *
+ *  • **The total appears here, not first on Stripe's form.** A charge the payer did not expect is
+ *    what generates a phone call to the office.
+ *  • **The payer is told whose money it is.** The extra is not the masjid's and not the school's:
+ *    it is what the card networks charge to accept a card, and it goes to the payment processor.
+ *    Saying so is the difference between a fee and a mystery.
+ *
+ * Renders nothing at all when there is no fee, which is almost every school.
+ */
+function TuitionFeeLines({ tuition, fee, total, ccy }: { tuition: number; fee: number; total: number; ccy: string }) {
+  if (fee <= 0) return null;
+  return (
+    <div className="fee-breakdown">
+      <div className="fee-row"><span>Tuition</span><span>{money(tuition, ccy)}</span></div>
+      <div className="fee-row"><span>Card processing fee</span><span>{money(fee, ccy)}</span></div>
+      <div className="fee-row fee-row--total"><span>Total charged</span><span>{money(total, ccy)}</span></div>
+      <p className="hint fee-note">
+        The processing fee is not the masjid’s — it is what Visa, Mastercard and American Express charge
+        to accept a card, and it goes straight to the payment processor. Paying by cash or cheque at the
+        office avoids it.
+      </p>
+    </div>
+  );
+}
+
 function TuitionPayStep({ campaign, intent, label, onBack, onDone }: {
   campaign: PublicCampaign; intent: TuitionIntentResponse; label: string; onBack: () => void; onDone: (r: TuitionConfirmResponse) => void;
 }) {
@@ -982,6 +1022,9 @@ function TuitionPayStep({ campaign, intent, label, onBack, onDone }: {
       <div className="donate-emblem" aria-hidden="true"><GraduationCap size={30} /></div>
       <h1 className="donate-title">Pay {money(intent.amount, intent.currency)}</h1>
       {label ? <p className="donate-sub muted">{label}</p> : null}
+      {/* The server's own figures, so the last screen before the card form states the split
+          authoritatively rather than re-deriving it. */}
+      <TuitionFeeLines tuition={intent.tuition} fee={intent.fee} total={intent.amount} ccy={intent.currency} />
       <Elements stripe={stripePromise} options={{ clientSecret: intent.clientSecret, appearance: { theme } }}>
         <TuitionPayForm campaign={campaign} intent={intent} onDone={onDone} />
       </Elements>
@@ -1031,9 +1074,19 @@ function TuitionThanks({ result }: { result: TuitionConfirmResponse }) {
       <div className={`donate-emblem${ok ? ' is-success' : ''}`} aria-hidden="true"><GraduationCap size={34} /></div>
       <h1 className="donate-title">{ok ? 'Payment received' : 'Payment not completed'}</h1>
       {ok ? (
-        <p className="donate-desc">
-          Your payment of {money(result.amount, result.currency)}{result.schoolName ? ` to ${result.schoolName}` : ''} has been recorded. JazākAllāhu khayran.
-        </p>
+        <>
+          <p className="donate-desc">
+            Your payment of {money(result.amount, result.currency)}{result.schoolName ? ` to ${result.schoolName}` : ''} has been recorded. JazākAllāhu khayran.
+          </p>
+          {/* Where the money went, when a fee was added — so a parent reading their statement
+              weeks later can tell which part reached the school. */}
+          {result.fee > 0 && (
+            <p className="hint">
+              {money(result.tuition, result.currency)} went to the school’s fees and{' '}
+              {money(result.fee, result.currency)} was the card processing fee.
+            </p>
+          )}
+        </>
       ) : result.status === 'processing' ? (
         <p className="donate-desc">Your payment is processing. You’ll receive confirmation shortly, in shā’ Allah.</p>
       ) : (

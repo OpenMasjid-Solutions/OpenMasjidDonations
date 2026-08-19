@@ -57,7 +57,9 @@ export const RELEASES: Release[] = [
     date: '',
     unreleased: true,
     notes: [
-      'Nothing has landed since v0.43.0 yet. Anything that reaches the Development channel from here on will be listed here, and the headline items will become the next release’s notes.',
+      '**If you run a school and use OpenMasjid Students, you can now ask parents to cover the card fee.** Turn it on in Students (Payments → who pays the processing fee) and the tuition page starts showing it as its own line: the tuition, the card fee, and the total — with a plain sentence saying the fee is not the masjid’s, it is what Visa, Mastercard and American Express charge to accept a card, and paying by cash or cheque at the office avoids it. **It is off unless your school switches it on**, and if it is off nothing about the page changes at all.',
+      'The child’s balance still goes down by the **tuition** — the card fee is never treated as money towards their fees, so a family can’t end up with a stray credit that quietly comes off their next bill. The fee is worked out the way your card processor works it out, so the school receives the full tuition rather than being a few pence short on every payment.',
+      'Anything else that reaches the Development channel from here on will be listed here, and the headline items will become the next release’s notes.',
     ],
   },
   {

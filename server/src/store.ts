@@ -350,8 +350,21 @@ export interface StudentPayment {
   familyId: string;
   studentId: string;
   familyLabel: string;
-  /** Amount charged, in MINOR units of the SCHOOL's currency (from the Students lookup). */
+  /** **The TUITION** — what the family owed, in MINOR units of the school's currency.
+   *
+   *  NOT what the card was charged, when a processing fee was passed on (§11.2 `info.fee`): the
+   *  charge is `amount + feeCents`. This column keeps its original meaning on purpose, because it
+   *  is what `record-payment` sends as `amountCents`, and the contract's failure directions are
+   *  lopsided — a gross in `amountCents` credits Stripe's cut to the family as an overpayment and
+   *  the ledger is wrong until somebody notices by hand. Leaving the net here means the money path
+   *  needs no arithmetic at all, so no bug in the fee code can reach the ledger. */
   amount: number;
+  /** Stripe's cut, when the PAYER covered it (§11.2 `info.fee`); 0 when the school absorbed it,
+   *  which is every row written before Students 0.51.0 and almost every one after.
+   *
+   *  Stored rather than recomputed so an outbox retry — hours later, possibly after the office
+   *  switched the setting off or changed the rate — reports exactly what was charged. */
+  feeCents: number;
   currency: string;
   allocations: string;
   /** JSON `[{studentId, amountCents}]` — the per-child split; '' = let Students derive it. */
@@ -668,6 +681,11 @@ export class Store {
     // The ticked bill lines of a tuition charge (students/billing §11.0b). Legacy rows default to
     // '' = "no lines", exactly how they were pushed to Students before itemised bills existed.
     this.ensureColumn('student_payments', 'payment_lines', "TEXT NOT NULL DEFAULT ''");
+    // The processing fee the PAYER covered (students/billing §11.2 `info.fee`, Students 0.51.0).
+    // Legacy rows default to 0 = "the school absorbed it", which is true of every tuition payment
+    // taken before the feature existed — and 0 also means no `students_fee_cents` and no `feeCents`
+    // on a retry, which is exactly how those rows were pushed the first time.
+    this.ensureColumn('student_payments', 'fee_cents', 'INTEGER NOT NULL DEFAULT 0');
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
@@ -1755,6 +1773,7 @@ export class Store {
       studentId: String(r.student_id ?? ''),
       familyLabel: String(r.family_label ?? ''),
       amount: Number(r.amount),
+      feeCents: Number(r.fee_cents ?? 0),
       currency: String(r.currency),
       allocations: String(r.allocations ?? ''),
       studentsSplit: String(r.students_split ?? ''),
@@ -1768,7 +1787,12 @@ export class Store {
   }
 
   createStudentPayment(
-    input: Omit<StudentPayment, 'id' | 'createdAt' | 'payStatus' | 'recordStatus' | 'studentsPaymentId' | 'occurredAt'>,
+    input: Omit<StudentPayment, 'id' | 'createdAt' | 'payStatus' | 'recordStatus' | 'studentsPaymentId' | 'occurredAt' | 'feeCents'> & {
+      /** Omitted = 0 = "the school absorbed Stripe's cut", which is the answer for every school
+       *  that has not switched the payer-pays setting on (§11.2 `info.fee`). Optional rather than
+       *  required so a caller that knows nothing about fees cannot accidentally write a NULL. */
+      feeCents?: number;
+    },
   ): StudentPayment {
     const p: StudentPayment = {
       id: rid('spy'),
@@ -1778,15 +1802,16 @@ export class Store {
       occurredAt: '',
       createdAt: new Date().toISOString(),
       ...input,
+      feeCents: Math.max(0, Math.trunc(input.feeCents ?? 0)),
     };
     this.db
       .prepare(
         `INSERT INTO student_payments
           (id, campaign_id, stripe_account_id, payment_intent_id, family_id, student_id, family_label,
-           amount, currency, allocations, students_split, payment_lines, pay_status, record_status, students_payment_id, created_at, occurred_at)
+           amount, fee_cents, currency, allocations, students_split, payment_lines, pay_status, record_status, students_payment_id, created_at, occurred_at)
          VALUES
           (@id, @campaignId, @stripeAccountId, @paymentIntentId, @familyId, @studentId, @familyLabel,
-           @amount, @currency, @allocations, @studentsSplit, @paymentLines, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
+           @amount, @feeCents, @currency, @allocations, @studentsSplit, @paymentLines, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
       )
       .run(p);
     return p;

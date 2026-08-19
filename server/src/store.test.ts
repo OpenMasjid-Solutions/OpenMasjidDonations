@@ -164,6 +164,10 @@ test('upgrade: an existing student_payments table gains its new columns, keeping
       assert.equal(got.amount, 9900);
       assert.equal(got.familyId, 'fam_old');
       assert.equal(got.studentsSplit, '', 'no split on a legacy row → Students derives it, as it always did');
+      // A row that predates the payer-pays fee reads as 0 = "the school absorbed Stripe's cut",
+      // which is what actually happened to it — and 0 means the outbox retry sends no `feeCents`
+      // and writes no metadata key, i.e. it is pushed exactly as it was the first time.
+      assert.equal(got.feeCents, 0, 'a legacy tuition payment had no fee passed on');
       assert.equal(got.paymentLines, '', 'no ticked lines on a legacy row either');
       // Still retryable, and a new row on the upgraded table can carry a split.
       assert.equal(s.listPendingStudentRecords().length, 1, 'the queued push is still in the outbox');
@@ -629,4 +633,29 @@ test('monthlyGiving: a refund comes off what the plan is giving', () => {
   const g = s.monthlyGiving('2026-08', '2026-06-01T00:00:00.000Z');
   assert.equal(g.perMonth, 3000, 'net of the refund, like every other money figure');
   assert.equal(g.thisMonth, 3000);
+});
+
+test('a tuition fee is stored alongside the tuition, so an outbox retry reports the same figures', () => {
+  // The retry can run hours later, after the office switched the setting off or changed the rate.
+  // It must push what was CHARGED, which is why the fee is a column and not a recomputation.
+  const s = fresh();
+  s.createStudentPayment({
+    campaignId: 'cmp_1', stripeAccountId: 'acct_test', paymentIntentId: 'pi_fee',
+    familyId: 'fam_1', studentId: 'stu_1', familyLabel: 'Ismail family',
+    amount: 10_000, feeCents: 330, currency: 'USD', allocations: '', studentsSplit: '', paymentLines: '',
+  });
+  const got = s.getStudentPaymentByPI('pi_fee')!;
+  assert.equal(got.amount, 10_000, 'the stored amount is the TUITION, never the gross');
+  assert.equal(got.feeCents, 330);
+  assert.equal(got.amount + got.feeCents, 10_330, 'and together they are what the card was charged');
+});
+
+test('a tuition payment with no fee stores 0, not null', () => {
+  const s = fresh();
+  s.createStudentPayment({
+    campaignId: 'cmp_1', stripeAccountId: 'acct_test', paymentIntentId: 'pi_nofee',
+    familyId: 'fam_1', studentId: '', familyLabel: '', amount: 5_000, currency: 'USD',
+    allocations: '', studentsSplit: '', paymentLines: '',
+  });
+  assert.equal(s.getStudentPaymentByPI('pi_nofee')!.feeCents, 0);
 });

@@ -728,18 +728,71 @@ export interface StudentLookupResult {
      *  a mixture, so the choice can't be made per bill. */
     itemised: boolean;
     openInvoices: StudentInvoiceView[];
+    /** The processing rate, when the school has asked the PAYER to cover Stripe's cut — null for
+     *  almost every school, and null means add nothing. Present so this page can show an itemised
+     *  total for whatever the parent ticks BEFORE they commit; the server recomputes the real
+     *  figure when it creates the payment, and that one is authoritative. */
+    fee: TuitionFeeRate | null;
   };
+}
+
+/** A processing rate (basis points **of the gross**, plus a flat part, optionally capped). */
+export interface TuitionFeeRate {
+  percentBps: number;
+  fixedCents: number;
+  /** 0 = uncapped. */
+  capCents: number;
+}
+
+/**
+ * What the payer will actually be charged, and how much of it is the processing fee.
+ *
+ * Mirrors the server's `grossUpTuition` deliberately — the fee is a share of the GROSS, so this
+ * divides rather than marking up, and rounds the total UP. A markup would quote $103.20 on a $100
+ * bill where the charge will be $103.30, and a parent seeing one number here and another on the
+ * card form is exactly what generates a phone call to the office.
+ *
+ * Works in MAJOR units (what this page displays) by going through minor units and back, so the
+ * arithmetic is the integer one and never accumulates a fraction of a cent.
+ */
+export function tuitionFeeFor(tuitionMajor: number, rate: TuitionFeeRate | null, currency = 'USD'): { tuition: number; fee: number; total: number } {
+  const unit = Math.pow(10, currencyDecimals(currency));
+  const tuition = Math.max(0, Math.round(tuitionMajor * unit));
+  const none = { tuition: tuition / unit, fee: 0, total: tuition / unit };
+  if (!rate || tuition <= 0) return none;
+  const den = 10_000 - rate.percentBps;
+  if (den <= 0) return none;
+  const num = (tuition + rate.fixedCents) * 10_000;
+  let f = Math.floor(num / den);
+  while (f * den > num) f -= 1;
+  while ((f + 1) * den <= num) f += 1;
+  let gross = f * den === num ? f : f + 1;
+  let fee = gross - tuition;
+  if (rate.capCents > 0 && fee > rate.capCents) {
+    fee = rate.capCents;
+    gross = tuition + fee;
+  }
+  if (fee <= 0) return none;
+  return { tuition: tuition / unit, fee: fee / unit, total: gross / unit };
 }
 export interface TuitionIntentResponse {
   clientSecret: string;
   publishableKey: string;
+  /** What the card will be charged — the gross, when a processing fee was passed on. */
   amount: number;
+  /** The school's part, and the processor's part. Authoritative (the server computed them), so
+   *  the pay step shows these rather than its own estimate. `fee` is 0 for almost every school. */
+  tuition: number;
+  fee: number;
   currency: string;
 }
 export interface TuitionConfirmResponse {
   status: string;
   succeeded: boolean;
+  /** What was charged. `tuition` + `fee` break it down; `fee` is 0 for almost every school. */
   amount: number;
+  tuition: number;
+  fee: number;
   currency: string;
   schoolName: string;
   familyLabel: string;
@@ -778,6 +831,17 @@ export interface TunnelStatus {
 export const getTunnel = () => request<TunnelStatus>('/api/admin/tunnel');
 export const saveTunnel = (body: { token?: string; enabled?: boolean; publicHostname?: string }) =>
   request<TunnelStatus>('/api/admin/tunnel', { method: 'PUT', body: JSON.stringify(body) });
+
+/** How many minor units make one major unit, per currency — 2 for most, 0 for JPY, 3 for the
+ *  Gulf dinars. Asked of Intl rather than hardcoded, and defaulted to 2 when it cannot answer. */
+export function currencyDecimals(currency: string): number {
+  try {
+    const d = new Intl.NumberFormat(undefined, { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
+    return typeof d === 'number' ? d : 2;
+  } catch {
+    return 2;
+  }
+}
 
 /** Format a major-unit amount in the given currency, e.g. 50 GBP → "£50.00". */
 export function money(amount: number, currency: string): string {

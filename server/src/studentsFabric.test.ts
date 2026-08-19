@@ -440,3 +440,117 @@ test('check still speaks v:1 and reads paymentId (kept alongside v2 paymentIds[]
   reply({ v: 2, recorded: false });
   assert.deepEqual(await students.checkStudentPayment('pi_3PabcDEF'), { status: 'not-recorded' });
 });
+
+// ── The processing fee on the wire (§11.2 `info.fee`, Students 0.51.0) ───────
+//
+// Additive at v2: `record-payment` still sends v:1, `amountCents` still means the tuition, and a
+// school that has not switched the setting on must see byte-identical requests to before.
+
+test('info: a fee is parsed off the wire, and read from `info` rather than assumed', () => {
+  reply({
+    v: 2, enabled: true, schoolName: 'An-Noor', currency: 'usd', allowAdvance: true, minAmountCents: 100,
+    fee: { enabled: true, card: { percentBps: 290, fixedCents: 30 }, bank: { percentBps: 80, fixedCents: 0, capCents: 500 } },
+  });
+  return students.studentsInfo(true).then((r) => {
+    assert.ok(r.available);
+    assert.equal(r.info.fee.enabled, true);
+    assert.deepEqual(r.info.fee.card, { percentBps: 290, fixedCents: 30, capCents: 0 });
+    assert.deepEqual(r.info.fee.bank, { percentBps: 80, fixedCents: 0, capCents: 500 });
+    // `info` still speaks v1 — the fee is additive and must not drag the money path to v2.
+    assert.equal(calls[0].body.v, 1);
+  });
+});
+
+test('info: a school with the fee OFF yields no rate at all, whatever else is in the payload', () => {
+  reply({
+    v: 2, enabled: true, schoolName: 'An-Noor', currency: 'usd', minAmountCents: 100,
+    fee: { enabled: false, card: { percentBps: 290, fixedCents: 30 }, bank: null },
+  });
+  return students.studentsInfo(true).then((r) => {
+    assert.ok(r.available);
+    assert.equal(r.info.fee.enabled, false);
+    assert.equal(r.info.fee.card, null, 'a rate left behind by a switched-off setting must not apply');
+    assert.equal(students.cardFeeRate(r.info), null);
+  });
+});
+
+test('info: a pre-0.51.0 school (no `fee` at all) is disabled, not broken', () => {
+  reply({ v: 2, enabled: true, schoolName: 'An-Noor', currency: 'usd', minAmountCents: 100 });
+  return students.studentsInfo(true).then((r) => {
+    assert.ok(r.available);
+    assert.deepEqual(r.info.fee, { enabled: false, card: null, bank: null });
+    assert.equal(students.cardFeeRate(r.info), null);
+  });
+});
+
+test('info: a nonsense rate is refused rather than applied', () => {
+  // 100% or more would divide by zero (or invert); a rate of nothing is not a rate. Either way
+  // the safe answer is "add nothing" — the school absorbs the cut, as it does with this off.
+  reply({
+    v: 2, enabled: true, schoolName: 'A', currency: 'usd', minAmountCents: 100,
+    fee: { enabled: true, card: { percentBps: 10000, fixedCents: 30 }, bank: { percentBps: 0, fixedCents: 0 } },
+  });
+  return students.studentsInfo(true).then((r) => {
+    assert.ok(r.available);
+    assert.equal(r.info.fee.card, null, '100% must be refused');
+    assert.equal(r.info.fee.bank, null, 'a zero rate with no flat part is not a fee');
+  });
+});
+
+test('record-payment sends the TUITION as amountCents, with the fee alongside it', () => {
+  reply({ v: 1, recorded: true, paymentId: 'pay_1' });
+  return students
+    .recordStudentPayment({
+      idempotencyKey: 'pi_1', familyId: 'fam_x1', amountCents: 10_000, feeCents: 330,
+      currency: 'USD', occurredAt: '2026-08-19T10:00:00.000Z',
+      externalRef: { stripePaymentIntentId: 'pi_1' },
+    })
+    .then((res) => {
+      assert.equal(res.status, 'recorded');
+      const b = calls[0].body;
+      assert.equal(b.amountCents, 10_000, 'the tuition — a gross here is a silent credit on the family');
+      assert.equal(b.feeCents, 330, 'informational; Students’ ledger holds tuition only');
+      assert.equal(b.v, 1, 'record-payment stays v1');
+    });
+});
+
+test('record-payment omits feeCents entirely when the school absorbed the fee', () => {
+  reply({ v: 1, recorded: true, paymentId: 'pay_2' });
+  return students
+    .recordStudentPayment({
+      idempotencyKey: 'pi_2', familyId: 'fam_x1', amountCents: 10_000,
+      currency: 'USD', occurredAt: '2026-08-19T10:00:00.000Z',
+      externalRef: { stripePaymentIntentId: 'pi_2' },
+    })
+    .then(() => {
+      const b = calls[0].body;
+      assert.ok(!('feeCents' in b), 'an older Students must see exactly the request it always saw');
+      assert.equal(b.amountCents, 10_000);
+    });
+});
+
+test('record-payment: a zero fee is not sent either', () => {
+  reply({ v: 1, recorded: true, paymentId: 'pay_3' });
+  return students
+    .recordStudentPayment({
+      idempotencyKey: 'pi_3', familyId: 'fam_x1', amountCents: 5_000, feeCents: 0,
+      currency: 'USD', occurredAt: '2026-08-19T10:00:00.000Z',
+      externalRef: { stripePaymentIntentId: 'pi_3' },
+    })
+    .then(() => assert.ok(!('feeCents' in calls[0].body)));
+});
+
+test('the fee never travels with a Student ID or a name (§11.3 stands)', () => {
+  reply({ v: 1, recorded: true, paymentId: 'pay_4' });
+  return students
+    .recordStudentPayment({
+      idempotencyKey: 'pi_4', familyId: 'fam_x1', studentId: 'stu_1', amountCents: 10_000, feeCents: 330,
+      currency: 'USD', occurredAt: '2026-08-19T10:00:00.000Z',
+      externalRef: { stripePaymentIntentId: 'pi_4' },
+    })
+    .then(() => {
+      const wire = JSON.stringify(calls[0].body);
+      assert.ok(!/YUS1234/i.test(wire), 'the typed Student ID stays out of everything');
+      assert.ok(!/firstName|Yusuf/i.test(wire), 'and so does a child’s name');
+    });
+});

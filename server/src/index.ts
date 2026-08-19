@@ -57,6 +57,8 @@ import {
 import {
   billingConfigured,
   MIN_TUITION_CENTS,
+  cardFeeRate,
+  grossUpTuition,
   studentsInfo,
   studentsIdentify,
   studentsLookup,
@@ -2825,7 +2827,12 @@ async function main(): Promise<void> {
       idempotencyKey: pi, // = the PaymentIntent id → Students dedups replays
       familyId: sp.familyId,
       studentId: sp.studentId || undefined,
+      // The TUITION. sp.amount is stored net for exactly this reason, so there is no arithmetic
+      // here to get wrong: a gross in `amountCents` credits Stripe's cut to the family as an
+      // overpayment and the ledger stays wrong until somebody notices by hand. When in doubt,
+      // send the tuition — and the way to never be in doubt is to store it.
       amountCents: sp.amount,
+      feeCents: sp.feeCents || undefined,
       currency: sp.currency,
       occurredAt: sp.occurredAt || new Date().toISOString(),
       externalRef: { stripePaymentIntentId: pi, stripeChargeId: retrieved.chargeId || undefined },
@@ -2900,6 +2907,11 @@ async function main(): Promise<void> {
     const inf = await studentsInfo();
     const allowAdvance = inf.available && inf.info.allowAdvance;
     const minAmountCents = inf.available ? inf.info.minAmountCents : MIN_TUITION_CENTS;
+    // Does the PAYER cover the processing fee (§11.2 `info.fee`)? Read from `info`, never
+    // hard-coded — an office can change the rate, and two apps disagreeing about what a parent
+    // owes is worse than either being wrong. Captured into the session below so the charge matches
+    // what this screen is about to quote; null = add nothing, which is almost every school.
+    const feeRate = inf.available ? cardFeeRate(inf.info) : null;
     // Itemised (§11.0b) only when EVERY open bill came with usable lines — the provider honours
     // `lines` OR `allocations`, never both, so a selection mixing lines from one bill with a whole
     // other bill can't be expressed in one call. All-or-nothing avoids ever needing to.
@@ -2926,6 +2938,7 @@ async function main(): Promise<void> {
       itemised,
       allowAdvance,
       minAmountCents,
+      fee: feeRate,
     });
     // v2 bills are per child, so each open invoice names the child it belongs to. Resolve that
     // to a display name + the child's opaque ref HERE — the studentIds stay server-side, in the
@@ -2957,6 +2970,11 @@ async function main(): Promise<void> {
           // Whether every bill is itemised, so the donor page and this server agree on which
           // selection the pay step will accept.
           itemised,
+          // The processing rate, so the page can show the parent an itemised total for whatever
+          // they tick BEFORE they commit — a total that first appears on Stripe's own form is what
+          // generates phone calls to the office. null = nothing is added (§11.2 `info.fee`), and
+          // the server recomputes the real figure at intent regardless.
+          fee: feeRate ? { percentBps: feeRate.percentBps, fixedCents: feeRate.fixedCents, capCents: feeRate.capCents } : null,
           openInvoices: fam.openInvoices.map((i) => ({
             id: i.id,
             label: i.label,
@@ -3041,7 +3059,11 @@ async function main(): Promise<void> {
                     : 'Please choose what to pay.';
       return reply.code(400).send({ error: msg });
     }
-    const chargeMinor = amt.amountCents;
+    // What the family owes, and what the card is charged. They differ only when the office has
+    // asked the payer to cover Stripe's cut (§11.2 `info.fee`) — the rate comes from the session,
+    // so it is the one this parent was quoted on the balance screen.
+    const charge = grossUpTuition(amt.amountCents, session.fee);
+    const chargeMinor = charge.grossCents;
     // §11.3 metadata — the reconciliation discriminator + the family id (REQUIRED). NEVER the
     // Student ID or a child's name (§11.3 bans both from metadata/descriptions/URLs outright,
     // since metadata shows up in Stripe dashboards and exports). Description = family label.
@@ -3051,6 +3073,13 @@ async function main(): Promise<void> {
       students_family_id: session.familyId,
       campaignId: c.id,
     };
+    // REQUIRED whenever we grossed up (§11.3). Not bookkeeping: Students' reconciliation reads
+    // succeeded PaymentIntents a day later, on a job that never saw this request and may find the
+    // setting switched off or the rate changed — without this key it cannot tell a $103.30 charge
+    // covering $100 of tuition from a family who genuinely paid $103.30. An amount is not
+    // identifying, so this breaks none of §11.3's privacy rules; a Student ID or a child's name
+    // still never goes near metadata. Omitted entirely when nothing was added.
+    if (charge.feeCents > 0) metadata.students_fee_cents = String(charge.feeCents);
     // Whose payment this is: the child the parent named for a per-child advance, else the child
     // whose ID was typed. Drives §11.3 metadata AND where Students parks any surplus.
     const forStudentId = amt.targetStudentId || session.studentId;
@@ -3083,7 +3112,10 @@ async function main(): Promise<void> {
       familyId: session.familyId,
       studentId: forStudentId,
       familyLabel: session.familyLabel,
-      amount: chargeMinor,
+      // The TUITION, never the gross — this is what record-payment sends as `amountCents`, and
+      // keeping the net here means the money path does no arithmetic (see StudentPayment.amount).
+      amount: charge.tuitionCents,
+      feeCents: charge.feeCents,
       currency,
       allocations: amt.allocations ? JSON.stringify(amt.allocations) : '',
       // Every breakdown is recomputed server-side from the session, then stored so the outbox
@@ -3091,7 +3123,19 @@ async function main(): Promise<void> {
       studentsSplit: amt.students ? JSON.stringify(amt.students) : '',
       paymentLines: amt.lines ? JSON.stringify(amt.lines) : '',
     });
-    return { data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency } };
+    return {
+      data: {
+        clientSecret,
+        publishableKey: acct.publishableKey,
+        // `amount` stays what the card is charged (the gross), which is what the pay step's
+        // heading has always shown. `tuition` and `fee` break it down so that heading can be
+        // honest about which part is the school's — the authoritative figures, computed here.
+        amount: toMajor(chargeMinor, currency),
+        tuition: toMajor(charge.tuitionCents, currency),
+        fee: toMajor(charge.feeCents, currency),
+        currency,
+      },
+    };
   });
 
   // Confirm a tuition payment on return: RETRIEVE the intent from Stripe (never trust the
@@ -3119,6 +3163,11 @@ async function main(): Promise<void> {
         status: pi.status,
         succeeded,
         amount: toMajor(pi.amount, pi.currency),
+        // What the school is credited, and the processor's cut, from the stored row — so a parent
+        // looking at $103.30 on their statement can see which part was the tuition. 0 for almost
+        // every school, and the screen then says nothing extra.
+        tuition: toMajor(sp.amount, pi.currency),
+        fee: toMajor(sp.feeCents, pi.currency),
         currency: pi.currency,
         schoolName: info.available ? info.info.schoolName : '',
         familyLabel: sp.familyLabel,
