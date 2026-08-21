@@ -476,15 +476,32 @@ async function main(): Promise<void> {
    * In-memory and bounded: a restart may re-notify, which is the right way round for something whose
    * entire purpose is to be noticed.
    */
-  const lastRaised = new Map<string, number>();
-  const throttled = (key: string, everyMs: number): boolean => {
+  const lastRaised = new Map<string, { at: number; skipped: number }>();
+  /**
+   * One notification per key per window — and a COUNT of what the window swallowed.
+   *
+   * The count is the point, and the reason this replaced a plain boolean throttle. An event that
+   * fires per EXTERNAL failure has no natural bound: a masjid whose Stripe keys expired on a Friday
+   * morning gets one attempt per person who tried to give, for the whole of jummah. Dropping the
+   * 2nd to the 200th silently tells the admin "a payment failed" once, and leaves them unable to
+   * tell one unlucky donor from everybody — which are very different Fridays. So the next message
+   * that does get through says how many it stands for.
+   */
+  const burst = (key: string, everyMs: number): { allow: boolean; skipped: number } => {
     const now = Date.now();
-    const at = lastRaised.get(key);
-    if (at !== undefined && now - at < everyMs) return true;
-    if (lastRaised.size > 500) lastRaised.clear();
-    lastRaised.set(key, now);
-    return false;
+    const w = lastRaised.get(key);
+    if (w && now - w.at < everyMs) {
+      w.skipped += 1;
+      return { allow: false, skipped: w.skipped };
+    }
+    const skipped = w?.skipped ?? 0;
+    if (lastRaised.size > 500) for (const [k, v] of lastRaised) if (now - v.at > everyMs * 4) lastRaised.delete(k);
+    lastRaised.set(key, { at: now, skipped: 0 });
+    return { allow: true, skipped };
   };
+  /** "This has happened 41 more times since the last message." — or '' when it hasn't. */
+  const alsoHeld = (skipped: number): string =>
+    skipped > 0 ? ` This has happened ${skipped} more time${skipped === 1 ? '' : 's'} since the last message.` : '';
   const HOUR = 3600_000;
 
   /**
@@ -2612,8 +2629,19 @@ async function main(): Promise<void> {
       // Tell the admin donations are broken (bad/expired keys, Stripe down). Fail soft.
       // Once an hour: a Stripe outage fails every attempt, and the second identical message
       // helps nobody while costing a WhatsApp slot the refunds may need.
-      if (!throttled('paymentFailed:donation', HOUR))
-        raise('paymentFailed', 'A donation payment failed to start', 'Stripe rejected a payment setup — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error');
+      {
+        // Per EXTERNAL failure, not per human action: a Stripe outage or an expired key fails every
+        // attempt, so this is one of the events that must gate itself (see `burst`).
+        const g = burst('paymentFailed:donation', HOUR);
+        if (g.allow) {
+          raise(
+            'paymentFailed',
+            'A donation payment failed to start',
+            `Stripe rejected a payment setup — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.${alsoHeld(g.skipped)}`,
+            'error',
+          );
+        }
+      }
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createDonation({
@@ -2948,7 +2976,21 @@ async function main(): Promise<void> {
       // safe (reconciliation picks it up) but the admin should verify. Alert carries no PII.
       // No Student ID and no child's name — §13 bans both from anything that leaves this app, and
       // all three of these channels forward easily.
-      raise('tuitionFailed', 'A tuition payment wasn’t recorded in Students', `A card payment succeeded (${pi}) but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.`, 'warning');
+      // ALSO per external failure, and it was ungated. One misconfigured Students rejects every
+      // tuition payment it is sent, so a busy evening at the school desk is one message per parent.
+      // Each rejection is still logged with its own PaymentIntent and every one is in the Donations
+      // log — what the gate drops is the repetition, never the record.
+      const g = burst('tuitionFailed', HOUR);
+      if (g.allow) {
+        raise(
+          'tuitionFailed',
+          'A tuition payment wasn’t recorded in Students',
+          `A card payment succeeded (${pi}) but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.${alsoHeld(g.skipped)}`,
+          'warning',
+        );
+      } else {
+        log.warn(`tuition record rejected (${pi}) — notification held back, ${g.skipped} since the last one`);
+      }
     }
     // 'unavailable' → leave pending; the outbox retries.
   };
@@ -3202,8 +3244,17 @@ async function main(): Promise<void> {
       paymentIntentId = intent.id;
     } catch (e) {
       log.warn('tuition payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
-      if (!throttled('paymentFailed:tuition', HOUR))
-        raise('paymentFailed', 'A tuition payment failed to start', 'Stripe rejected a payment setup — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error');
+      {
+        const g = burst('paymentFailed:tuition', HOUR);
+        if (g.allow) {
+          raise(
+            'paymentFailed',
+            'A tuition payment failed to start',
+            `Stripe rejected a payment setup — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.${alsoHeld(g.skipped)}`,
+            'error',
+          );
+        }
+      }
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createStudentPayment({
@@ -3737,6 +3788,15 @@ async function main(): Promise<void> {
   const SWEEP_MAX_AGE_MS = 30 * 24 * 3600_000;
   const lostDonationSweep = async () => {
     try {
+      // Recoveries are COLLECTED and reported once per pass, not one notification each.
+      //
+      // This is the app's one genuine burst: the sweep is bounded to 25 rows, and the first pass
+      // after a masjid updates into the feature can legitimately find all 25 — so the old code
+      // sent 25 notifications on three channels, then up to 25 more ten minutes later. A gate that
+      // dropped the 2nd to the 25th would lose real money news; batching loses nothing, because
+      // "3 donations were found, $140 in total" is a better sentence than three of anything, and
+      // every recovered donation is in the ledger either way.
+      const found: { amountMinor: number; currency: string; campaign: string }[] = [];
       for (const don of store.listUnconfirmedDonations(SWEEP_MIN_AGE_MS, SWEEP_MAX_AGE_MS)) {
         const acct = await accountById(don.stripeAccountId);
         if (!acct?.secretKey) continue; // keys gone for this account — nothing we can do, keep the row
@@ -3753,13 +3813,8 @@ async function main(): Promise<void> {
         log.warn(`recovered a donation Stripe took but we never recorded (${don.paymentIntentId})`);
         // Deliberately NOT gated on `minAmount`: this is not "a donation arrived", it is "your
         // records were wrong and are now right", and a masjid reconciling accounts needs to know
-        // that however small the amount.
-        raise(
-          'donationRecovered',
-          'A donation was found and added',
-          `A donation of ${formatMoney(pi.amount, pi.currency)} to “${camp?.title ?? 'your masjid'}” had been paid but never recorded — it is now in your donations, dated when the money arrived.`,
-          'success',
-        );
+        // that however small the amount. Collected here; raised once below.
+        found.push({ amountMinor: pi.amount, currency: pi.currency, campaign: camp?.title ?? 'your masjid' });
         if (don.receipt === 'pending') {
           void sendDonationReceipt(updated ?? don)
             .then((r) => {
@@ -3768,6 +3823,28 @@ async function main(): Promise<void> {
             })
             .catch(() => {});
         }
+      }
+      // One notification for the pass. A single recovery reads exactly as it always did; several
+      // read as the reconciliation news they actually are.
+      if (found.length === 1) {
+        const f = found[0];
+        raise(
+          'donationRecovered',
+          'A donation was found and added',
+          `A donation of ${formatMoney(f.amountMinor, f.currency)} to “${f.campaign}” had been paid but never recorded — it is now in your donations, dated when the money arrived.`,
+          'success',
+        );
+      } else if (found.length > 1) {
+        // Summed per currency, because a masjid with two appeals on two accounts can have two.
+        const totals = new Map<string, number>();
+        for (const f of found) totals.set(f.currency, (totals.get(f.currency) ?? 0) + f.amountMinor);
+        const money = [...totals].map(([ccy, minor]) => formatMoney(minor, ccy)).join(' + ');
+        raise(
+          'donationRecovered',
+          `${found.length} donations were found and added`,
+          `${found.length} donations totalling ${money} had been paid but never recorded — they are now in your donations, each dated when its money arrived. Your totals will go up by that much.`,
+          'success',
+        );
       }
     } catch { /* fail soft — a sweep must never crash the app */ }
   };

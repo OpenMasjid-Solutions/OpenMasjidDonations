@@ -277,7 +277,15 @@ export async function sendWhatsApp(target: WhatsAppTarget, text: string): Promis
   }
 }
 
-/** What became of one message (platform 0.51.1+, gated on `status.outcomes`). */
+/** What became of one message (platform 0.51.1+, gated on `status.outcomes`).
+ *
+ *  **`sent` is a success state, and that is a trap worth naming** (found by OpenMasjidDisplay, whose
+ *  dedupe asked "is there a queued row?" as a proxy for "has this been handled?" — true only while
+ *  `queued` was the only success, and false the moment delivery is confirmed, so the next tick sent
+ *  it again). This app cannot hit that: it never retries a send, it keys nothing on the presence of
+ *  a `queued` row, and the one place that reads the state is the panel deciding whether to show a
+ *  problem. Keep it that way — if a dedupe or retry is ever added here, key it on the message id,
+ *  never on a state. And treat `expired` as a failure: the recipient still has nothing. */
 export type WhatsAppState = 'queued' | 'sent' | 'failed' | 'expired';
 export interface WhatsAppMessageOutcome {
   state: WhatsAppState;
@@ -292,9 +300,17 @@ export interface WhatsAppMessageOutcome {
  * Ask what became of a message we queued.
  *
  * Scoped to our own app — another app's id 404s exactly like an unknown one, which is also what a
- * platform without the endpoint returns, so a null answer never means "it failed". Records are
- * bounded (the platform keeps the most recent 200), so ask SOON after sending; a poll days later is
- * indistinguishable from a message that never existed.
+ * platform without the endpoint returns, so **a null answer never means "it failed"**. That reading
+ * is load-bearing and stays correct whatever the bounds are: 404 covers an unknown id, another
+ * app's, an evicted record, and a platform too old to have the endpoint.
+ *
+ * The bounds, corrected in platform 0.51.1-dev.8: **the most recent 500 PER APP, kept 24 hours** —
+ * it used to be 200 shared across every app, which meant a busy neighbour could evict our records
+ * (and its own earliest, which are the ones most likely to have failed). Status reads also have
+ * their own 600/minute budget now, separate from sending, so polling can no longer refuse a send
+ * and a send can no longer refuse a poll. None of that changes what this app does — it asks once,
+ * ~45s after queueing, which fits inside any of those numbers — but it is why asking once is a
+ * choice rather than a workaround.
  *
  * Holds no message text and no recipient, by the platform's design — so nothing here can leak a
  * donor's figures or an admin's number into our own logs or database.

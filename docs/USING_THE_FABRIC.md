@@ -160,9 +160,18 @@ And two rules the channel itself imposes:
   separately, and the refusal is stored against its event and rendered beside that event's switch.
   Collapsing the two is what made the platform's queue bug look like ours.
 - **`/status/<id>` answers what became of one message**, scoped to this app — a 404 means unknown,
-  another app's, or a platform without the endpoint, and none of those means it failed. Records are
-  bounded to the most recent 200, so ask soon (we ask once, ~45s later) and never in a loop. It
-  carries no message text and no recipient, so nothing about polling it can leak a donor's figures.
+  another app's, an evicted record, or a platform without the endpoint, and **none of those means it
+  failed**. Records are the most recent **500 per app, kept 24 hours** (200 *shared* before platform
+  0.51.1-dev.8, which is how one busy app could evict everybody's), and status reads have their own
+  600/min budget separate from sending. We ask once, ~45s later, never in a loop. It carries no
+  message text and no recipient, so polling it cannot leak a donor's figures.
+- **`sent` is a success state — never treat a `queued` row as "already handled".** Display's dedupe
+  did, which worked only while `queued` was the sole success and produced a duplicate the moment
+  delivery was confirmed. Nothing here keys on a state (and nothing retries a send); a future dedupe
+  must key on the message id. `expired` is a failure: the recipient still has nothing.
+- **`immediate: true` was asked for and dropped, correctly.** With no pacing left, the only delay is
+  a typing indicator sized to the message. A per-caller priority flag over a shared queue would be
+  set by every app within a week and mean nothing.
 - **Nothing auth-critical, and nothing that DEPENDS on the message arriving.** It is an unofficial
   client and the number can be restricted or banned at any moment. Note the precise claim, because
   it changed in v0.43.0: WhatsApp is **not** necessarily a second copy of something that also went

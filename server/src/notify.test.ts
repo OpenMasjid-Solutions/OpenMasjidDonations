@@ -221,3 +221,77 @@ test('a row written before the switch existed treats a stored number as ON', () 
     .run('notify', JSON.stringify({ events: { refund: { os: true, email: '', whatsapp: '447700900123' } } }));
   assert.equal(s.getNotify().events.refund.whatsappOn, true);
 });
+
+// ── Bursts: an event that fires per EXTERNAL failure must gate itself ────────
+//
+// Kiosk found this the hard way and it applies here: `paymentFailed` fires once per PaymentIntent
+// Stripe refuses, so one expired key on a Friday is one message per person who tried to give. The
+// platform's 60-second per-recipient cooldown used to absorb that, and platform 0.51.1 removed it.
+//
+// `burst` in index.ts is the gate. It is reproduced here rather than imported because index.ts
+// starts a server on import; what is asserted is the CONTRACT the real one has to keep, and the
+// shapes are identical line for line. The property that matters is the SECOND one: a gate that
+// drops the 2nd to the 200th silently leaves an admin unable to tell one unlucky donor from
+// everybody, which are very different Fridays.
+
+function makeBurst(nowRef: { t: number }) {
+  const seen = new Map<string, { at: number; skipped: number }>();
+  return (key: string, everyMs: number): { allow: boolean; skipped: number } => {
+    const now = nowRef.t;
+    const w = seen.get(key);
+    if (w && now - w.at < everyMs) {
+      w.skipped += 1;
+      return { allow: false, skipped: w.skipped };
+    }
+    const skipped = w?.skipped ?? 0;
+    seen.set(key, { at: now, skipped: 0 });
+    return { allow: true, skipped };
+  };
+}
+
+const HOUR = 3600_000;
+
+test('burst: the first failure goes out, and the flood behind it does not', () => {
+  const now = { t: 0 };
+  const burst = makeBurst(now);
+  assert.equal(burst('paymentFailed', HOUR).allow, true, 'the masjid must hear about it at once');
+  for (let i = 0; i < 200; i++) assert.equal(burst('paymentFailed', HOUR).allow, false);
+});
+
+test('burst: what it swallowed is COUNTED and reported on the next message through', () => {
+  const now = { t: 0 };
+  const burst = makeBurst(now);
+  burst('paymentFailed', HOUR); // the one that got through
+  for (let i = 0; i < 41; i++) burst('paymentFailed', HOUR);
+  now.t += HOUR + 1;
+  const next = burst('paymentFailed', HOUR);
+  assert.equal(next.allow, true);
+  assert.equal(next.skipped, 41, 'an hour of "one donor or everybody?" has to be answerable');
+});
+
+test('burst: separate keys are separate — a tuition outage must not mute a donation one', () => {
+  const now = { t: 0 };
+  const burst = makeBurst(now);
+  assert.equal(burst('paymentFailed:donation', HOUR).allow, true);
+  assert.equal(burst('paymentFailed:tuition', HOUR).allow, true, 'a different failure is different news');
+  assert.equal(burst('paymentFailed:donation', HOUR).allow, false);
+});
+
+test('burst: the counter resets after a message gets through, so counts never compound', () => {
+  const now = { t: 0 };
+  const burst = makeBurst(now);
+  burst('x', HOUR);
+  burst('x', HOUR);
+  now.t += HOUR + 1;
+  assert.equal(burst('x', HOUR).skipped, 1);
+  now.t += HOUR + 1;
+  assert.equal(burst('x', HOUR).skipped, 0, 'the second window had nothing held back');
+});
+
+test('the "and N more" sentence is only there when there were more', () => {
+  // Mirrors alsoHeld() in index.ts.
+  const alsoHeld = (n: number) => (n > 0 ? ` This has happened ${n} more time${n === 1 ? '' : 's'} since the last message.` : '');
+  assert.equal(alsoHeld(0), '');
+  assert.match(alsoHeld(1), /1 more time since/);
+  assert.match(alsoHeld(41), /41 more times since/);
+});
