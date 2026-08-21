@@ -21,7 +21,7 @@ export interface ReceiptTemplate {
   heading: string;
   /** The thank-you paragraph. Supports {name} {amount} {campaign} {masjid}. */
   body: string;
-  /** Accent colour (hex) for the heading + links, or '' for the default emerald. */
+  /** Accent color (hex) for the heading + links, or '' for the default emerald. */
   accent: string;
 }
 
@@ -219,12 +219,12 @@ export function renderReceipt(tpl: ReceiptTemplate, ctx: ReceiptContext): Render
  *  escaping rules apply to every field), plus the two figures a refund is about: what is coming
  *  back, and what the original donation was. */
 export interface RefundContext extends Omit<ReceiptContext, 'datePaid'> {
-  /** What is being returned, already formatted, e.g. "£20.00". */
+  /** What is being returned, already formatted, e.g. "$20.00". */
   refundAmountText: string;
   /** When the refund was made, formatted for reading. */
   dateRefunded: string;
   /** True when the WHOLE donation is coming back — the wording differs, and a masjid being told
-   *  "£20 of your £50 has been returned" when it was all of it would cause a phone call. */
+   *  "$20 of your $50 has been returned" when it was all of it would cause a phone call. */
   full: boolean;
 }
 
@@ -337,7 +337,7 @@ export function renderMonthlySetup(accentRaw: string, ctx: MonthlySetupContext):
  *  most likely to worry a donor if it were got wrong. The masjid's branding (logo, accent, contact
  *  details) still carries through, so it reads as their letter.
  *
- *  `accent` is the admin's receipt accent; anything that isn't a hex colour falls back to the
+ *  `accent` is the admin's receipt accent; anything that isn't a hex color falls back to the
  *  default, so an unvalidated value can never reach the markup. Every value is escaped and the
  *  subject is flattened to one line — the donor's own name is in it, and the donor is an
  *  unauthenticated stranger (DONATIONS-023). */

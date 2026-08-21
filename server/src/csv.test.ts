@@ -31,7 +31,7 @@ test('a dangerous value that also has a comma is BOTH prefixed and quoted', () =
 test('leaves ordinary donor values untouched', () => {
   assert.equal(csvCell('Aisha Khan'), 'Aisha Khan');
   assert.equal(csvCell('aisha@example.com'), 'aisha@example.com');
-  assert.equal(csvCell('£50.00'), '£50.00');
+  assert.equal(csvCell('$50.00'), '$50.00');
   assert.equal(csvCell(''), '');
   // A minus that is part of a normal value only matters at position 0; "A-1" is fine.
   assert.equal(csvCell('A-1'), 'A-1');

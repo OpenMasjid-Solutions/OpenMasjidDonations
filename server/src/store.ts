@@ -127,7 +127,7 @@ export interface ThankYou {
   message: string;
   /** Background image URL (or /uploads/…) for the thank-you screen; empty = the page's. */
   backgroundImage: string;
-  /** Accent colour (hex) for the thank-you screen highlight; empty = the theme accent. */
+  /** Accent color (hex) for the thank-you screen highlight; empty = the theme accent. */
   accent: string;
 }
 
@@ -216,7 +216,7 @@ export interface NotifyChannels {
    *
    * ON by default for every event — this is the channel a masjid already has, and the one that needs
    * no setup. Note it is an **AND** with the admin's own matrix in OpenMasjidOS → Settings → Alerts:
-   * we ask the platform to deliver, the platform still honours the admin's per-alert channel
+   * we ask the platform to deliver, the platform still honors the admin's per-alert channel
    * choices, and `disabled_by_admin` is a normal answer. Turning this on here therefore means "we
    * will raise it", never "it will definitely arrive" — and the panel says so, because an admin who
    * reads it as a guarantee would stop looking for the real switch.
@@ -243,6 +243,19 @@ export interface NotifyChannels {
   whatsappOn: boolean;
 }
 
+/** The last thing that happened to a WhatsApp message for one event.
+ *
+ *  `refused` is ours (the platform said no, with a reason); `failed`/`expired` come from the
+ *  platform's status endpoint; `queued` means accepted and not yet resolved. `sent` is deliberately
+ *  NOT "delivered" — WhatsApp gives no receipt, and the platform only knows it handed it over. */
+export interface WhatsAppEventOutcome {
+  state: 'queued' | 'sent' | 'failed' | 'expired' | 'refused';
+  /** The platform's own sentence, when there is one. Never a recipient, never the message. */
+  reason: string;
+  /** ISO timestamp of when WE recorded this. */
+  at: string;
+}
+
 export interface NotifySettings {
   /** Prefill for the form only. NEVER consulted when sending: an event with an empty `email` is off,
    *  full stop. A default that silently became the recipient would be how a masjid discovers they
@@ -252,7 +265,7 @@ export interface NotifySettings {
   /** Don't raise `donation` below this, in MINOR units. 0 = every donation.
    *
    *  Matters most for WhatsApp, where the platform spaces messages 6–20s apart under hourly and
-   *  daily caps shared with every other app on the box: a busy Friday of £2 gifts would spend the
+   *  daily caps shared with every other app on the box: a busy Friday of $2 gifts would spend the
    *  whole allowance on good news and push the refunds and failures behind it. Applied to all three
    *  channels so the three never disagree about what happened. */
   minAmount: number;
@@ -420,7 +433,7 @@ export function campaignToken(): string {
  *
  *  Hex, not base64url, and deliberately: this string is retyped, forwarded and line-wrapped by mail
  *  clients, and `-`/`_`/mixed case are exactly what those mangle. It is the ONLY thing standing
- *  between a stranger and stopping somebody's donation, so the entropy is the defence (a rate limit
+ *  between a stranger and stopping somebody's donation, so the entropy is the defense (a rate limit
  *  cannot be, because behind the platform's ingress every remote visitor shares one bucket —
  *  DONATIONS-009). 2^128 makes guessing hopeless. */
 export function planLinkToken(): string {
@@ -447,7 +460,7 @@ export function slugify(s: string): string {
  * A campaign's `paymentAccount` is a namespaced reference, so that "which bank account receives
  * this donation" can never be ambiguous:
  *
- *   ''              — no choice: follow the site default (exactly the pre-v0.42.0 behaviour).
+ *   ''              — no choice: follow the site default (exactly the pre-v0.42.0 behavior).
  *   'fabric:<id>'   — a named account in the OpenMasjidOS vault, by its ID (a slugified label:
  *                     lowercase, [a-z0-9-], never an underscore). IDs, never labels — the platform
  *                     matches either, but a label changes when the admin renames the account while
@@ -591,7 +604,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_student_payments_outbox ON student_payments(pay_status, record_status);
 
       -- Append-only record of every admin action that touches money or donor data (DONATIONS-011).
-      -- This app handles donations, so "who exported the donor list, who cancelled that plan, who
+      -- This app handles donations, so "who exported the donor list, who canceled that plan, who
       -- rotated the Stripe key, and when" must be answerable — CLAUDE.md §8 promises the masjid a
       -- financial record, and a second volunteer with panel access is in the threat model.
       -- Deliberately NOT a general request log: no donor rows, no amounts, no PII beyond the actor
@@ -660,7 +673,7 @@ export class Store {
     this.ensureColumn('campaigns', 'force_cover_fees', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('campaigns', 'widget_enabled', 'INTEGER NOT NULL DEFAULT 0');
     // Which Stripe account an appeal pays into. Legacy rows default to '' = "the site default",
-    // which is precisely the behaviour they had before this column existed — there is deliberately
+    // which is precisely the behavior they had before this column existed — there is deliberately
     // NO backfill from stripe_account_id, because inferring a choice nobody made is how an existing
     // appeal would start charging a different bank account after an unattended overnight update.
     this.ensureColumn('campaigns', 'payment_account', "TEXT NOT NULL DEFAULT ''");
@@ -679,7 +692,7 @@ export class Store {
     // = "no split", which is exactly how they were pushed to Students before this existed.
     this.ensureColumn('student_payments', 'students_split', "TEXT NOT NULL DEFAULT ''");
     // The ticked bill lines of a tuition charge (students/billing §11.0b). Legacy rows default to
-    // '' = "no lines", exactly how they were pushed to Students before itemised bills existed.
+    // '' = "no lines", exactly how they were pushed to Students before itemized bills existed.
     this.ensureColumn('student_payments', 'payment_lines', "TEXT NOT NULL DEFAULT ''");
     // The processing fee the PAYER covered (students/billing §11.2 `info.fee`, Students 0.51.0).
     // Legacy rows default to 0 = "the school absorbed it", which is true of every tuition payment
@@ -820,6 +833,37 @@ export class Store {
    *  email provider works — which is what decides whether a donor's receipt may be a branded one of
    *  ours (Stripe's own suppressed) or must be left to Stripe. Not a secret, not a setting: a cached
    *  observation, and the live value in memory always wins. See fabric.ts `emailLikelyAvailable`. */
+  /** What became of the last WhatsApp message we sent for one event.
+   *
+   *  Persisted rather than kept in memory because the whole point is to answer a question the admin
+   *  asks LATER — "did the treasurer get told about that refund?" — and a dev-channel box restarts
+   *  often. Deliberately holds no message text and no recipient: the state, the platform's own
+   *  sentence, and when. One row per event, newest only; this is a health indicator on a settings
+   *  screen, not an audit trail. */
+  getWhatsAppOutcomes(): Record<string, WhatsAppEventOutcome> {
+    const raw = this.getJson<Record<string, unknown>>('whatsapp_outcomes');
+    const out: Record<string, WhatsAppEventOutcome> = {};
+    for (const [event, v] of Object.entries(raw ?? {})) {
+      if (!v || typeof v !== 'object') continue;
+      const o = v as Record<string, unknown>;
+      const state = String(o.state ?? '');
+      if (!state) continue;
+      out[event] = {
+        state: state as WhatsAppEventOutcome['state'],
+        reason: String(o.reason ?? '').slice(0, 200),
+        at: String(o.at ?? ''),
+      };
+    }
+    return out;
+  }
+
+  setWhatsAppOutcome(event: string, outcome: WhatsAppEventOutcome): void {
+    const all = this.getWhatsAppOutcomes();
+    all[event] = { state: outcome.state, reason: (outcome.reason || '').slice(0, 200), at: outcome.at };
+    // Bounded by the number of declared events, so no pruning is needed.
+    this.setRaw('whatsapp_outcomes', JSON.stringify(all));
+  }
+
   getEmailStatus(): string {
     return this.getRaw('email_status') ?? '';
   }
@@ -1065,7 +1109,7 @@ export class Store {
   }
 
   /** How many donations / tuition payments were TAKEN on this account. Money already taken is the
-   *  stronger claim: confirming, refunding, and cancelling a monthly plan all re-resolve the account
+   *  stronger claim: confirming, refunding, and canceling a monthly plan all re-resolve the account
    *  from the row, so deleting it would strand those records for ever — including leaving a card
    *  mandate that neither the admin nor the donor could stop. */
   paymentsForAccount(id: string): number {
@@ -1682,13 +1726,13 @@ export class Store {
    *  not a one-line SUM. Nothing local records that a plan ENDED — a cancellation happens at
    *  Stripe, and a masjid on a LAN may never see the webhook — so a plan stopped two years ago
    *  still has its succeeded rows sitting in this table. Counting those, a masjid three years in
-   *  would be told it had fifty monthly donors giving about £2,000 a month when the truth was ten
-   *  and £400: confidently wrong, about money, in the flattering direction.
+   *  would be told it had fifty monthly donors giving about $2,000 a month when the truth was ten
+   *  and $400: confidently wrong, about money, in the flattering direction.
    *
    *  A live monthly plan is charged every month, so "nothing since `activeSince`" is the one local
    *  signal that a plan is no longer running. Those are returned separately as `dormant` rather
    *  than dropped, so a caller can explain the smaller figure instead of just presenting it. Pass
-   *  nothing to count every plan ever, which is the old behaviour. */
+   *  nothing to count every plan ever, which is the old behavior. */
   monthlyGiving(monthPrefix: string, activeSince = ''): { donors: number; perMonth: number; thisMonth: number; dormant: number } {
     const rows = this.db
       .prepare(

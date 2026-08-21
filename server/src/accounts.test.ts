@@ -8,7 +8,7 @@
 //  1. THE MIGRATION RULE. An appeal that existed before this feature must charge exactly the account
 //     it charged before. `payment_account` defaults to '' and there is NO backfill, so the resolver's
 //     default branch is the old code path, reached by every existing row.
-//  2. REFUSE, NEVER SUBSTITUTE. An explicit choice that cannot be honoured must stop the donation,
+//  2. REFUSE, NEVER SUBSTITUTE. An explicit choice that cannot be honored must stop the donation,
 //     not quietly settle it elsewhere. The dangerous case is subtle: 'fabric:' with an empty id would
 //     reach the platform as `?account=` omitted, which it answers with its FIRST account — so a Zakat
 //     appeal would land in the general account and the ledger would record the general account's id.
@@ -25,9 +25,9 @@ function fresh(): Store {
   return new Store(':memory:');
 }
 
-// ── 1 + 2. Parsing: the boundary that decides "honour", "refuse" or "site default" ──
+// ── 1 + 2. Parsing: the boundary that decides "honor", "refuse" or "site default" ──
 
-test('accounts: an empty setting is the SITE DEFAULT — the pre-v0.42.0 behaviour every old row has', () => {
+test('accounts: an empty setting is the SITE DEFAULT — the pre-v0.42.0 behavior every old row has', () => {
   for (const v of ['', '   ', null, undefined]) {
     assert.deepEqual(parsePaymentAccount(v), { kind: 'default' }, `${JSON.stringify(v)} must mean "site default"`);
   }
@@ -56,7 +56,7 @@ test('accounts: a vault id must be a real slug — no uppercase, no underscore, 
   }
 });
 
-test('accounts: anything unrecognised is INVALID — the resolver must refuse, not fall back', () => {
+test('accounts: anything unrecognized is INVALID — the resolver must refuse, not fall back', () => {
   for (const v of ['garbage', 'acct_a1b2c3', 'zakat', 'https://evil.example', 'fabric:a b']) {
     assert.deepEqual(parsePaymentAccount(v), { kind: 'invalid' }, `"${v}" must be invalid`);
   }
@@ -129,7 +129,7 @@ test('accounts: the legacy column still counts as in-use', () => {
 });
 
 test('accounts: an account that has TAKEN money cannot be deleted, even with no campaign left', () => {
-  // Confirming, refunding and cancelling a plan all re-resolve the account from the row. Delete it
+  // Confirming, refunding and canceling a plan all re-resolve the account from the row. Delete it
   // and those records are stranded — including a monthly plan neither side could ever stop.
   const s = fresh();
   const a = s.createStripeAccount({ label: 'Old' });

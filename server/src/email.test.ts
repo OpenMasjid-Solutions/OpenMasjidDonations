@@ -17,7 +17,7 @@ const TPL: ReceiptTemplate = {
 };
 const CTX: ReceiptContext = {
   name: 'Yusuf',
-  amountText: '£50.00',
+  amountText: '$50.00',
   campaignTitle: 'General Fund',
   masjidName: 'An-Noor',
   masjidLogo: '',
@@ -38,7 +38,7 @@ test('fills variables in subject/heading/body', () => {
 
 test('the receipt DETAILS block renders amount/date/method/fund (separate from the paragraph)', () => {
   const r = renderReceipt(TPL, CTX);
-  for (const s of ['Amount paid', '£50.00', 'Date paid', 'Jul 15, 2026, 6:03 PM UTC', 'Payment method', 'Visa •••• 4242', 'Fund', 'General Fund', '0065A17F']) {
+  for (const s of ['Amount paid', '$50.00', 'Date paid', 'Jul 15, 2026, 6:03 PM UTC', 'Payment method', 'Visa •••• 4242', 'Fund', 'General Fund', '0065A17F']) {
     assert.ok(r.html.includes(s), `html should contain "${s}"`);
     assert.ok(r.text.includes(s.replace('Amount paid', 'Amount paid').replace('Date paid', 'Date paid')), `text should contain "${s}"`);
   }
@@ -124,8 +124,8 @@ test('receipt subject: ordinary names and unicode are untouched', () => {
 // can inject markup, only http(s) images/links are emitted, and the subject stays one line.
 const RCTX: RefundContext = {
   name: 'Yusuf',
-  amountText: '£50.00',
-  refundAmountText: '£20.00',
+  amountText: '$50.00',
+  refundAmountText: '$20.00',
   full: false,
   campaignTitle: 'General Fund',
   masjidName: 'An-Noor',
@@ -142,14 +142,14 @@ test('refund notice: a PART refund names both figures, so nobody thinks it was a
   const r = renderRefundNotice('', RCTX);
   assert.equal(r.subject, 'Your donation to An-Noor has been refunded');
   assert.ok(r.html.includes('Part of your donation has been refunded'));
-  for (const s of ['Refunded', '£20.00', 'Original donation', '£50.00', 'Date refunded', 'Visa •••• 4242', 'General Fund']) {
+  for (const s of ['Refunded', '$20.00', 'Original donation', '$50.00', 'Date refunded', 'Visa •••• 4242', 'General Fund']) {
     assert.ok(r.html.includes(s), `html should contain "${s}"`);
   }
-  assert.ok(r.text.includes('£20.00') && r.text.includes('£50.00'));
+  assert.ok(r.text.includes('$20.00') && r.text.includes('$50.00'));
 });
 
 test('refund notice: a FULL refund says so, and does not repeat the amount as an "original"', () => {
-  const r = renderRefundNotice('', { ...RCTX, full: true, refundAmountText: '£50.00' });
+  const r = renderRefundNotice('', { ...RCTX, full: true, refundAmountText: '$50.00' });
   assert.ok(r.html.includes('Your donation has been refunded'));
   assert.ok(!r.html.includes('Part of your donation'));
   assert.ok(!r.html.includes('Original donation'), 'a full refund has nothing to compare against');
@@ -182,7 +182,7 @@ test('SECURITY: the refund subject cannot carry an injected email header (DONATI
   assert.ok(!/\u2028|\u2029|\v|\f|\0/.test(subject));
 });
 
-test('SECURITY: the refund notice accent takes a hex colour or the default, never CSS', () => {
+test('SECURITY: the refund notice accent takes a hex color or the default, never CSS', () => {
   assert.ok(renderRefundNotice('#D4AF37', RCTX).html.includes('#D4AF37'));
   const bad = renderRefundNotice('red;}body{display:none', RCTX).html;
   assert.ok(bad.includes('#1FA37A'));
@@ -215,8 +215,8 @@ test('receipt and refund notice share one layout, so a donor reads the same lett
 //     reach the markup, and the subject becomes an SMTP header at the platform (DONATIONS-023).
 const MCTX: MonthlySetupContext = {
   name: 'Yusuf',
-  amountText: '£25.00',
-  monthlyAmountText: '£25.00',
+  amountText: '$25.00',
+  monthlyAmountText: '$25.00',
   firstPaymentDate: 'Aug 3, 2026, 6:03 PM UTC',
   stopUrl: 'https://masjid.example.org/donate/stop/0123456789abcdef0123456789abcdef',
   campaignTitle: 'Zakat',
@@ -229,11 +229,11 @@ const MCTX: MonthlySetupContext = {
   contactWebsite: 'https://annoor.org',
 };
 
-test('monthly letter: says what was set up, with the figures a donor recognises', () => {
+test('monthly letter: says what was set up, with the figures a donor recognizes', () => {
   const r = renderMonthlySetup('', MCTX);
   assert.equal(r.subject, 'Your monthly donation to An-Noor is set up');
   assert.ok(r.html.includes('Your monthly donation is set up'));
-  for (const s of ['Monthly amount', '£25.00', 'First payment', 'Zakat', '0065A17F']) {
+  for (const s of ['Monthly amount', '$25.00', 'First payment', 'Zakat', '0065A17F']) {
     assert.ok(r.html.includes(s), `html should contain "${s}"`);
   }
   assert.ok(r.html.includes('every month until you decide to stop'));
@@ -266,7 +266,7 @@ test('monthly letter: with NO public address there is no link, but there is stil
   assert.ok(/get in touch/.test(r.html), 'it must still tell them how to stop it');
   assert.ok(!/Keep this email/.test(r.html), 'and must not ask them to keep an email with no link in it');
   // The figures are unchanged — the letter is still their confirmation.
-  assert.ok(r.html.includes('£25.00') && r.html.includes('Zakat'));
+  assert.ok(r.html.includes('$25.00') && r.html.includes('Zakat'));
 });
 
 test('monthly letter: a non-https stop URL is dropped rather than linked', () => {
@@ -295,7 +295,7 @@ test('SECURITY: a donor name with HTML is escaped in the monthly letter', () => 
   assert.ok(r.html.includes('&lt;img src=x onerror=alert(1)&gt;'));
 });
 
-test('SECURITY: the monthly letter accent takes a hex colour or the default, never CSS', () => {
+test('SECURITY: the monthly letter accent takes a hex color or the default, never CSS', () => {
   assert.ok(renderMonthlySetup('#D4AF37', MCTX).html.includes('#D4AF37'));
   const bad = renderMonthlySetup('red;}body{display:none', MCTX).html;
   assert.ok(bad.includes('#1FA37A'));

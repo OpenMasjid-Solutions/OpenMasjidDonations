@@ -75,7 +75,7 @@ test('zero, negative and non-finite amounts are refused', () => {
   }
 });
 
-// ── 2. The three-decimal rule (DONATIONS-001's neighbourhood) ─────────────────
+// ── 2. The three-decimal rule (DONATIONS-001's neighborhood) ─────────────────
 
 test('a part refund in a three-decimal currency is snapped to a multiple of ten', () => {
   // 10.123 KWD typed → 10123 minor by the caller; Stripe only accepts multiples of 10.

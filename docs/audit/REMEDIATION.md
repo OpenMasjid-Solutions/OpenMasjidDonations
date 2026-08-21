@@ -21,7 +21,7 @@ was disabled per the audit mandate. Everything is on two branches, delivered as 
 
 ## Read this first — the Tier 2 changes
 
-These ship behaviour changes. If something feels wrong in the next few days, look here.
+These ship behavior changes. If something feels wrong in the next few days, look here.
 
 1. **The admin session cookie is now `Secure` on HTTPS** (`70d5457`, DONATIONS-012). It follows the
    request scheme, so a plain-HTTP LAN install is unaffected — that was the whole design constraint,
@@ -68,8 +68,8 @@ And on the money branch, both of which change what donors are charged or what is
 | `64f037d` | DONATIONS-018, -021 | `refresh=1` now requires the same-origin check; `requestTimeout: 120_000` | Gating only the *write* side left the amplification the guard existed to stop: forcing the cache open is what turns one cross-site navigation into up to 200 outbound Stripe calls. `connectionTimeout` was deliberately **not** set — it maps to Node's socket-inactivity timeout and would reap idle keep-alive sockets Fastify holds by design, buying TCP churn for no security. |
 | `84bcae6` | DONATIONS-023 | Receipt subject flattened (`\r \n U+2028 U+2029 U+0085 \v \f \0`) before the length cap | The subject is the admin's template with the **donor's own name** substituted in, and the donor is an unauthenticated stranger. The finished subject becomes an SMTP header at the platform, so CR/LF in a name is header injection (`Bcc:`, a forged `From:`). Flattened before the 200-char slice so the cut can never land mid-escape. Platform-side counterpart in `ACTION_REQUIRED.md` §3a. |
 | `70d5457` | DONATIONS-012 | `secureForRequest(req)`; cookie `Secure` when the request arrived over TLS | Nothing ever set `COOKIE_SECURE`, so the cookie was never `Secure` — including in the normal deployment, where the manifest declares `https: true`. Always-`Secure` was not an option (it locks out plain-HTTP LAN admins), so it follows the actual scheme. Reading `x-forwarded-proto` is safe here specifically because a spoofed value can only add `Secure` to the response to *that same request* — it can only restrict the spoofer's own cookie. |
-| `87033d3` | DONATIONS-011 | `audit_log` table + writes on donor export, plan pause/resume/stop/schedule, Stripe account create/update/delete, campaign delete | There was no answer to "who exported the donor list / cancelled that plan / rotated the key". Records field *names* on a key change, never values. `recordAudit` never throws — an audit write must not be able to fail the action it describes. |
-| `ad80f17` | DONATIONS-044 | New `stripe.test.ts` — 17 tests over every money conversion | `stripe.ts` had **zero** tests, and it converts every amount the product charges. Two tests deliberately pinned the *wrong* behaviour so it was visible and would fail loudly when fixed — which is exactly what happened on the money branch. |
+| `87033d3` | DONATIONS-011 | `audit_log` table + writes on donor export, plan pause/resume/stop/schedule, Stripe account create/update/delete, campaign delete | There was no answer to "who exported the donor list / canceled that plan / rotated the key". Records field *names* on a key change, never values. `recordAudit` never throws — an audit write must not be able to fail the action it describes. |
+| `ad80f17` | DONATIONS-044 | New `stripe.test.ts` — 17 tests over every money conversion | `stripe.ts` had **zero** tests, and it converts every amount the product charges. Two tests deliberately pinned the *wrong* behavior so it was visible and would fail loudly when fixed — which is exactly what happened on the money branch. |
 | `73cc072` | -041, -042, -027, -028 | `npm audit fix` (non-major only); `.env`/`*.pem`/`*.key` added to `.dockerignore`; data dir chmod `0700` | `COPY server/ ./` would have baked a developer's local `.env` — with real Stripe keys — into an image layer. On the perms: SQLite creates `-wal`/`-shm` sidecars lazily, and in WAL mode the newest committed data (a freshly saved Stripe key) is in the `-wal` file, not the `0600` database; chmod'ing sidecars is a race, so `0700` on the directory covers every present and future file. |
 | `73086c5` | DONATIONS-004 | All five Actions in the publishing job pinned to commit SHAs | The job holds `packages: write` and a GHCR credential for the image every masjid Pi pulls. An upstream owner repointing `v6` would run their code beside a live publish token. Each SHA is exactly what the tag resolved to on 2026-08-03 — **frozen, not upgraded** — verified via `gh api repos/<owner>/git/ref/tags/<tag>`. `cla.yml` already did this; this file did not. |
 | `2924f79` | DONATIONS-043, -029 | New read-only weekly `audit.yml`; `unhandledRejection`/`uncaughtException` handlers | The only workflow was the release build, so a new advisory went unnoticed until someone ran `npm audit` by hand. The new workflow holds no secrets, opens no PR, pushes nothing. The fault handlers matter because the codebase uses fire-and-forget `void fn().catch()` widely and Node's default is to kill the process — one missed `.catch()` in an alert path would take the donation page down. |
@@ -108,7 +108,7 @@ server npm audit: 4 high    web npm audit: 1 high
 ℹ suites 0
 ℹ pass 179
 ℹ fail 0
-ℹ cancelled 0
+ℹ canceled 0
 ℹ skipped 0
 ℹ todo 0
 

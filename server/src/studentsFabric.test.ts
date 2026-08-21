@@ -55,18 +55,18 @@ after(() => {
   globalThis.fetch = realFetch;
 });
 
-// ── normalisation ───────────────────────────────────────────────────────────
+// ── normalization ───────────────────────────────────────────────────────────
 test('a typed Student ID is canonicalised the way the provider does (case, spaces, hyphens)', () => {
-  assert.equal(students.normaliseStudentCode('  yus-1234 '), 'YUS1234');
-  assert.equal(students.normaliseStudentCode('yus 12 34'), 'YUS1234');
-  assert.equal(students.normaliseStudentCode('YUS1234'), 'YUS1234');
-  assert.equal(students.normaliseStudentCode('   '), '');
+  assert.equal(students.normalizeStudentCode('  yus-1234 '), 'YUS1234');
+  assert.equal(students.normalizeStudentCode('yus 12 34'), 'YUS1234');
+  assert.equal(students.normalizeStudentCode('YUS1234'), 'YUS1234');
+  assert.equal(students.normalizeStudentCode('   '), '');
   // NOT a format check — the provider owns the format, so anything else passes through.
-  assert.equal(students.normaliseStudentCode('abcd12345'), 'ABCD12345');
+  assert.equal(students.normalizeStudentCode('abcd12345'), 'ABCD12345');
 });
 
 // ── identify (the confirmation step that replaced the PIN) ───────────────────
-test('identify POSTs v:2 + the normalised code to the broker with OUR secret', async () => {
+test('identify POSTs v:2 + the normalized code to the broker with OUR secret', async () => {
   reply({ v: 2, found: true, student: { studentCode: 'YUS1234', firstName: 'Yusuf', lastInitial: 'I' } });
   const r = await students.studentsIdentify('  yus-1234 ');
   assert.deepEqual(r, { status: 'found', student: { studentCode: 'YUS1234', firstName: 'Yusuf', lastInitial: 'I' } });
@@ -146,7 +146,7 @@ test('lookup parses the matched child, the per-child balances and the per-child 
     { studentId: 'stu_2', firstName: 'Maryam', lastInitial: 'I', balanceCents: 15000, creditCents: 0 },
   ]);
   assert.deepEqual(r.family.openInvoices, [
-    // No `items` in this fixture (a pre-0.43.0 Students) → not itemised, pay the bill as one
+    // No `items` in this fixture (a pre-0.43.0 Students) → not itemized, pay the bill as one
     // thing exactly as before.
     { id: 'inv_9', studentId: 'stu_2', label: 'Tuition — Jul 2026', dueDate: '2026-07-01', balanceCents: 15000, items: [] },
   ]);
@@ -200,7 +200,7 @@ test('lookup: a credit from an un-upgraded Students reads as zero, never NaN', a
   assert.equal(r.status === 'found' && r.family.students[0].creditCents, 0);
 });
 
-test('lookup parses ITEMISED bills — tuition + a one-off charge + a bursary (§11.0b)', async () => {
+test('lookup parses ITEMIZED bills — tuition + a one-off charge + a bursary (§11.0b)', async () => {
   reply({
     v: 2,
     found: true,
@@ -247,9 +247,9 @@ test('lookup keeps an UNKNOWN item kind as a plain line rather than dropping mon
   assert.equal(r.status === 'found' && r.family.openInvoices[0].items.length, 1);
 });
 
-test('lookup DISTRUSTS itemisation that cannot reconcile or be paid by id', async () => {
+test('lookup DISTRUSTS itemization that cannot reconcile or be paid by id', async () => {
   // Lines that don't add up to the bill, or one without an id, would let us show a breakdown we
-  // can't charge from — drop to a single un-itemised bill instead.
+  // can't charge from — drop to a single un-itemized bill instead.
   const bad = (items: unknown[]) => ({
     v: 2, found: true, matchedStudent: { id: 'stu_1', balanceCents: 25000 },
     family: {
@@ -260,13 +260,13 @@ test('lookup DISTRUSTS itemisation that cannot reconcile or be paid by id', asyn
   });
   reply(bad([{ id: 'iti_1', label: 'Tuition', kind: 'tuition', amountCents: 20000, balanceCents: 20000 }])); // sums to 20000, not 25000
   let r = await students.studentsLookup('YUS1234');
-  assert.deepEqual(r.status === 'found' ? r.family.openInvoices[0].items : 'x', [], 'mismatched sum → not itemised');
+  assert.deepEqual(r.status === 'found' ? r.family.openInvoices[0].items : 'x', [], 'mismatched sum → not itemized');
   reply(bad([
     { label: 'Tuition', kind: 'tuition', amountCents: 20000, balanceCents: 20000 }, // no id
     { id: 'iti_2', label: 'Book fee', kind: 'charge', amountCents: 5000, balanceCents: 5000 },
   ]));
   r = await students.studentsLookup('YUS1234');
-  assert.deepEqual(r.status === 'found' ? r.family.openInvoices[0].items : 'x', [], 'a line with no id → not itemised');
+  assert.deepEqual(r.status === 'found' ? r.family.openInvoices[0].items : 'x', [], 'a line with no id → not itemized');
 });
 
 test('lookup: found:false is uniform not-found', async () => {
@@ -320,7 +320,7 @@ test('info: a floor advertised below ours is raised to ours (no sub-$1 charges)'
   assert.equal(r.available && r.info.minAmountCents, students.MIN_TUITION_CENTS, 'we take the stricter of the two');
 });
 
-test('info: a floor advertised ABOVE ours is honoured as-is', async () => {
+test('info: a floor advertised ABOVE ours is honored as-is', async () => {
   reply({ v: 2, enabled: true, schoolName: 'S', currency: 'usd', tagline: 'x', allowAdvance: true, minAmountCents: 500 });
   const r = await students.studentsInfo(true);
   assert.equal(r.available && r.info.minAmountCents, 500);
@@ -374,7 +374,7 @@ test('record-payment sends ticked LINES ALONE — never alongside students or al
     occurredAt: '2027-02-15T10:00:00Z',
     externalRef: { stripePaymentIntentId: 'pi_lines' },
     lines: [{ itemId: 'iti_2', amountCents: 5000 }],
-    // Deliberately passed too: they must be dropped in favour of `lines`.
+    // Deliberately passed too: they must be dropped in favor of `lines`.
     allocations: [{ invoiceId: 'inv_feb', amountCents: 5000 }],
     students: [{ studentId: 'stu_1', amountCents: 5000 }],
   });

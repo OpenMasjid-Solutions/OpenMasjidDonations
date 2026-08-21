@@ -155,7 +155,7 @@ test('groupPlanSeeds: the EARLIEST row supplies the plan identity, later rows on
   assert.equal(s.cardLast4, '4242');
   assert.equal(s.coverFees, false);
   assert.equal(s.giftAid, false);
-  assert.equal(s.currency, 'GBP', 'currency is normalised to upper case');
+  assert.equal(s.currency, 'GBP', 'currency is normalized to upper case');
   assert.equal(s.amountMinor, 1500, 'the first charge is the fallback amount');
   assert.equal(s.startedAt, '2026-01-10T00:00:00.000Z');
   assert.equal(s.collectedMinor, 4500, 'all three succeeded rows are money');
@@ -260,7 +260,7 @@ test('groupPlanSeeds: no rows → no plans (an empty tab, never a crash)', () =>
 
 test('groupPlanSeeds does NOT filter abandoned sign-ups — that is the caller\'s job, after syncing', () => {
   // The predicate must stay OUT of the index: the index is what feeds the sync, and the sync
-  // is what heals a £0 row whose payment really did land. Asserted so nobody "tidies" it in.
+  // is what heals a $0 row whose payment really did land. Asserted so nobody "tidies" it in.
   const old = new Date(Date.now() - 30 * 24 * 3600_000).toISOString();
   const seeds = groupPlanSeeds([don({ id: 'don_dud1', status: 'pending', subscriptionId: 'sub_DUD', createdAt: old })]);
   assert.equal(seeds.length, 1, 'an ancient never-paid sign-up is still in the index, ready to be synced');
@@ -271,7 +271,7 @@ test('groupPlanSeeds does NOT filter abandoned sign-ups — that is the caller\'
 
 test('isAbandonedSeed: a never-paid sign-up older than 24h is abandoned; a fresh one is not', () => {
   // Why they exist at all: the recurring donation row is written at /intent, BEFORE the donor
-  // enters a card, so every abandoned monthly checkout leaves a £0 row behind for ever.
+  // enters a card, so every abandoned monthly checkout leaves a $0 row behind for ever.
   const now = Date.parse('2026-06-10T12:00:00.000Z');
   const startedAgo = (ms: number) => new Date(now - ms).toISOString();
   assert.equal(isAbandonedSeed(seed({ payments: 0, collectedMinor: 0, startedAt: startedAgo(ABANDONED_MS + 1000) }), now), true);
@@ -287,7 +287,7 @@ test('isAbandonedSeed: any payment at all makes it a real plan, however old and 
   const ancient = '2024-01-01T00:00:00.000Z';
   assert.equal(isAbandonedSeed(seed({ payments: 1, startedAt: ancient }), now), false);
   assert.equal(isAbandonedSeed(seed({ payments: 40, startedAt: ancient }), now), false, 'a long-running plan is never hidden');
-  // A plan the donor themselves cancelled after one payment is history the masjid keeps.
+  // A plan the donor themselves canceled after one payment is history the masjid keeps.
   assert.equal(isAbandonedSeed(seed({ payments: 1, collectedMinor: 500, startedAt: ancient, lastPaymentAt: ancient }), now), false);
 });
 
@@ -393,7 +393,7 @@ test('invoiceStatusLabel: warm words, and null/unknown lands on "Not known"', ()
   assert.deepEqual(invoiceStatusLabel('paid'), { status: 'paid', label: 'Paid' });
   assert.deepEqual(invoiceStatusLabel('open'), { status: 'open', label: 'Waiting' });
   assert.deepEqual(invoiceStatusLabel('draft'), { status: 'draft', label: 'Not sent yet' });
-  assert.deepEqual(invoiceStatusLabel('void'), { status: 'void', label: 'Cancelled' });
+  assert.deepEqual(invoiceStatusLabel('void'), { status: 'void', label: 'Canceled' });
   // Deliberately NOT "Written off"/"Uncollectible" — a masjid volunteer is not a bookkeeper.
   assert.deepEqual(invoiceStatusLabel('uncollectible'), { status: 'uncollectible', label: 'Not collected' });
   assert.deepEqual(invoiceStatusLabel(null), { status: 'unknown', label: 'Not known' });

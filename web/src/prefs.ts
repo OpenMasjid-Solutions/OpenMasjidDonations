@@ -20,7 +20,7 @@ export interface Prefs {
   wallpaper: string;
   /** Optional custom wallpaper image URL — overrides the preset when set. */
   wallpaperImage: string;
-  /** Accent colour id — matches the dashboard's accent when embedded. */
+  /** Accent color id — matches the dashboard's accent when embedded. */
   accent: string;
   /** Mirror OpenMasjidOS's theme + wallpaper (on by default under the platform). */
   followOmos: boolean;

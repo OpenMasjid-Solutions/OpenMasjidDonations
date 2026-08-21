@@ -127,7 +127,7 @@ export function secureForRequest(req: { protocol?: string; headers: Record<strin
 
 /** Cookie options for @fastify/cookie's setCookie. HTTP-only + SameSite=Lax + Path=/, and `Secure`
  *  when the request came over TLS. Pass the request; omitting it falls back to the env override
- *  only, which is the pre-existing behaviour. */
+ *  only, which is the pre-existing behavior. */
 export function cookieOptions(maxAgeMs = MAX_AGE_MS, secure = COOKIE_SECURE) {
   return {
     httpOnly: true,

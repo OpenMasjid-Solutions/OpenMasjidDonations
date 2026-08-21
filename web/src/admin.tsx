@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
-  Ban, Bell, CalendarClock, CalendarDays, CheckCircle2, CloudOff, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
+  AlertTriangle, Ban, Bell, CalendarClock, CalendarDays, CheckCircle2, CloudOff, Coins, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Globe, GraduationCap, HandCoins, HeartHandshake,
   KeyRound, Landmark, LayoutDashboard, Link2, LogIn, LogOut, Mail, Megaphone, MessageCircle, Pause, Pencil, Play, Plus, QrCode, ReceiptText, RefreshCw, Repeat, Send,
   Settings as SettingsIcon, ShieldCheck, Sparkles, TrendingUp, Trash2, Undo2, Upload, Wallet, X,
 } from 'lucide-react';
@@ -1069,7 +1069,7 @@ function donorKey(d: Donation): string {
 function netAmount(d: Donation): number {
   return Math.max(0, d.amount - d.refundedAmount);
 }
-/** The small grey pill that marks a refunded row, or null. Shown in the list AND in the window's
+/** The small gray pill that marks a refunded row, or null. Shown in the list AND in the window's
  *  header, so a refund is never something you have to open a row to discover. */
 function RefundPill({ d }: { d: Donation }) {
   if (d.refundState === 'none') return null;
@@ -1186,7 +1186,7 @@ function DonationDetail({ donation, all, onClose, onPick, onRefunded }: {
   }, []);
   useEffect(() => {
     // Escape backs out of the refund confirmation first, then closes the window — so it can never
-    // dismiss both at once and leave the admin unsure which one they cancelled.
+    // dismiss both at once and leave the admin unsure which one they canceled.
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (confirm) setConfirm(null); else onClose();
@@ -1507,7 +1507,7 @@ function everyPhrase(p: { interval: string; intervalCount: number; frequency: st
   // Anything else ("Every 3 months") reads fine after an amount once it's lower-cased.
   return p.frequency ? p.frequency.toLowerCase() : '';
 }
-/** "£25 a month" — or just "£25" when how often it repeats isn't known. */
+/** "$25 a month" — or just "$25" when how often it repeats isn't known. */
 function planAmount(p: Plan): string {
   const every = everyPhrase(p);
   return every ? `${money(p.amount, p.currency)} ${every}` : money(p.amount, p.currency);
@@ -1575,7 +1575,7 @@ function PlansCard() {
   const plans = data?.plans ?? [];
   const shown = plans.slice(0, PLAN_ROWS);
   // With no live state every plan comes back 'unknown', so nothing counts as active and
-  // "£0.00 a month from 0 active plans" would be a measurement we never took. Only the two
+  // "$0.00 a month from 0 active plans" would be a measurement we never took. Only the two
   // halves that come from our own records are true then. Keyed on whether any row actually
   // carries live state — Stripe being reachable isn't enough, since a plan whose Stripe keys
   // have gone reaches Stripe fine and still tells us nothing.
@@ -1975,7 +1975,7 @@ function PlanEnd({ plan, busy, saving, onSave }: {
             </Field>
           )}
           {radio('count', 'Stop after a set number of further payments', !canCount)}
-          {/* The disabled radio explains itself, right where it is greyed out. */}
+          {/* The disabled radio explains itself, right where it is grayed out. */}
           {countBlocked && <p className="hint">{countBlocked}</p>}
           {mode === 'count' && (
             <Field id={`plan-end-count-${plan.id}`} label="Number of further payments">
@@ -1997,7 +1997,7 @@ function PlanEnd({ plan, busy, saving, onSave }: {
  *  from the donor page, in admin words.
  *
  *  Stopping is ONE action: straight away. There is no "stop after the next payment" here,
- *  because Stripe raises no further invoice for a plan cancelled at the end of its period —
+ *  because Stripe raises no further invoice for a plan canceled at the end of its period —
  *  and for a donation there is no service period to run out either, so the two would have
  *  been financially identical while promising the masjid money that never arrives. The way
  *  to take one more payment and then stop is "When it ends", pointed at below. */
@@ -2153,7 +2153,7 @@ function ThankYouFields({ value, onChange, placeholders }: { value: ThankYou; on
         {TY_VARS.map((v) => <button key={v} type="button" className="btn btn--ghost btn--sm mono" onClick={() => set({ message: `${value.message}${value.message && !value.message.endsWith(' ') ? ' ' : ''}${v}` })}>{v}</button>)}
       </div>
       <ImageField id="ty-bg" label="Background image (optional)" hint="Shown behind the thank-you. Empty uses the donation page's background." value={value.backgroundImage} onChange={(bg) => set({ backgroundImage: bg })} />
-      <Field id="ty-a" label="Accent colour (optional)"><input id="ty-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
+      <Field id="ty-a" label="Accent color (optional)"><input id="ty-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
     </>
   );
 }
@@ -2445,6 +2445,24 @@ function NotificationsCard() {
               </button>
             </div>
 
+            {/* What actually happened to the last WhatsApp message for THIS notification.
+                Before this, a message the platform refused — an unapproved group, the masjid's own
+                gateway number, a number missing its country code — looked exactly like one that
+                vanished: a single line in a log nobody reads. A refusal has a reason and the reason
+                is written for an admin, so it belongs on screen. */}
+            {(() => {
+              const o = wa.lastOutcomes?.[row.id];
+              if (!o || o.state === 'sent' || o.state === 'queued') return null;
+              return (
+                <p className="form-error notify-outcome">
+                  <AlertTriangle size={13} aria-hidden="true" />{' '}
+                  {o.state === 'refused' ? 'Not sent' : o.state === 'expired' ? 'Gave up sending' : 'Failed'}
+                  {o.reason ? ` — ${o.reason}` : ''}
+                  {o.at ? ` (${new Date(o.at).toLocaleString()})` : ''}
+                </p>
+              );
+            })()}
+
             {row.id === 'donation' && (
               <div className="notify-line">
                 <span className="notify-label notify-label--wide">Only if it’s at least</span>
@@ -2460,6 +2478,16 @@ function NotificationsCard() {
       })}
 
       {error && <p className="form-error">{error}</p>}
+      {/* Our own cap, not the platform's — OpenMasjidOS stopped limiting anything, so this app
+          bounds itself to keep the masjid's number safe. Admitted to rather than silent: an admin
+          whose phone went quiet needs to know it was deliberate, and what to do about it. */}
+      {(wa.heldBack ?? 0) > 0 && (
+        <p className="hint">
+          <AlertTriangle size={13} aria-hidden="true" /> {wa.heldBack} WhatsApp{' '}
+          {wa.heldBack === 1 ? 'message was' : 'messages were'} held back since this app last started, to protect
+          your number from being blocked. Setting a smallest amount for “a donation was received” is usually the fix.
+        </p>
+      )}
       <p className="hint">
         Donors are never messaged and this app never asks anyone for a phone number — every address and number here
         is one of your own people. One address each; if several need telling, use an address that forwards to them or
@@ -2508,7 +2536,7 @@ function EmailDesignCard({ masjid, currency }: { masjid: MasjidProfile; currency
         {['{name}', '{masjid}'].map((v) => <button key={v} type="button" className="btn btn--ghost btn--sm mono" onClick={() => set({ body: `${value.body}${value.body && !value.body.endsWith(' ') ? ' ' : ''}${v}` })}>{v}</button>)}
       </div>
       <p className="hint" style={{ marginBlockStart: 0 }}>The masjid logo + contact details come from Settings → Your masjid. The amount, date, payment method and fund are added automatically as a receipt.</p>
-      <Field id="er-a" label="Accent colour (optional)"><input id="er-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
+      <Field id="er-a" label="Accent color (optional)"><input id="er-a" className="input mono" value={value.accent} placeholder="#1FA37A" onChange={(e) => set({ accent: e.target.value })} /></Field>
       {error && <p className="form-error">{error}</p>}
       <button className="btn btn--primary" style={{ marginBlockStart: '0.4rem' }} onClick={save} disabled={busy}>{busy ? <span className="spinner" /> : <CheckCircle2 size={16} />} {saved ? 'Saved' : 'Save design'}</button>
     </section>

@@ -67,7 +67,7 @@ must not be renamed.
   `GET ${OPENMASJID_BASE_URL}/api/public/appearance` to follow live theme changes.
   The fragment is treated as untrusted presentation input. See `web/src/prefs.ts`.
 - **Notifications (server→server, optional).** `POST ${OPENMASJID_BASE_URL}/api/fabric/notify`
-  with the app secret and `{text, title?, level?}` — e.g. "A new donation of £50 was
+  with the app secret and `{text, title?, level?}` — e.g. "A new donation of $50 was
   received." Never sees the webhook URL; fails soft.
 
 ## Stripe — the two rules everything else hangs off
@@ -122,7 +122,7 @@ optional — the app works fully standalone.
 - **Stripe via the Fabric** (`stripe: true`): keys are configured **once** in OpenMasjidOS
   and fetched per-app with `fetchFabricStripe()`. They are cached **in memory only, never written to
   the data volume**, so they always track the OS vault — including after a restore onto a new
-  machine. `resolveAccountFor()` (charging) honours an appeal's own account choice and otherwise
+  machine. `resolveAccountFor()` (charging) honors an appeal's own account choice and otherwise
   prefers the vault account **only when it is fully configured**, falling back to locally-entered
   keys; `accountById()` (confirm, refunds, plans, webhook) resolves by the **recorded** account id,
   so a config or reachability change between intent and confirm can't strand a succeeded payment,
@@ -216,17 +216,17 @@ contract: `students/billing` **v2** in `OpenMasjidStudentManager/docs/FABRIC_BIL
   unit-tested) recomputes the amount **and** the familyId server-side, so a crafted request can't
   attribute a charge to an arbitrary family or pay a tampered amount. The typed Student ID is
   body-only, never in a URL/log/metadata.
-- **Itemised bills (Students 0.43.0, §11.0b).** `lookup`'s open invoices now carry `items[]` — the
+- **Itemized bills (Students 0.43.0, §11.0b).** `lookup`'s open invoices now carry `items[]` — the
   lines a bill is made of ($200 tuition + a $50 book fee) — and `record-payment` takes `lines[]`, the
   ids the parent ticked. The pick list groups lines under the bill label, offers only lines with a
   balance (settled lines read "already paid", a bursary reads "credit applied"), starts fully ticked so
   paying the lot stays one tap, and totals live on the pay button. `lines` goes on the wire **alone**:
   Students resolves one breakdown in the order `lines → allocations → students → derive`, and a line
-  already resolves to its child. Itemisation is all-or-nothing **per family** (`itemised`), because that
+  already resolves to its child. Itemization is all-or-nothing **per family** (`itemized`), because that
   chain can't express a mixture of lines and whole bills in one call; an invoice whose lines lack ids or
   don't sum to the bill drops back to a single row. Ticked lines are persisted
   (`student_payments.payment_lines`) so an outbox retry settles the same line. Tuition stays out of
-  donation reporting by construction — every donation query reads `FROM donations`, and itemising only
+  donation reporting by construction — every donation query reads `FROM donations`, and itemizing only
   added columns to `student_payments`.
 - **A section per child, and per-child advances (v0.37.0).** The balance step renders one section per
   child — their balance or credit, their bills, their own "Add money" — since a household total can't
@@ -244,7 +244,7 @@ contract: `students/billing` **v2** in `OpenMasjidStudentManager/docs/FABRIC_BIL
   that family's own credit. The **floor** is `max(school's minAmountCents, MIN_TUITION_CENTS = $1)`,
   applied to every path — a provider advertising 25¢ can't drag us below a pound/dollar. A part payment
   within a real balance needs no `allowAdvance`; only money above it does. `allowAdvance` is advertised,
-  never assumed, so a pre-0.41.0 Students keeps today's behaviour exactly.
+  never assumed, so a pre-0.41.0 Students keeps today's behavior exactly.
 - **Separate ledger (`student_payments` table).** Tuition payments are **not donations** — a distinct
   table, never joined into `metrics()`/`listDonations()`/`raisedForCampaign()`/the CSV, so they are
   excluded from every donation total, goal and year-end letter by construction (locked by a test).
@@ -332,7 +332,7 @@ The two **headline** figures (`stats.monthlyTotal`, `stats.collected`) wear a si
 `stats.currency`, the masjid currency — so only plans actually charged in that currency are
 folded into them, and `message` says so when any plan was left out. A second Stripe account in
 another currency would otherwise make the headline a sum of mixed units under one symbol, and
-worse with a zero-decimal currency, where ¥1,000 and £10.00 are the same number of minor units.
+worse with a zero-decimal currency, where ¥1,000 and $10.00 are the same number of minor units.
 
 ### The 60-second cache and the `latest_invoice` change-detector
 
@@ -445,7 +445,7 @@ caller) and the one read method `listRecurringDonations()`.
 ### The manage actions, in Stripe terms
 
 - **Pause** → `subscriptions.update(id, { pause_collection: { behavior: 'void' } })`. `'void'`
-  is the only honest behaviour for a *donation*: the donor is not charged and is not billed for
+  is the only honest behavior for a *donation*: the donor is not charged and is not billed for
   the missed months later. A paused plan is therefore **not** a Stripe status — the
   subscription stays `active` underneath — so `friendlyStatus()` checks `pause_collection`
   **before** `sub.status`, or a paused plan would read "Active".
@@ -459,14 +459,14 @@ caller) and the one read method `listRecurringDonations()`.
   Offering it promised income that would never arrive. A masjid that genuinely wants one more
   payment and then a stop uses **"stop after 1 further payment"** below, which really does take
   one. `POST /api/admin/plans/:id/cancel` therefore takes **no body** (like pause/resume).
-  A cancelled subscription carries `ended_at` and **no** `cancel_at`, so `endsAtUnix()` reads
+  A canceled subscription carries `ended_at` and **no** `cancel_at`, so `endsAtUnix()` reads
   `ended_at` first — otherwise a plan the admin had just stopped would report itself
   open-ended, one row under a "Stopped" pill.
 - **End on a date** → `cancel_at` = the **end** of that calendar day, UTC (so "stop on the
   30th" includes the 30th), with `cancel_at_period_end: false` (the two ways of ending are
   mutually exclusive and that field isn't Emptyable, so `false` is how it clears).
   **Open-ended** clears both.
-- **Stop after N further payments** (N is *further* payments, not the total, and is labelled
+- **Stop after N further payments** (N is *further* payments, not the total, and is labeled
   that way in the UI; 1–120). Charges land at `nextPaymentAt`, then one interval later, so the
   last charge we're promising is at `nextPaymentAt + (N − 1)` intervals and `cancel_at` must
   fall strictly **after** it and strictly **before** the following one. We aim a day short of
@@ -515,7 +515,7 @@ Everything the masjid — or a donor, via a campaign goal bar — is shown as mo
 total, and a monthly plan's "collected so far". The **counts stay gross**: a refunded donation was
 still a donation that arrived, and the ledger still lists its row, so deducting it from the count
 would make the headline disagree with the list underneath it. `metrics()` reports `totalRefunded`
-and `refundedCount` separately, and the Overview tile says "after £X refunded", so a total that
+and `refundedCount` separately, and the Overview tile says "after $X refunded", so a total that
 went down is explained on the same screen.
 
 ### How much is left to refund is Stripe's fact, not ours
@@ -617,7 +617,7 @@ Fabric Stripe account that chargeback lands on the whole platform. The admin's c
 the letter's branding and the panel's own Stop button.
 
 **The email-availability gate is skipped for monthly.** It exists to avoid suppressing Stripe's own
-receipt in favour of one we cannot deliver; on the monthly branch there is nothing to suppress,
+receipt in favor of one we cannot deliver; on the monthly branch there is nothing to suppress,
 because `createSubscription` never sets `receipt_email`. So trying costs the donor nothing even when
 we believe email is down, and the outbox keeps trying for three days.
 
@@ -629,7 +629,7 @@ date are deliberately absent for that reason.
 
 32 lowercase hex characters (128 bits), in `plan_links(token PRIMARY KEY, subscription_id NOT NULL
 UNIQUE CHECK(length > 0), created_at)`. Hex rather than base64url because mail clients mangle case
-and `-_`; the entropy is the defence, because a per-peer rate limit cannot be (behind the platform's
+and `-_`; the entropy is the defense, because a per-peer rate limit cannot be (behind the platform's
 ingress every remote donor shares one bucket — DONATIONS-009).
 
 Stored **plaintext**. Hashing would mean the letter could never be rendered twice, and it is rendered
@@ -659,7 +659,7 @@ because stopping is all it can ever do.
 3. **POST only, token in the body.** A GET that mutates is fired by every link-preview bot that
    touches the email; keeping the token out of the API URL also keeps it out of access logs. The
    page URL itself is unavoidably in the masjid's own Cloudflare logs — which is why the token
-   authorises so little. `referrer-policy: no-referrer` (already global) stops it leaking onward.
+   authorizes so little. `referrer-policy: no-referrer` (already global) stops it leaking onward.
 4. **Every failure is the same 404** — unknown token, malformed token, no local row, a tuition
    campaign — so nothing is an oracle. Both routes are `no-store, private`.
 5. **A fixed audit actor.** `audit(req, …)` reads the admin session and falls back to
@@ -739,7 +739,7 @@ record the general fund's id, leaving nothing that looked wrong.
 
 ### Refuse, never substitute
 
-An explicit choice is honoured or the appeal stops taking cards. It never falls back to the site
+An explicit choice is honored or the appeal stops taking cards. It never falls back to the site
 default, to another vault account, or to a local one. An admin who points Zakat at its own account
 has made a statement about where that money must go; settling it elsewhere is worse than not taking
 it. The three refusal causes are distinguished all the way to the surface — `no-account`,
@@ -761,7 +761,7 @@ different words.
 | `resolveAccountFor(campaign)` | the appeal's current choice | yes — it decides where NEW money goes |
 | `accountById(bareId)` | the id recorded on the row | **never** |
 
-Money taken on account A is confirmed, refunded and cancelled on account A for ever, even after the
+Money taken on account A is confirmed, refunded and canceled on account A for ever, even after the
 appeal moves to B. That asymmetry is what makes the feature safe, and it is why the confirm route
 keeps resolving by the recorded id even though it has the Campaign in hand.
 
@@ -941,7 +941,7 @@ when watching the answer change is the whole point.
 
 ## Admin commands: stats only, and why that is the whole design (v0.43.0)
 
-An admin messages the masjid's number with `!donations`; the platform renders the menu, authorises
+An admin messages the masjid's number with `!donations`; the platform renders the menu, authorizes
 the sender, and POSTs the chosen command to `/fabric/commands/run` on our own port. Five are
 declared — `today`, `month`, `totals`, `appeal`, `monthly` — and every one of them only reads.
 
@@ -954,7 +954,7 @@ commands we chose not to have; the safer answer was to have none of them. Nothin
 
 **A message is forwardable.** It gets screenshotted into a family group, quoted in a committee
 thread, and backed up to somebody's cloud. The donor never agreed to any of that — so a command
-answers *"£312 from 9 donations"* and never who gave it. This is structural rather than a habit: the
+answers *"$312 from 9 donations"* and never who gave it. This is structural rather than a habit: the
 formatters in `commands.ts` are given counts and totals, and there is no parameter anywhere in that
 surface that *could* carry a name, an email or a reference. `commands.test.ts` asserts it, so adding
 one fails a test rather than shipping.
@@ -969,7 +969,7 @@ That constraint has one sharp consequence, found in the v0.44.0 sweep and worth 
 LAN-only masjid may never see the webhook — so the succeeded rows of a plan stopped two years ago
 are still sitting in `donations`, indistinguishable by themselves from a live one. Counting every
 subscription that ever took money, a masjid three years in would be told it had *fifty monthly
-donors giving about £2,000 a month* when the truth was ten and £400. Confidently wrong, about money,
+donors giving about $2,000 a month* when the truth was ten and $400. Confidently wrong, about money,
 in the flattering direction — which is the worst of the three.
 
 The fix stays inside the constraint: a live monthly plan is charged every month, so **"nothing
@@ -1039,7 +1039,7 @@ cannot email the treasurer, it cannot send anybody a WhatsApp message, we can ne
 set to (it is tRPC-only, behind the admin's session), and it is not where a masjid would look for
 "tell Yusuf about refunds". So the platform keeps owning *delivery* and this app owns the *choice*.
 
-That is also why the first channel is labelled **"your OpenMasjidOS inbox"** and never "email me". It
+That is also why the first channel is labeled **"your OpenMasjidOS inbox"** and never "email me". It
 is an **AND** with the admin's matrix: ticking it means *we will raise this*, never *this will
 arrive*. Worse, a `delivered: false` comes back with no reason, so not-routed, no-address-configured
 and attempted-but-failed are indistinguishable — `disabled_by_admin` is the one honest signal, and the

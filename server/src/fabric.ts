@@ -143,7 +143,7 @@ function setEmailStatus(s: EmailStatus): void {
  * or there is no Fabric at all. Everything else (never tried, a timeout, a 500, a rate limit) is
  * "we don't know", and the honest answer to "we don't know" is to try.
  *
- * This is the gate on suppressing Stripe's own receipt in favour of our branded one, and it used to
+ * This is the gate on suppressing Stripe's own receipt in favor of our branded one, and it used to
  * demand a previous SUCCESS ('ok'). That was a closed loop: the only thing that ever set 'ok' was a
  * successful send, and the only sends that happened were ones the gate had already allowed — so on a
  * fresh container the branded receipt could never be sent at all, and a restart re-closed it.
@@ -361,7 +361,7 @@ const stripeLastGood = new Map<string, { at: number; value: FabricStripeAccount 
 const STRIPE_CACHE_MS = 60_000;
 const STRIPE_LASTGOOD_MS = 10 * 60_000;
 /** A ceiling on both maps. The keys are admin-chosen account names, so this is a belt-and-braces
- *  bound rather than a defence — but an unbounded map fed from stored config is a leak waiting for
+ *  bound rather than a defense — but an unbounded map fed from stored config is a leak waiting for
  *  a future caller, and a masjid will never have more accounts than this. */
 const STRIPE_CACHE_MAX = 32;
 
@@ -540,7 +540,7 @@ export async function fetchFabricStripeAccounts(): Promise<FabricStripeAccountRe
 // Cloudflare forwards the FULL path (it does not strip the prefix), so the server must be
 // base-path aware (see index.ts rewriteUrl + HTML injection). Never persisted; fails soft.
 
-/** The platform's answer for this app's public address. `basePath` is normalised to a
+/** The platform's answer for this app's public address. `basePath` is normalized to a
  *  leading slash with no trailing slash (e.g. "/donate"), or "" when remote access is off. */
 export interface FabricSite {
   enabled: boolean;
@@ -551,7 +551,7 @@ export interface FabricSite {
 
 const SITE_OFF: FabricSite = { enabled: false, domain: '', publicUrl: '', basePath: '' };
 
-/** Normalise a path to "" or "/seg[/seg…]" (leading slash, no trailing slash). */
+/** Normalize a path to "" or "/seg[/seg…]" (leading slash, no trailing slash). */
 function normBasePath(raw: unknown): string {
   let p = (typeof raw === 'string' ? raw : '').trim();
   if (!p || p === '/') return '';
@@ -578,7 +578,7 @@ function parseSite(j: unknown): FabricSite {
 /**
  * Fetch this app's public address from the platform (server→server). Returns SITE_OFF
  * when the Fabric isn't configured, the platform is unreachable, or remote access is off
- * — callers then derive URLs from the incoming request host (today's behaviour). Cached
+ * — callers then derive URLs from the incoming request host (today's behavior). Cached
  * ~60s; on a transient error serves the last cached value so base-path routing stays
  * stable through a blip. NEVER throws; NEVER persists the domain/publicUrl.
  */

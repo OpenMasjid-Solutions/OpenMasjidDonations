@@ -97,11 +97,11 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
   // Load the campaign on mount / slug change (needed for both the donation flow and the
   // thank-you screen's custom message/accent/background on a redirect return).
   useEffect(() => {
-    let cancelled = false;
+    let canceled = false;
     getPublicCampaign(slug, token)
-      .then((c) => { if (!cancelled) setCampaign(c); })
-      .catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'This donation page isn’t available.'); });
-    return () => { cancelled = true; };
+      .then((c) => { if (!canceled) setCampaign(c); })
+      .catch((e) => { if (!canceled) setLoadError(e instanceof Error ? e.message : 'This donation page isn’t available.'); });
+    return () => { canceled = true; };
   }, [slug, token]);
 
   // If Stripe redirected back here (some payment methods do), it appends ?payment_intent=…
@@ -252,7 +252,7 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
         </div>
       )}
 
-      {/* This page can't take a card. Until now `ready: false` only greyed the button out, so a
+      {/* This page can't take a card. Until now `ready: false` only grayed the button out, so a
           supporter met a dead page with nothing said and no idea whether it was them. One sentence,
           and never a word about Stripe, accounts or configuration — none of that is theirs to fix.
           `unreachable` is genuinely temporary, so it says so; the others are not, so they don't. */}
@@ -536,13 +536,13 @@ const childName = (st: { firstName: string; lastInitial: string }): string =>
 type PayMode = 'full' | 'pick';
 
 /** One bill, with its lines beneath it. Under "pay the balance" it's a statement; once the parent
- *  chooses what to pay, each payable line (or the bill itself, when it isn't itemised) gets a
+ *  chooses what to pay, each payable line (or the bill itself, when it isn't itemized) gets a
  *  checkbox. Settled and credit lines are always shown and never payable. */
 function TuitionBill({
-  inv, itemised, choosing, showStudent, checked, onToggle, fmt,
+  inv, itemized, choosing, showStudent, checked, onToggle, fmt,
 }: {
   inv: StudentInvoiceView;
-  itemised: boolean;
+  itemized: boolean;
   choosing: boolean;
   showStudent: boolean;
   checked: Record<string, boolean>;
@@ -552,8 +552,8 @@ function TuitionBill({
   const sub = [showStudent ? inv.student : '', inv.dueDate ? `Due ${inv.dueDate}` : ''].filter(Boolean).join(' · ');
   // A bill of one line needs no breakdown: the bill row IS the line. More than one and the bill
   // becomes a heading with its lines under it, so "$200 tuition + $50 book fee" can be paid apart.
-  const lines = itemised && inv.items.length > 1 ? inv.items : [];
-  const soleKey = itemised ? (inv.items.find((i) => i.payable)?.id ?? inv.id) : inv.id;
+  const lines = itemized && inv.items.length > 1 ? inv.items : [];
+  const soleKey = itemized ? (inv.items.find((i) => i.payable)?.id ?? inv.id) : inv.id;
   // A row with a checkbox is a <label>, so the whole row is the tap target — a tick box alone is
   // a small thing to hit, and this list is read on phones propped at a masjid door.
   const tickable = choosing && lines.length === 0;
@@ -603,12 +603,12 @@ function TuitionBill({
   );
 }
 
-/** The tickable rows on the "choose what to pay" list. When a family's bills are itemised
+/** The tickable rows on the "choose what to pay" list. When a family's bills are itemized
  *  (§11.0b) a row is one LINE of a bill — "Book fee", $50 — so a parent can pay the book fee
  *  without the month's tuition. Otherwise a row is a whole bill, exactly as before. Settled and
  *  credit lines are never rows: they're shown for information and can't be charged. */
 const payableRowKeys = (f: NonNullable<StudentLookupResult['family']>): string[] =>
-  f.itemised
+  f.itemized
     ? f.openInvoices.flatMap((inv) => inv.items.filter((it) => it.payable).map((it) => it.id))
     : f.openInvoices.map((inv) => inv.id);
 
@@ -653,7 +653,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   // own copy of the session, so a tampered figure here buys nothing.
   const payRows: { key: string; amount: number }[] = !fam
     ? []
-    : fam.itemised
+    : fam.itemized
       ? fam.openInvoices.flatMap((inv) => inv.items.filter((it) => it.payable).map((it) => ({ key: it.id, amount: it.amount })))
       : fam.openInvoices.map((inv) => ({ key: inv.id, amount: inv.amount }));
   const pickedKeys = payRows.filter((r) => checked[r.key]).map((r) => r.key);
@@ -734,9 +734,9 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
         { kind: 'amount', amount: typedAmount, student: advanceFor }
       : mode === 'full'
         ? { kind: 'full' }
-        : // Itemised bills pay by LINE (the ticked line is the one Students settles, and stays
+        : // Itemized bills pay by LINE (the ticked line is the one Students settles, and stays
           // settled); otherwise by whole bill, as before.
-          fam.itemised
+          fam.itemized
           ? { kind: 'items', itemIds: pickedKeys }
           : { kind: 'invoices', invoiceIds: pickedKeys };
     setBusy(true); setError('');
@@ -821,7 +821,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
     const kids = fam.students;
     const perChild = kids.length > 1;
     // Bills whose child we can't place (a provider that sent no studentId) must still be payable,
-    // so they get their own unlabelled group rather than disappearing off the screen.
+    // so they get their own unlabeled group rather than disappearing off the screen.
     const orphans = fam.openInvoices.filter((i) => !kids.some((k) => k.ref === i.studentRef));
     const canPick = fam.openInvoices.length > 0;
     return (
@@ -873,7 +873,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
                     <TuitionBill
                       key={inv.id}
                       inv={inv}
-                      itemised={fam.itemised}
+                      itemized={fam.itemized}
                       choosing={mode === 'pick'}
                       showStudent={!perChild}
                       checked={checked}
@@ -898,7 +898,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
                 <TuitionBill
                   key={inv.id}
                   inv={inv}
-                  itemised={fam.itemised}
+                  itemized={fam.itemized}
                   choosing={mode === 'pick'}
                   showStudent
                   checked={checked}
@@ -982,7 +982,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
 }
 
 /**
- * The processing fee, itemised, before the payer commits.
+ * The processing fee, itemized, before the payer commits.
  *
  * This is a REQUIREMENT of the students/billing contract (§11.2 `info.fee`), not a nicety, and it
  * is the part most likely to be skipped. Two things have to be true:
@@ -1004,7 +1004,7 @@ function TuitionFeeLines({ tuition, fee, total, ccy }: { tuition: number; fee: n
       <div className="fee-row fee-row--total"><span>Total charged</span><span>{money(total, ccy)}</span></div>
       <p className="hint fee-note">
         The processing fee is not the masjid’s — it is what Visa, Mastercard and American Express charge
-        to accept a card, and it goes straight to the payment processor. Paying by cash or cheque at the
+        to accept a card, and it goes straight to the payment processor. Paying by cash or check at the
         office avoids it.
       </p>
     </div>

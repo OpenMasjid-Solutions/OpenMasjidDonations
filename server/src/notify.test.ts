@@ -186,7 +186,7 @@ test('migration: a CORRUPT notify value falls back to the migration rather than 
   (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
     .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
     .run('notify', '{"events":');
-  assert.equal(s.getNotify().events.refund.whatsapp, '447700900123', 'the old settings must still be honoured');
+  assert.equal(s.getNotify().events.refund.whatsapp, '447700900123', 'the old settings must still be honored');
 });
 
 test('migration: once written, the new settings win and the old key is not consulted again', () => {

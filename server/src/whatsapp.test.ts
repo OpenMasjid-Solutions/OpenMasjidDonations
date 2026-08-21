@@ -196,7 +196,8 @@ test('groups: a failure is an empty list, never a throw — the picker hides its
 test('send: 202 {queued:true} is the ONLY success, and it means queued — never delivered', async () => {
   reply({ queued: true }, 202);
   const r = await wa.sendWhatsApp({ to: '447700900123' }, 'A donation was received.');
-  assert.deepEqual(r, { queued: true, error: '', retry: false });
+  // `id` and `refused` are new in 0.51.1; a platform that sends no id still succeeds.
+  assert.deepEqual(r, { queued: true, id: '', error: '', retry: false, refused: false });
   assert.equal(calls[0].method, 'POST');
   assert.deepEqual(calls[0].body, { to: '447700900123', text: 'A donation was received.' });
 });
@@ -245,4 +246,117 @@ test('send: a transport failure is reported as retryable, never as queued', asyn
   globalThis.fetch = boom;
   assert.equal(r.queued, false);
   assert.equal(r.retry, true);
+});
+
+// ── Platform 0.51.1: the durable queue, message status, and OUR OWN cap ──────
+//
+// The platform's send queue used to head-of-line block (one held message stopped every app's
+// traffic) and was lost on restart; both are fixed upstream. What changed FOR US is smaller and
+// sharper: a refusal is now distinguishable from a loss, a queued message has an id we can ask
+// about, and every limit the platform used to impose is gone — so the limiting is ours.
+
+test('status: `outcomes` is read, and an ABSENT field means no (an older platform)', async () => {
+  reply({ available: true, reason: 'ready', media: true, maxMediaBytes: 2097152, outcomes: true });
+  assert.equal((await wa.whatsappStatus(true)).outcomes, true);
+  // 0.51.0: the field simply is not there. Assuming it would make every status poll a 404 that we
+  // then had to decide how to read — so absent is false, like `media`.
+  reply({ available: true, reason: 'ready', media: true, maxMediaBytes: 2097152 });
+  assert.equal((await wa.whatsappStatus(true)).outcomes, false);
+});
+
+test('send: a 202 hands back the id, which is the only way to ask what happened later', async () => {
+  reply({ queued: true, id: 'wam_123' }, 202);
+  const r = await wa.sendWhatsApp({ to: '447700900123' }, 'hello');
+  assert.equal(r.queued, true);
+  assert.equal(r.id, 'wam_123');
+  assert.equal(r.refused, false);
+});
+
+test('send: a 202 from a platform with no id is still a success', async () => {
+  reply({ queued: true }, 202);
+  const r = await wa.sendWhatsApp({ to: '447700900123' }, 'hello');
+  assert.equal(r.queued, true);
+  assert.equal(r.id, '', 'no id to poll — and that is not a failure');
+});
+
+test('send: a 4xx is a REFUSAL with a reason, not an outage', async () => {
+  // The distinction is the whole point: a refusal is a fact to show the admin, an outage is not.
+  for (const [status, error] of [
+    [400, 'That phone number needs a country code.'],
+    [400, 'That is the number WhatsApp is linked to, so it would only reach that phone’s own notes.'],
+    [403, 'That group has not been approved for this app.'],
+    [400, 'WhatsApp is not set up.'],
+  ] as [number, string][]) {
+    reply({ error }, status);
+    const r = await wa.sendWhatsApp({ to: '447700900123' }, 'hello');
+    assert.equal(r.queued, false);
+    assert.equal(r.refused, true, `${status} must read as refused`);
+    assert.equal(r.retry, false, 'retrying a refusal cannot help and would duplicate');
+    assert.equal(r.error, error, 'the platform’s own sentence reaches the admin unchanged');
+  }
+});
+
+test('send: 429 and 5xx are outages — retryable, and NOT reported as a refusal', async () => {
+  for (const status of [429, 500, 503]) {
+    reply({}, status);
+    const r = await wa.sendWhatsApp({ to: '447700900123' }, 'hello');
+    assert.equal(r.queued, false);
+    assert.equal(r.refused, false, `${status} is not the admin's fault`);
+    assert.equal(r.retry, true);
+  }
+});
+
+test('status endpoint: a state is read; anything unknown is null rather than a guess', async () => {
+  reply({ id: 'wam_1', state: 'sent', at: 1760000000000, target: 'person' });
+  assert.deepEqual(await wa.whatsappOutcome('wam_1'), { state: 'sent', reason: '', at: 1760000000000, target: 'person' });
+
+  reply({ id: 'wam_2', state: 'failed', reason: 'Gateway rejected the number.', at: 1, target: 'group' });
+  const failed = await wa.whatsappOutcome('wam_2');
+  assert.equal(failed?.state, 'failed');
+  assert.equal(failed?.reason, 'Gateway rejected the number.');
+
+  // 404 = unknown id, another app's id, or a platform without the endpoint. None of those is
+  // "the message failed", so none of them may be reported as one.
+  reply({}, 404);
+  assert.equal(await wa.whatsappOutcome('wam_3'), null);
+
+  // A state we don't recognize is also null — inventing a meaning for it would be worse.
+  reply({ id: 'wam_4', state: 'teleported' });
+  assert.equal(await wa.whatsappOutcome('wam_4'), null);
+});
+
+test('status endpoint: no id, no call', async () => {
+  const before = calls.length;
+  assert.equal(await wa.whatsappOutcome(''), null);
+  assert.equal(calls.length, before, 'an empty id must not become a request for /status/');
+});
+
+test('budget: OUR cap bounds a burst, per destination, and counts what it held back', () => {
+  let now = 1_000_000;
+  const budget = wa.makeSendBudget(3, () => now);
+  // Three go, the fourth does not — a Ramadan Friday of donation alerts cannot spend the number.
+  assert.equal(budget.take('447700900123'), true);
+  assert.equal(budget.take('447700900123'), true);
+  assert.equal(budget.take('447700900123'), true);
+  assert.equal(budget.take('447700900123'), false);
+  assert.equal(budget.suppressed('447700900123'), 1);
+  // A DIFFERENT destination has its own allowance: the treasurer's refund alert is not held back
+  // because the donations group was busy.
+  assert.equal(budget.take('120363012345678901@g.us'), true);
+  // And an hour later the first destination is clear again.
+  now += 3_600_001;
+  assert.equal(budget.take('447700900123'), true);
+  assert.equal(budget.totalSuppressed(), 1, 'the count is cumulative, so the panel can show it');
+});
+
+test('budget: the window slides rather than resetting on the hour', () => {
+  let now = 0;
+  const budget = wa.makeSendBudget(2, () => now);
+  assert.equal(budget.take('x'), true); // t=0
+  now = 1_800_000; // +30 min
+  assert.equal(budget.take('x'), true);
+  assert.equal(budget.take('x'), false, 'two in the last hour is the cap');
+  now = 3_600_001; // the first has aged out, the second has not
+  assert.equal(budget.take('x'), true);
+  assert.equal(budget.take('x'), false);
 });

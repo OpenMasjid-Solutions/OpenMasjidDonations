@@ -123,11 +123,16 @@ matrix still decides independently whether it becomes an email. "On" in our sett
 as a guarantee stops looking for the real switch.
 
 ```
-GET  /api/fabric/whatsapp          → { available, reason, media, maxMediaBytes }
-GET  /api/fabric/whatsapp/groups   → { groups: [{ id, label }] }
-POST /api/fabric/whatsapp          → 202 { queued: true }
-       { "to": "447700900123", "text": "…" }   // or { "group": "…@g.us", … }
+GET  /api/fabric/whatsapp             → { available, reason, media, maxMediaBytes, outcomes }
+GET  /api/fabric/whatsapp/groups      → { groups: [{ id, label }] }
+POST /api/fabric/whatsapp             → 202 { queued: true, id: "wam_…" }
+       { "to": "15550101234", "text": "…" }   // or { "group": "…@g.us", … }
+GET  /api/fabric/whatsapp/status/<id> → { id, state, reason?, at, target }   // 0.51.1+
+       state: queued | sent | failed | expired
 ```
+
+**Minimum platform versions: sending `0.51.0+`; the durable queue and `/status/<id>` `0.51.1+`.**
+`outcomes: true` on the availability probe is how we tell, and an absent field means **no**.
 
 Three things about this contract are easy to assume wrongly, and each fails **silently** — the app
 looks fine and simply never messages anybody. `server/src/whatsapp.test.ts` pins all three:
@@ -140,10 +145,24 @@ looks fine and simply never messages anybody. `server/src/whatsapp.test.ts` pins
 
 And two rules the channel itself imposes:
 
-- **`202 {queued:true}` is the only success, and it means queued — never sent.** Ban risk attaches to
-  the *number*, so the platform paces everything: randomised 6–20s gaps, per-recipient cooldowns,
-  hourly and daily caps shared with every other app, and quiet hours that defer rather than drop.
-  There is no delivery receipt. Nothing may block on it, and the panel says "queued", not "sent".
+- **`202 {queued:true, id}` is the only success, and it means queued — never sent.** There is no
+  delivery receipt from WhatsApp. Nothing may block on it, nothing may retry it (it is already
+  queued), and the panel says "queued", not "sent".
+- **The platform stopped pacing in 0.51.1, so we pace ourselves.** Quiet hours, the hourly and daily
+  caps, the per-recipient and per-group cooldowns, the warm-up ramp and the 6–20s gap are all gone;
+  a message now leaves within seconds, after a typing indicator. Ban risk still attaches to the
+  masjid's **number**, shared with every app on the box and unrecoverable once blocked — so
+  `makeSendBudget` caps each destination at 20/hour here, and what it holds back is counted and
+  shown to the admin. One message per event; never a loop over recipients.
+- **A refusal is a fact, not a failure to swallow.** A 4xx carries the platform's own sentence for an
+  admin (an unapproved group, a number with no country code, the gateway's own number — that last
+  one used to be accepted and go nowhere); a 429/5xx is an outage. `sendWhatsApp` reports `refused`
+  separately, and the refusal is stored against its event and rendered beside that event's switch.
+  Collapsing the two is what made the platform's queue bug look like ours.
+- **`/status/<id>` answers what became of one message**, scoped to this app — a 404 means unknown,
+  another app's, or a platform without the endpoint, and none of those means it failed. Records are
+  bounded to the most recent 200, so ask soon (we ask once, ~45s later) and never in a loop. It
+  carries no message text and no recipient, so nothing about polling it can leak a donor's figures.
 - **Nothing auth-critical, and nothing that DEPENDS on the message arriving.** It is an unofficial
   client and the number can be restricted or banned at any moment. Note the precise claim, because
   it changed in v0.43.0: WhatsApp is **not** necessarily a second copy of something that also went
@@ -152,7 +171,7 @@ And two rules the channel itself imposes:
   in the database and in the panel either way, no donor outcome and no money movement waits on a
   notification, and every event stays reachable through the platform's own alerts matrix.
 
-A number is normalised with `toWhatsAppDigits`, which mirrors the platform's own rule: strip to
+A number is normalized with `toWhatsAppDigits`, which mirrors the platform's own rule: strip to
 digits, require 8–15, and **refuse a number with no country code rather than guessing one** — a
 guess would send the masjid's donation figures to whoever holds that number in the default country.
 A group id is only ever taken from the approved list and re-verified before it is saved; an
@@ -163,7 +182,7 @@ sentence. The capability check is still read honestly, so adding one later is a 
 
 ## 8. Admin commands (`commands:`, platform v0.51.0+)
 
-An authorised admin messages the masjid's number — `!donations` — and the platform renders the
+An authorized admin messages the masjid's number — `!donations` — and the platform renders the
 numbered menu, decides who may run what, and POSTs the chosen one to **our** web port:
 
 ```

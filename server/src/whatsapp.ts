@@ -7,13 +7,23 @@
  * The masjid installs the OpenWA gateway and links THEIR OWN phone number in OpenMasjidOS. We POST
  * to the platform and it does the sending; we never see the gateway, its credentials, or the number.
  *
+ * **Minimum platform versions.** Sending needs OpenMasjidOS **0.51.0+**; the durable queue and the
+ * message-status endpoint need **0.51.1+**. `outcomes` on the status probe is how we tell, and an
+ * absent field means false — never assume the newer platform.
+ *
  * Two properties of the channel decide the shape of everything below:
  *
- *  1. **It QUEUES.** A success is `202 {queued:true}` and never "sent". Ban risk attaches to the
- *     NUMBER rather than to whoever sent a message, so one platform-wide queue paces every app at
- *     once — randomised 6–20s gaps, per-recipient cooldowns, hourly and daily caps, and quiet hours
- *     that defer rather than drop. Delivery is seconds to hours away and there is no receipt. So
- *     nothing here may block on a send, report one as delivered, or retry on a timeout.
+ *  1. **It QUEUES.** A success is `202 {queued:true, id}` and never "sent". There is no delivery
+ *     receipt from WhatsApp, so nothing here may block on a send or report one as delivered.
+ *
+ *     **The pacing changed in platform 0.51.1, and the consequence is ours.** Quiet hours, the
+ *     hourly and daily caps, the per-recipient and per-group cooldowns, the warm-up ramp and the
+ *     random 6–20s gap are all GONE — a message now goes out within seconds, after a typing
+ *     indicator. The platform used to refuse to send too much; it no longer does. Ban risk still
+ *     attaches to the NUMBER, it is shared by every app on the box, and a blocked number cannot be
+ *     recovered — the masjid loses the number their parents reach them on. So the bound has to live
+ *     here: see `makeSendBudget`, and note that this app deliberately sends ONE message per event
+ *     rather than looping over recipients.
  *  2. **Nothing auth-critical may ride on it, and nothing may DEPEND on it arriving.** It is an
  *     unofficial client and the number can be restricted or banned. In this app it carries admin
  *     notifications only — never a receipt a donor is waiting on, never a payment confirmation,
@@ -51,9 +61,13 @@ export interface WhatsAppStatus {
    *  reading absence as "yes" means base64-ing half a megabyte into a request that cannot work. */
   media: boolean;
   maxMediaBytes: number;
+  /** Does `GET /api/fabric/whatsapp/status/<id>` exist (platform 0.51.1+)? **Absent means NO**, for
+   *  the same reason as `media`: on an older platform every status poll would 404 and we would
+   *  report "we don't know" as though it were an answer. */
+  outcomes: boolean;
 }
 
-const UNAVAILABLE: WhatsAppStatus = { available: false, reason: 'unreachable', media: false, maxMediaBytes: 0 };
+const UNAVAILABLE: WhatsAppStatus = { available: false, reason: 'unreachable', media: false, maxMediaBytes: 0, outcomes: false };
 
 /** A group the masjid's admin approved for THIS app. `label` is their own nickname for it — never
  *  the group's WhatsApp subject, which the platform deliberately does not send us. Show it as-is. */
@@ -87,7 +101,7 @@ export function toWhatsAppDigits(raw: string): string | null {
 }
 
 /** A group id as the platform issues them. Shape-checked before use so a junk value never travels;
- *  the real authorisation is the platform's approved-list check, which answers 403. */
+ *  the real authorization is the platform's approved-list check, which answers 403. */
 export function looksLikeGroupId(v: string): boolean {
   return /^[0-9]{5,32}(-[0-9]{1,20})?@g\.us$/.test((v ?? '').trim());
 }
@@ -148,6 +162,7 @@ export async function whatsappStatus(force = false): Promise<WhatsAppStatus> {
       reason,
       media: j?.media === true, // absent means NO
       maxMediaBytes: typeof j?.maxMediaBytes === 'number' ? j.maxMediaBytes : 0,
+      outcomes: j?.outcomes === true, // absent means NO — an older platform has no status endpoint
     };
     statusCache = { at: now, value };
     return value;
@@ -200,10 +215,21 @@ export type WhatsAppTarget = { to: string } | { group: string };
 export interface WhatsAppSendResult {
   /** Accepted for LATER delivery. Never "sent" — there is no delivery receipt. */
   queued: boolean;
-  /** Why not, for the admin. '' when queued. */
+  /** The platform's id for this message, when it accepted one. Keep it: it is the only way to ask
+   *  later what became of the message (`whatsappOutcome`), which is what makes "did the treasurer
+   *  actually get told about that refund?" an answerable question. '' on refusal, and '' on a
+   *  platform too old to issue one. */
+  id: string;
+  /** Why not, for the admin — the platform's own sentence when it sent one. '' when queued. */
   error: string;
   /** True when trying again later could plausibly work (an outage, a full media queue). */
   retry: boolean;
+  /** The platform REFUSED this message and said why: a 4xx. Distinct from an outage, because the
+   *  two want opposite handling — a refusal is a fact to show the admin ("that group is no longer
+   *  approved", "that is the number WhatsApp is linked to"), while an outage is worth nothing more
+   *  than a log line. Swallowing the difference is what made a refused message look identical to a
+   *  lost one. */
+  refused: boolean;
 }
 
 /**
@@ -216,9 +242,12 @@ export interface WhatsAppSendResult {
  * Never throws. Never logs `text`.
  */
 export async function sendWhatsApp(target: WhatsAppTarget, text: string): Promise<WhatsAppSendResult> {
-  if (!fabricReady()) return { queued: false, error: 'This device isn’t connected to OpenMasjidOS.', retry: false };
+  if (!fabricReady()) return { queued: false, id: '', error: 'This device isn’t connected to OpenMasjidOS.', retry: false, refused: false };
   const body = 'to' in target ? { to: target.to, text } : { group: target.group, text };
-  if (!text.trim()) return { queued: false, error: 'There was nothing to send.', retry: false };
+  // Refused by the platform as "The message is empty." anyway; caught here so the round trip is
+  // not spent finding out. (With `media`, `text` would be a CAPTION capped at 1024 rather than
+  // 4096 — this app attaches no image, so that limit cannot bite it.)
+  if (!text.trim()) return { queued: false, id: '', error: 'There was nothing to send.', retry: false, refused: true };
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000);
@@ -230,18 +259,130 @@ export async function sendWhatsApp(target: WhatsAppTarget, text: string): Promis
       redirect: 'error',
     });
     clearTimeout(t);
-    const j = (await res.json().catch(() => null)) as { queued?: boolean; error?: string } | null;
-    if (res.status === 202 && j?.queued === true) return { queued: true, error: '', retry: false };
+    const j = (await res.json().catch(() => null)) as { queued?: boolean; error?: string; id?: unknown } | null;
+    if (res.status === 202 && j?.queued === true) {
+      // The id is optional on a 0.51.0 platform, which has no status endpoint to use it with.
+      return { queued: true, id: typeof j.id === 'string' ? j.id.slice(0, 128) : '', error: '', retry: false, refused: false };
+    }
     // The platform's own sentence is written for an admin, so pass it through when there is one.
     // Log the STATUS only — the body it refused holds the message.
     const error = typeof j?.error === 'string' && j.error ? j.error : whyFailed(res.status);
+    const transient = res.status === 429 || res.status >= 500;
     log.warn(`WhatsApp not queued (HTTP ${res.status})`);
-    // 4xx is our fault and retrying the same request cannot help; 429/5xx may pass later.
-    return { queued: false, error, retry: res.status === 429 || res.status >= 500 };
+    // 4xx is a REFUSAL with a reason worth showing an admin; 429/5xx is an outage that may pass.
+    return { queued: false, id: '', error, retry: transient, refused: !transient };
   } catch (err) {
     log.debug(`WhatsApp send failed: ${err instanceof Error ? err.message : String(err)}`);
-    return { queued: false, error: 'We couldn’t reach OpenMasjidOS to send that message.', retry: true };
+    return { queued: false, id: '', error: 'We couldn’t reach OpenMasjidOS to send that message.', retry: true, refused: false };
   }
+}
+
+/** What became of one message (platform 0.51.1+, gated on `status.outcomes`). */
+export type WhatsAppState = 'queued' | 'sent' | 'failed' | 'expired';
+export interface WhatsAppMessageOutcome {
+  state: WhatsAppState;
+  /** Only on failed/expired. */
+  reason: string;
+  /** Epoch ms, as the platform reports it. */
+  at: number;
+  target: 'person' | 'group' | '';
+}
+
+/**
+ * Ask what became of a message we queued.
+ *
+ * Scoped to our own app — another app's id 404s exactly like an unknown one, which is also what a
+ * platform without the endpoint returns, so a null answer never means "it failed". Records are
+ * bounded (the platform keeps the most recent 200), so ask SOON after sending; a poll days later is
+ * indistinguishable from a message that never existed.
+ *
+ * Holds no message text and no recipient, by the platform's design — so nothing here can leak a
+ * donor's figures or an admin's number into our own logs or database.
+ */
+export async function whatsappOutcome(id: string): Promise<WhatsAppMessageOutcome | null> {
+  if (!fabricReady() || !id) return null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch(`${config.omosBaseUrl}/api/fabric/whatsapp/status/${encodeURIComponent(id)}`, {
+      headers: headers(),
+      signal: ctrl.signal,
+      redirect: 'error',
+    });
+    clearTimeout(t);
+    if (!res.ok) return null; // 404 = unknown, not ours, or a platform without the endpoint
+    const j = (await res.json().catch(() => null)) as Partial<WhatsAppMessageOutcome> | null;
+    const state = j && typeof j.state === 'string' && isState(j.state) ? j.state : null;
+    if (!state) return null;
+    return {
+      state,
+      reason: typeof j?.reason === 'string' ? j.reason.slice(0, 200) : '',
+      at: typeof j?.at === 'number' ? j.at : 0,
+      target: j?.target === 'person' || j?.target === 'group' ? j.target : '',
+    };
+  } catch (err) {
+    log.debug(`WhatsApp status check failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+function isState(v: string): v is WhatsAppState {
+  return v === 'queued' || v === 'sent' || v === 'failed' || v === 'expired';
+}
+
+/**
+ * OUR OWN send budget, because the platform no longer has one.
+ *
+ * Until platform 0.51.1 the queue refused to send too much: per-recipient cooldowns, hourly and
+ * daily caps, quiet hours. All of that is gone and a message now leaves within seconds. What has
+ * not changed is that ban risk attaches to the masjid's PHONE NUMBER, that the number is shared
+ * with every other app on the box, and that a blocked number is not recoverable.
+ *
+ * The event this exists for is "a donation was received", which fires once per transaction: a busy
+ * Friday, or a Ramadan appeal, is hundreds — and `minAmount` is opt-in, so a masjid that never set
+ * it has no protection at all. A sliding hour per destination is enough to make that safe without
+ * getting in the way of the events that matter (a refund, a broken payment setup) which arrive a
+ * handful of times a year.
+ *
+ * Suppression is COUNTED rather than silent: an admin who is told "12 WhatsApp messages were held
+ * back in the last hour" can act on it, where an admin whose phone simply went quiet cannot.
+ */
+export interface SendBudget {
+  /** Take a slot for this destination. False = do not send. */
+  take(key: string): boolean;
+  /** How many sends this destination has had held back, ever (since boot). */
+  suppressed(key: string): number;
+  /** Total held back across every destination, for the panel. */
+  totalSuppressed(): number;
+}
+
+export function makeSendBudget(perHour: number, now: () => number = Date.now): SendBudget {
+  const hits = new Map<string, number[]>();
+  const held = new Map<string, number>();
+  return {
+    take(key: string): boolean {
+      const t = now();
+      const cutoff = t - 3600_000;
+      const list = (hits.get(key) ?? []).filter((at) => at > cutoff);
+      if (list.length >= perHour) {
+        hits.set(key, list);
+        held.set(key, (held.get(key) ?? 0) + 1);
+        return false;
+      }
+      list.push(t);
+      hits.set(key, list);
+      if (hits.size > 200) for (const [k, v] of hits) if (!v.some((at) => at > cutoff)) hits.delete(k);
+      return true;
+    },
+    suppressed(key: string): number {
+      return held.get(key) ?? 0;
+    },
+    totalSuppressed(): number {
+      let n = 0;
+      for (const v of held.values()) n += v;
+      return n;
+    },
+  };
 }
 
 /**

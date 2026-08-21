@@ -205,7 +205,7 @@ Being right about unreachability is not the same as being clean, a fourth adviso
 the same package, and "we reasoned it was fine" is a worse answer to a masjid than "we upgraded it".
 Two majors, but the API surface used here is four options across two registrations, so the diff is
 one line in `package.json`. Verified by a real container start rather than by tests alone — see the
-status table at the top of this file. The one behaviour change: a request for the `/uploads/`
+status table at the top of this file. The one behavior change: a request for the `/uploads/`
 directory is now a 403 from the plugin rather than a 404, which the error handler no longer logs at
 error level (a client 4xx is not this box's problem).
 

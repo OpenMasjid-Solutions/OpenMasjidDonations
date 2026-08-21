@@ -234,7 +234,7 @@ test('large-donation clamps the threshold, caps the message, and allowlists qrIm
 });
 
 // ── DONATIONS-011: the admin audit log ───────────────────────────────────────
-// A money app must be able to answer "who exported the donor list / cancelled that plan / rotated
+// A money app must be able to answer "who exported the donor list / canceled that plan / rotated
 // the Stripe key, and when". These tests pin the shape and, more importantly, the things that must
 // NEVER end up in it.
 
@@ -558,7 +558,7 @@ test('stop link: the row SURVIVES the plan ending, so an old link reads "already
 //
 // Nothing local records a cancellation — it happens at Stripe, and a LAN-only box may never see the
 // webhook — so without a recency window a masjid three years in is told it has every monthly donor
-// it has ever had, and "about £X a month" adds up plans nobody is paying. Wrong about money, in the
+// it has ever had, and "about $X a month" adds up plans nobody is paying. Wrong about money, in the
 // flattering direction, which is the worst way to be wrong about money.
 
 const recurring = (s: Store, campaignId: string, subscriptionId: string, amount: number, createdAt: string) =>
@@ -588,7 +588,7 @@ test('monthlyGiving: only plans charged since the cutoff count as donors', () =>
 
   const g = s.monthlyGiving('2026-08', '2026-06-01T00:00:00.000Z');
   assert.equal(g.donors, 1, 'one plan is actually still being charged');
-  assert.equal(g.perMonth, 2000, 'the £50 plan that ended must not be inside "per month"');
+  assert.equal(g.perMonth, 2000, 'the $50 plan that ended must not be inside "per month"');
   assert.equal(g.dormant, 1, 'and it is reported rather than silently dropped');
   assert.equal(g.thisMonth, 2000);
 });
@@ -596,8 +596,8 @@ test('monthlyGiving: only plans charged since the cutoff count as donors', () =>
 test('monthlyGiving: the most recent charge is the one that counts, not the first', () => {
   const s = fresh();
   const c = mk(s);
-  recurring(s, c.id, 'sub_raised', 1000, '2026-01-01T10:00:00.000Z'); // started at £10
-  recurring(s, c.id, 'sub_raised', 3000, '2026-08-01T10:00:00.000Z'); // now giving £30
+  recurring(s, c.id, 'sub_raised', 1000, '2026-01-01T10:00:00.000Z'); // started at $10
+  recurring(s, c.id, 'sub_raised', 3000, '2026-08-01T10:00:00.000Z'); // now giving $30
   const g = s.monthlyGiving('2026-08', '2026-06-01T00:00:00.000Z');
   assert.equal(g.donors, 1);
   assert.equal(g.perMonth, 3000);

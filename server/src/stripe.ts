@@ -13,7 +13,7 @@ export type StripeMode = 'test' | 'live' | 'unknown';
 /** A Stripe client with a sane network timeout + one retry, so a slow/unreachable
  *  Stripe never hangs a donor request (the SDK default is 80s). Exported so other
  *  modules (plans.ts) share EXACTLY this posture instead of newing up their own client
- *  with different timeouts — one place to change it, one behaviour to reason about. */
+ *  with different timeouts — one place to change it, one behavior to reason about. */
 export function stripeClient(secretKey: string): Stripe {
   return new Stripe(secretKey, { timeout: 20_000, maxNetworkRetries: 1 });
 }

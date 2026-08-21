@@ -88,7 +88,7 @@ async function brokerCall(method: string, body: Record<string, unknown>, v: 1 | 
       if (e) {
         return { ok: false, unavailable: false, code: typeof e.code === 'string' ? e.code : 'error', message: typeof e.message === 'string' ? e.message : '' };
       }
-      return { ok: false, unavailable: true, code: `http_${res.status}` }; // unrecognised non-2xx → fail soft
+      return { ok: false, unavailable: true, code: `http_${res.status}` }; // unrecognized non-2xx → fail soft
     }
     if (!j || typeof j !== 'object') return { ok: false, unavailable: true, code: 'bad_response' };
     return { ok: true, data: j };
@@ -119,7 +119,7 @@ const intSigned = (v: unknown): number => {
  *  (§11.2: "yus-1234" is fine) — so the `identify` we confirm and the `lookup` that follows
  *  ask about the same code. Deliberately NOT a format check: the provider owns the format,
  *  and a client that validated it would reject codes the school later starts issuing. */
-export function normaliseStudentCode(raw: string): string {
+export function normalizeStudentCode(raw: string): string {
   return raw.replace(/[\s-]+/g, '').toUpperCase().slice(0, 64);
 }
 
@@ -306,7 +306,7 @@ export async function studentsInfo(force = false): Promise<InfoResult> {
 // invoices, no sibling list, not even the family id — which is what makes it safe to answer
 // before the parent has confirmed anything.
 export interface IdentifiedStudent {
-  /** The code as the provider echoes it back (normalised) — what we then `lookup` with. */
+  /** The code as the provider echoes it back (normalized) — what we then `lookup` with. */
   studentCode: string;
   firstName: string;
   /** '' for a child recorded under a single name (plenty don't split into two halves). */
@@ -321,7 +321,7 @@ export type IdentifyResult =
  *  withdrawn student, a locked code and "external payments switched off" all look identical,
  *  so we are not an enumeration oracle. Any broker/app error → `unavailable` (fail soft). */
 export async function studentsIdentify(studentCode: string): Promise<IdentifyResult> {
-  const code = normaliseStudentCode(studentCode);
+  const code = normalizeStudentCode(studentCode);
   if (!code) return { status: 'not-found' };
   const r = await brokerCall('identify', { studentCode: code }, 2);
   if (!r.ok) return { status: 'unavailable' };
@@ -344,7 +344,7 @@ export interface StudentInvoiceItem {
   id: string;
   label: string;
   /** `tuition` | `charge` | `credit` — an OPEN set: keep whatever arrives and render an
-   *  unrecognised kind as a plain line rather than dropping money off the screen. */
+   *  unrecognized kind as a plain line rather than dropping money off the screen. */
   kind: string;
   /** What the line was billed at. SIGNED — a credit line (bursary, correction) is negative. */
   amountCents: number;
@@ -359,7 +359,7 @@ export interface StudentInvoice {
   label: string;
   dueDate: string;
   balanceCents: number;
-  /** The lines this bill is made of (§11.0b). Empty = not itemised (an older Students, or a
+  /** The lines this bill is made of (§11.0b). Empty = not itemized (an older Students, or a
    *  payload we couldn't trust) → pay it as one thing, exactly as before. */
   items: StudentInvoiceItem[];
 }
@@ -427,9 +427,9 @@ function parseFamily(d: Record<string, unknown>): StudentFamily | null {
           amountCents: intSigned(it.amountCents), // a credit line is NEGATIVE — never clamp it
           balanceCents: intNonNeg(it.balanceCents),
         }));
-      // Only trust itemisation we can actually pay with: every line needs an id (a `lines[]`
+      // Only trust itemization we can actually pay with: every line needs an id (a `lines[]`
       // entry is an itemId), and the lines must add up to the bill as the contract guarantees.
-      // If either fails, drop to a single un-itemised bill rather than showing a parent a
+      // If either fails, drop to a single un-itemized bill rather than showing a parent a
       // breakdown that doesn't reconcile or offering a line we can't name.
       const usable = items.length > 0 && items.every((it) => it.id) && items.reduce((s, it) => s + it.balanceCents, 0) === balanceCents;
       return {
@@ -458,7 +458,7 @@ function parseFamily(d: Record<string, unknown>): StudentFamily | null {
  *  (§11.0). The code is sent in the body only and is NEVER logged. `not-found` is uniform
  *  (unknown / withdrawn / locked / payments-off all look identical — no enumeration oracle). */
 export async function studentsLookup(studentCode: string): Promise<LookupResult> {
-  const code = normaliseStudentCode(studentCode);
+  const code = normalizeStudentCode(studentCode);
   if (!code) return { status: 'not-found' };
   const r = await brokerCall('lookup', { studentCode: code }, 2);
   if (r.ok) {
@@ -529,7 +529,7 @@ export async function recordStudentPayment(input: RecordPaymentInput): Promise<R
     // deliberately paid still reads settled on next month's statement.
     body.lines = input.lines;
   } else if (input.allocations && input.allocations.length) {
-    // Whole invoices. Honoured from Students 0.43.0 (before that it was parsed and silently
+    // Whole invoices. Honored from Students 0.43.0 (before that it was parsed and silently
     // ignored, which is why `students` below exists), and lenient by design: if the office took
     // cash against a bill between our lookup and this call, the remainder is recorded as ordinary
     // money on that child rather than rejected — the card is already captured by then.
@@ -594,10 +594,10 @@ export interface TuitionSession {
    *  `items` (§11.0b) what lets a parent pay ONE line of a bill — the ids and amounts are held
    *  here so a ticked line's value comes from the server's copy, never the browser's. */
   invoices: { id: string; studentId: string; balanceCents: number; items: { id: string; balanceCents: number }[] }[];
-  /** True when EVERY open bill arrived itemised. Decided per family, not per bill: the provider
+  /** True when EVERY open bill arrived itemized. Decided per family, not per bill: the provider
    *  chain is `lines` OR `allocations`, never both, so a selection mixing lines from one bill
    *  with a whole other bill couldn't be expressed in one call. All-or-nothing removes that. */
-  itemised: boolean;
+  itemized: boolean;
   /** The family's children, each with an opaque `ref` the browser uses to say WHICH child an
    *  advance is for. The internal studentId stays here — a browser never sees one, so a crafted
    *  request can only ever name a child of the family this session looked up. */
@@ -664,7 +664,7 @@ export type AmountResult =
        *  `recordStudentPayment`). `null` = let Students derive it (correct for a full balance). */
       students: { studentId: string; amountCents: number }[] | null;
       /** The exact LINES the parent ticked (§11.0b). When present this is the ONLY breakdown we
-       *  send: it supersedes `students` (a line already says whose bill it is) and it's honoured
+       *  send: it supersedes `students` (a line already says whose bill it is) and it's honored
        *  stickily — the line stays settled when Students recomputes its allocations. */
       lines: { itemId: string; amountCents: number }[] | null;
       /** Which child this charge is FOR, when the parent said so (a per-child advance). Goes on
@@ -724,7 +724,7 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
     // amount is the sum of those lines' balances FROM THE SESSION, so a browser can name which
     // lines but never what they cost. `lines` alone goes on the wire: it supersedes `students`
     // (each line already resolves to a child) and is strict, since the ids came from us.
-    if (!session.itemised) return { error: 'not-itemised' };
+    if (!session.itemized) return { error: 'not-itemized' };
     const itemIds = [...new Set(selection.itemIds)];
     if (!itemIds.length) return { error: 'no-selection' };
     const lines: { itemId: string; amountCents: number }[] = [];
@@ -756,7 +756,7 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
   }
   if (sum <= 0) return { error: 'nothing-due' };
   // A split must cover the WHOLE charge to the penny or Students rejects it (422). If any
-  // picked invoice arrived without a child (a provider we don't recognise), send no split at
+  // picked invoice arrived without a child (a provider we don't recognize), send no split at
   // all and let Students derive one — degrading beats a rejected payment.
   const students = everyInvoiceHasAChild && byStudent.size ? [...byStudent].map(([studentId, amountCents]) => ({ studentId, amountCents })) : null;
   return checked({ amountCents: sum, allocations, students, lines: null, targetStudentId: null });

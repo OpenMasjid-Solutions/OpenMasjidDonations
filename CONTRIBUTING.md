@@ -111,7 +111,7 @@ All three must be clean. If you add a `*.test.ts` file, **add it to the `test` s
   new files; never strip an existing one.
 - **Conventional-commit messages**, small commits, and comment the *why* rather than the what.
 - Match the surrounding style; the UI follows the OpenMasjidOS design language
-  (dark default, WCAG AA, RTL-ready, honors `prefers-reduced-motion`). Colours and spacing
+  (dark default, WCAG AA, RTL-ready, honors `prefers-reduced-motion`). Colors and spacing
   come from the design tokens — never a hardcoded hex in a component.
 - **Never** put a Stripe secret key in the browser or a log, and never handle raw card data:
   entry happens inside Stripe's own Payment Element (PCI SAQ-A).

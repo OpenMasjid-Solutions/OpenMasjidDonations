@@ -46,7 +46,7 @@ square, paid ahead, or "you can't pay here" — and a consumer had no way to tel
 - **Never hide the campaign or disable the field because the balance is zero.** A family paying a term
   up front, or clearing the year at the start of Ramadan, is normal — tuition is not a donation appeal.
 - **The floor is the stricter of the school's and ours** (`MIN_TUITION_CENTS`, $1): a provider
-  advertising 25¢ can't drag us under a pound/dollar, and one advertising $5 is honoured. It applies to
+  advertising 25¢ can't drag us under a pound/dollar, and one advertising $5 is honored. It applies to
   **every** path — full balance, picked months, typed amount — because it is "the smallest card payment
   a parent may start, wherever they start it", the same constant the school's own portal enforces.
 - **Paying part of a real balance is not an advance** and needs no `allowAdvance`: only money *above*
@@ -58,7 +58,7 @@ square, paid ahead, or "you can't pay here" — and a consumer had no way to tel
 - `allowAdvance` is **advertised, never assumed** — it stays `false` against a Students that predates
   0.41.0, so an old school doesn't silently start taking prepayments.
 
-## 0c. Additive since v2 — Students 0.43.0: ITEMISED BILLS (§11.0b)
+## 0c. Additive since v2 — Students 0.43.0: ITEMIZED BILLS (§11.0b)
 
 A bill was one label and one number, so the only offer we could make was "pay the whole $250". In
 practice a February bill is **$200 monthly tuition + a $50 book fee**, and parents routinely want to
@@ -75,17 +75,17 @@ pay just the book fee.
   special case. A **credit** line (bursary, correction) reports `balanceCents: 0` because its value is
   already deducted from the lines above: shown as information, never payable.
 - **Settled** lines are still listed at `balanceCents: 0` — shown as "already paid" on a part-paid bill.
-  Only lines with a balance are offered. A **single-line bill gets no itemised UI**, exactly as before.
+  Only lines with a balance are offered. A **single-line bill gets no itemized UI**, exactly as before.
 - **`lines` is sent alone.** Students resolves exactly one breakdown, in the order
   `lines → allocations → students → derive-it-itself`, so sending more than one is dead weight at best
   and a contradiction to debug at worst. `lines` supersedes `students[]` (a line already resolves to its
-  child) and it is *honoured stickily*: the line the parent chose stays settled when Students later
+  child) and it is *honored stickily*: the line the parent chose stays settled when Students later
   recomputes its allocations.
-- **Itemisation is decided per FAMILY, not per bill** (`itemised` in our lookup response): the provider
-  honours lines OR whole invoices, never a mixture, so a selection mixing a line from one bill with a
-  whole other bill couldn't be expressed in one call. Every bill itemised, or none.
-- We **distrust itemisation we can't charge from**: if any line lacks an `id`, or the lines don't add up
-  to the bill, that invoice falls back to a single un-itemised row. Better to pay it as one thing than
+- **Itemization is decided per FAMILY, not per bill** (`itemized` in our lookup response): the provider
+  honors lines OR whole invoices, never a mixture, so a selection mixing a line from one bill with a
+  whole other bill couldn't be expressed in one call. Every bill itemized, or none.
+- We **distrust itemization we can't charge from**: if any line lacks an `id`, or the lines don't add up
+  to the bill, that invoice falls back to a single un-itemized row. Better to pay it as one thing than
   show a parent a breakdown that doesn't reconcile.
 - **`allocations[]` works from 0.43.0.** It was in the contract from v1 and silently ignored until now
   (which is why we also send `students[]` on that path — see §11.0b and the v0.34.0 note below). It's a
@@ -192,7 +192,7 @@ A `tuition` campaign renders **exactly this**, nothing more:
    - **Pay the balance** (the whole household `balanceCents`) — bills below read as a *statement*,
      with no tick boxes until the parent asks to choose, or
    - **Choose what to pay** — tick what you're paying, with the running total on the button.
-     On itemised bills (§11.0b) the bill label becomes a heading and each **line** is tickable, so the
+     On itemized bills (§11.0b) the bill label becomes a heading and each **line** is tickable, so the
      book fee can be paid without the month's tuition; a single-line bill is one row as before.
      Everything starts ticked, so "pay the lot" stays one tap, or
    - **Add money for &lt;child&gt;** — its own step: type any figure ≥ `minAmountCents` (a part payment,
@@ -266,7 +266,7 @@ turned off) → **hide the tuition campaign**. Use `schoolName` / `tagline` for 
 
 ### `identify` — whose Student ID is this? (step 2→3) **call this first**
 ```jsonc
-// the ID is normalised on the provider side (case, spaces, hyphens), so "yus-1234" is fine
+// the ID is normalized on the provider side (case, spaces, hyphens), so "yus-1234" is fine
 { "v": 2, "studentCode": "YUS1234" }
 // found — a first name + last initial and NOTHING else:
 → { "v": 2, "found": true, "student": { "studentCode": "YUS1234", "firstName": "Yusuf", "lastInitial": "I" } }
@@ -298,7 +298,7 @@ locks a code after **6 failed probes per hour** (shared bucket across `identify`
 ```
 Render the household total from `family.balanceCents` (that’s what “pay the full balance” charges) and
 the per-child `students[].balanceCents` behind it; render one selectable row per `openInvoices[]`
-(that’s the “pay specific months” list), labelled with the child from its `studentId`. **Never display
+(that’s the “pay specific months” list), labeled with the child from its `studentId`. **Never display
 more than the contract returns** — no full last names, DOB, or contact info. Keep `family.id` +
 `matchedStudent.id` server-side for the pay step; we do **not** forward a sibling's `studentCode` to
 the browser (we don't offer a sibling switch, so it has no business leaving the server).
@@ -352,7 +352,7 @@ Unchanged at v2 and still sent as `"v": 1`. After the PaymentIntent succeeds, ca
   the same ticked invoices, and **omit it for "pay the full balance"**, where the derived split is
   identical (every open invoice gets covered) and is what reconciliation would reproduce anyway.
   Keep sending `allocations` too — it's harmless, contract-documented, and correct if the provider
-  ever honours it.
+  ever honors it.
 - The split **must sum to `amountCents` to the penny** and every child must belong to `familyId`, or
   Students answers `422 invalid_allocation`. If any picked invoice arrives without a `studentId`, send
   **no** split and let Students derive one — degrading beats a rejected payment.
@@ -413,7 +413,7 @@ what generates a phone call to the office. Our wording, matching the parent port
 > **Total charged** $103.30
 >
 > The processing fee is not the masjid's — it is what Visa, Mastercard and American Express charge to
-> accept a card, and it goes straight to the payment processor. Paying by cash or cheque at the office
+> accept a card, and it goes straight to the payment processor. Paying by cash or check at the office
 > avoids it.
 
 `TuitionFeeLines` in `web/src/donate.tsx` renders it, and renders **nothing at all** when the fee is
@@ -429,7 +429,7 @@ response rather than re-deriving them.
   returns a uniform `found:false` — but we must not be the open relay that lets an attacker grind
   codes. Key the bucket on the real TCP peer, never a spoofable `X-Forwarded-For`.
 - A Student ID is **not a secret** (its letters come from the child's first name and it's printed on
-  statements) — it is nonetheless the whole credential, because all it authorises is *seeing a balance
+  statements) — it is nonetheless the whole credential, because all it authorizes is *seeing a balance
   and paying it*. Treat it as **inert input**: send it in the JSON body only — **never** in a URL, a log
   line, Stripe metadata, a description, or an email. Store nothing about the lookup.
 - **Never call `lookup` before the parent confirmed the name from `identify`** — that confirmation is

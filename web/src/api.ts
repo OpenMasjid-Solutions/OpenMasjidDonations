@@ -332,6 +332,20 @@ export interface WhatsAppGroup {
   label: string;
 }
 
+/** What became of the last WhatsApp message for one event.
+ *
+ *  `refused` is the platform saying no *with a reason* — an unapproved group, the gateway's own
+ *  number, a number with no country code — or our own hourly cap holding one back. `failed` and
+ *  `expired` come from the platform's status endpoint (0.51.1+). `sent` means handed to WhatsApp,
+ *  never "delivered": there is no receipt to report. */
+export interface WhatsAppEventOutcome {
+  state: 'queued' | 'sent' | 'failed' | 'expired' | 'refused';
+  /** The platform's own sentence, written for an admin. Never a recipient, never the message. */
+  reason: string;
+  /** ISO timestamp of when the app recorded it. */
+  at: string;
+}
+
 export interface WhatsAppAvailability {
   available: boolean;
   reason: WhatsAppReason;
@@ -339,6 +353,13 @@ export interface WhatsAppAvailability {
   maxMediaBytes: number;
   /** Only the groups the OpenMasjidOS admin approved for this app. Empty = hide the picker. */
   groups: WhatsAppGroup[];
+  /** Does the platform have the message-status endpoint (0.51.1+)? Absent means no. */
+  outcomes?: boolean;
+  /** Per event id, what became of the last message — only events with something to report. */
+  lastOutcomes?: Record<string, WhatsAppEventOutcome>;
+  /** How many messages the app's OWN hourly cap has held back since it started. The platform
+   *  stopped limiting anything in 0.51.1, so this bound is ours, and worth admitting to. */
+  heldBack?: number;
 }
 
 /** Every notification this app can raise. The ids are the app's own; the labels live in the UI. */
@@ -622,7 +643,7 @@ export const confirmDonation = (body: { paymentIntentId: string; slug: string; t
 
 // ── A monthly donor's own "stop these payments" page (/stop/<token>) ─────────
 // The donor is emailed this link when their gift is set up; the token is the only credential, so
-// it authorises exactly two things — read this description, and stop the payments. Both are POSTs
+// it authorizes exactly two things — read this description, and stop the payments. Both are POSTs
 // with the token in the BODY: no GET may mutate (link-preview bots follow GET links), and it keeps
 // the token out of URL logs.
 
@@ -695,7 +716,7 @@ export interface StudentInvoiceView {
 /** Who a Student ID belongs to: a first name + last initial and nothing else — no balance, no
  *  family, no ids. This confirmation step is what replaced the PIN (contract §11.0). */
 export interface StudentIdentity {
-  /** The code as the server normalised it — pass this straight to `lookupStudent`. */
+  /** The code as the server normalized it — pass this straight to `lookupStudent`. */
   studentCode: string;
   firstName: string;
   /** '' for a child recorded under a single name — render just the given name. */
@@ -723,13 +744,13 @@ export interface StudentLookupResult {
      *  whether a family is square or ahead, and once an advance settles its invoice this is
      *  the only signal left (openInvoices is empty by then). */
     credit: number;
-    /** True when EVERY open bill arrived itemised, so the pay step accepts a line selection.
-     *  Decided for the whole family: the provider honours ticked lines OR whole invoices, never
+    /** True when EVERY open bill arrived itemized, so the pay step accepts a line selection.
+     *  Decided for the whole family: the provider honors ticked lines OR whole invoices, never
      *  a mixture, so the choice can't be made per bill. */
-    itemised: boolean;
+    itemized: boolean;
     openInvoices: StudentInvoiceView[];
     /** The processing rate, when the school has asked the PAYER to cover Stripe's cut — null for
-     *  almost every school, and null means add nothing. Present so this page can show an itemised
+     *  almost every school, and null means add nothing. Present so this page can show an itemized
      *  total for whatever the parent ticks BEFORE they commit; the server recomputes the real
      *  figure when it creates the payment, and that one is authoritative. */
     fee: TuitionFeeRate | null;
@@ -803,7 +824,7 @@ export interface TuitionConfirmResponse {
 export type TuitionSelection =
   | { kind: 'full' }
   | { kind: 'invoices'; invoiceIds: string[] }
-  /** The exact bill lines ticked (§11.0b) — used whenever the family's bills are itemised. */
+  /** The exact bill lines ticked (§11.0b) — used whenever the family's bills are itemized. */
   | { kind: 'items'; itemIds: string[] }
   /** A typed amount, optionally towards one child (`student` = their ref from the lookup). */
   | { kind: 'amount'; amount: number; student?: string };
@@ -843,7 +864,7 @@ export function currencyDecimals(currency: string): number {
   }
 }
 
-/** Format a major-unit amount in the given currency, e.g. 50 GBP → "£50.00". */
+/** Format a major-unit amount in the given currency, e.g. 50 GBP → "$50.00". */
 export function money(amount: number, currency: string): string {
   try {
     return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount);

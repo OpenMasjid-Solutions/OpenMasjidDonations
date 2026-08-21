@@ -83,7 +83,7 @@ The full feature set, as it stands.
   Stripe's own field and go straight to Stripe.
 - **A thank-you screen in your words**, per appeal or site-wide, with `{name}`,
   `{amount}`, `{campaign}` and `{masjid}` filled in, and its own background image and
-  accent colour if you want one.
+  accent color if you want one.
 - **An optional emailed receipt**, branded with your logo, accent and contact details,
   with the amount, date, payment method and fund filled in automatically.
 - **A shareable link and a QR code** for the door — using your public domain when
@@ -91,7 +91,7 @@ The full feature set, as it stands.
 - **An embeddable widget** (`/w/<appeal>`) to drop into your own website, one per
   appeal and off until you enable it.
 - **Light and dark**, matching the masjid's dashboard, laid out with logical CSS so
-  it's ready for right-to-left languages, and it honours "reduce motion".
+  it's ready for right-to-left languages, and it honors "reduce motion".
 
 ### Monthly gifts, and stopping them
 
@@ -119,16 +119,16 @@ which owns all the data:
 - The page is laid out **child by child**: each child's own balance or credit, their
   own bills beneath it, and their own "Add money" button.
 - They can pay **a whole bill**, **only the months they tick**, or **individual lines
-  of a bill** — just the £50 book fee out of a £250 February bill. Lines already paid
+  of a bill** — just the $50 book fee out of a $250 February bill. Lines already paid
   say so, and a bursary shows as the deduction it is.
 - They can **pay ahead** when nothing is due — a term or a year up front — and money
   paid ahead lands on **the child they picked**, not a sibling's older bill.
 - Any credit on the family is shown rather than a bare zero, and a child with nothing
   due says so instead of vanishing.
-- A minimum payment of £1/$1 matches the school's own portal, so nobody meets a card
+- A minimum payment of $1/$1 matches the school's own portal, so nobody meets a card
   decline instead of a friendly message.
 - Tuition is deliberately kept **out of your donation totals, stats, charts and CSV** —
-  it's a payment, not a gift. Itemised bills need OpenMasjid Students v0.43.0; older
+  it's a payment, not a gift. Itemized bills need OpenMasjid Students v0.43.0; older
   versions simply pay each bill as one thing.
 
 ### Your admin panel

@@ -34,7 +34,7 @@ function session(over: Partial<TuitionSession> = {}): TuitionSession {
       { ref: 'c0', studentId: 'stu_1', balanceCents: 20000 },
       { ref: 'c1', studentId: 'stu_2', balanceCents: 15000 },
     ],
-    itemised: false,
+    itemized: false,
     allowAdvance: true,
     minAmountCents: 100, // the school's advertised floor ($1)
     ...over,
@@ -44,7 +44,7 @@ function session(over: Partial<TuitionSession> = {}): TuitionSession {
 /** The bill the brief calls out: February = $200 monthly tuition + $50 book fee, with a $30
  *  bursary already deducted and last month's book fee settled. `items[].balanceCents` sums to
  *  the invoice balance (25000), and the two zero-balance lines are unpayable. */
-function itemisedSession(over: Partial<TuitionSession> = {}): TuitionSession {
+function itemizedSession(over: Partial<TuitionSession> = {}): TuitionSession {
   return createTuitionSession({
     campaignId: 'cmp_x',
     familyId: 'fam_x1',
@@ -66,7 +66,7 @@ function itemisedSession(over: Partial<TuitionSession> = {}): TuitionSession {
       },
     ],
     students: [{ ref: 'c0', studentId: 'stu_1', balanceCents: 25000 }], // an only child
-    itemised: true,
+    itemized: true,
     allowAdvance: true,
     minAmountCents: 100,
     ...over,
@@ -164,9 +164,9 @@ test('empty invoice selection is rejected', () => {
   assert.deepEqual(computeTuitionAmount(session(), { kind: 'invoices', invoiceIds: [] }), { error: 'no-selection' });
 });
 
-// ── Itemised bills — paying one LINE of a bill (§11.0b, Students 0.43.0) ────
+// ── Itemized bills — paying one LINE of a bill (§11.0b, Students 0.43.0) ────
 test('one line of a bill: the book fee alone, priced from the session', () => {
-  const s = itemisedSession();
+  const s = itemizedSession();
   const r = computeTuitionAmount(s, { kind: 'items', itemIds: ['iti_book'] });
   assert.deepEqual(r, {
     amountCents: 5000,
@@ -180,7 +180,7 @@ test('one line of a bill: the book fee alone, priced from the session', () => {
 });
 
 test('several lines: they sum to the charge exactly (or Students 422s)', () => {
-  const s = itemisedSession();
+  const s = itemizedSession();
   const r = computeTuitionAmount(s, { kind: 'items', itemIds: ['iti_tuition', 'iti_book'] });
   assert.equal('amountCents' in r && r.amountCents, 25000, 'the whole February bill');
   const lines = 'lines' in r ? r.lines : null;
@@ -192,7 +192,7 @@ test('several lines: they sum to the charge exactly (or Students 422s)', () => {
 });
 
 test('a credit line and a settled line are NOT payable, even if a request names one', () => {
-  const s = itemisedSession();
+  const s = itemizedSession();
   // The browser is never offered these; a crafted request naming one is refused rather than
   // silently dropped, which would charge less than the parent was shown.
   assert.deepEqual(computeTuitionAmount(s, { kind: 'items', itemIds: ['iti_bursary'] }), { error: 'unknown-item' });
@@ -201,28 +201,28 @@ test('a credit line and a settled line are NOT payable, even if a request names 
 });
 
 test('a line id from outside the session is refused (the household wall, our side)', () => {
-  const s = itemisedSession();
+  const s = itemizedSession();
   assert.deepEqual(computeTuitionAmount(s, { kind: 'items', itemIds: ['iti_SOMEONE_ELSE'] }), { error: 'unknown-item' });
 });
 
 test('duplicate line ids are de-duped (no double charge)', () => {
-  const s = itemisedSession();
+  const s = itemizedSession();
   const r = computeTuitionAmount(s, { kind: 'items', itemIds: ['iti_book', 'iti_book'] });
   assert.deepEqual(r, { amountCents: 5000, allocations: null, students: null, lines: [{ itemId: 'iti_book', amountCents: 5000 }], targetStudentId: null });
 });
 
 test('an empty line selection is refused', () => {
-  assert.deepEqual(computeTuitionAmount(itemisedSession(), { kind: 'items', itemIds: [] }), { error: 'no-selection' });
+  assert.deepEqual(computeTuitionAmount(itemizedSession(), { kind: 'items', itemIds: [] }), { error: 'no-selection' });
 });
 
-test('a line selection against a NON-itemised family is refused, not guessed at', () => {
-  // The provider honours lines OR allocations, never a mixture, so we only accept a line
-  // selection when we advertised that every bill was itemised.
-  assert.deepEqual(computeTuitionAmount(session(), { kind: 'items', itemIds: ['iti_book'] }), { error: 'not-itemised' });
+test('a line selection against a NON-itemized family is refused, not guessed at', () => {
+  // The provider honors lines OR allocations, never a mixture, so we only accept a line
+  // selection when we advertised that every bill was itemized.
+  assert.deepEqual(computeTuitionAmount(session(), { kind: 'items', itemIds: ['iti_book'] }), { error: 'not-itemized' });
 });
 
 test('the floor applies to a single ticked line too', () => {
-  const s = itemisedSession({
+  const s = itemizedSession({
     balanceCents: 60,
     invoices: [{ id: 'inv_x', studentId: 'stu_1', balanceCents: 60, items: [{ id: 'iti_tiny', balanceCents: 60 }] }],
   });
@@ -230,8 +230,8 @@ test('the floor applies to a single ticked line too', () => {
 });
 
 test('a SINGLE-line bill still pays as one thing — whole-bill and line paths agree', () => {
-  // The common case the brief calls out: no itemised UI needed, and both routes charge the same.
-  const s = itemisedSession({
+  // The common case the brief calls out: no itemized UI needed, and both routes charge the same.
+  const s = itemizedSession({
     balanceCents: 20000,
     invoices: [{ id: 'inv_mar', studentId: 'stu_1', balanceCents: 20000, items: [{ id: 'iti_only', balanceCents: 20000 }] }],
   });
@@ -245,7 +245,7 @@ test('a SINGLE-line bill still pays as one thing — whole-bill and line paths a
 });
 
 test('the whole-balance and advance paths never send lines', () => {
-  const s = itemisedSession();
+  const s = itemizedSession();
   assert.equal('lines' in computeTuitionAmount(s, { kind: 'full' }) ? (computeTuitionAmount(s, { kind: 'full' }) as { lines: unknown }).lines : 'missing', null);
   const adv = computeTuitionAmount(s, { kind: 'amount', amountCents: 50000 });
   assert.equal('lines' in adv ? adv.lines : 'missing', null);
@@ -287,7 +287,7 @@ test('an advance names WHICH child, and lands on that child even if a sibling ow
 });
 
 test('an advance for an only child needs no ref — there is one answer', () => {
-  const s = itemisedSession(); // a single child, stu_1
+  const s = itemizedSession(); // a single child, stu_1
   const r = computeTuitionAmount(s, { kind: 'amount', amountCents: 5000 });
   assert.equal('targetStudentId' in r ? r.targetStudentId : '', 'stu_1');
   assert.deepEqual('students' in r ? r.students : null, [{ studentId: 'stu_1', amountCents: 5000 }]);
@@ -307,7 +307,7 @@ test('with several children and NO ref, Students derives the split (surplus → 
   assert.equal('targetStudentId' in r ? r.targetStudentId : 'x', null);
 });
 
-test('a per-child advance still honours the floor and the ceiling', () => {
+test('a per-child advance still honors the floor and the ceiling', () => {
   const s = session();
   assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 99, studentRef: 'c0' }), { error: 'below-min' });
   assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 100_000_000, studentRef: 'c0' }), { error: 'too-large' });
@@ -323,7 +323,7 @@ test('the floor is enforced on a typed amount, and quoted from the SESSION not t
   const s = session({ minAmountCents: 100 });
   assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 99 }), { error: 'below-min' });
   assert.deepEqual(computeTuitionAmount(s, { kind: 'amount', amountCents: 100 }), { amountCents: 100, allocations: null, students: null, lines: null, targetStudentId: null });
-  // A school advertising a higher floor is honoured too.
+  // A school advertising a higher floor is honored too.
   const strict = session({ minAmountCents: 500 });
   assert.deepEqual(computeTuitionAmount(strict, { kind: 'amount', amountCents: 400 }), { error: 'below-min' });
 });

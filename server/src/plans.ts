@@ -132,7 +132,7 @@ export function groupPlanSeeds(donations: Donation[]): PlanSeed[] {
  *  The recurring donation row is written at `/…/intent` — BEFORE the donor has entered a
  *  card — so every monthly checkout somebody starts and walks away from leaves a row behind
  *  for a subscription that never collected a penny. Left alone those pile up for ever
- *  (£0 collected, later reported "Stopped"), and a visitor on the masjid's own network can
+ *  ($0 collected, later reported "Stopped"), and a visitor on the masjid's own network can
  *  create them without logging in, so they must never be able to crowd out a real plan.
  *
  *  WHERE THIS MAY BE USED — and where it may NOT. A plan whose first payment really DID
@@ -219,7 +219,7 @@ export function friendlyStatus(stripeStatus: string, paused: boolean): { status:
 export type InvoiceStatus = 'paid' | 'open' | 'draft' | 'void' | 'uncollectible' | 'unknown';
 
 /** Stripe's invoice status → warm words. `status` is nullable on the Stripe object, so
- *  null and anything unrecognised both land on 'unknown'. */
+ *  null and anything unrecognized both land on 'unknown'. */
 export function invoiceStatusLabel(status: string | null | undefined): { status: InvoiceStatus; label: string } {
   switch (status) {
     case 'paid':
@@ -229,7 +229,7 @@ export function invoiceStatusLabel(status: string | null | undefined): { status:
     case 'draft':
       return { status: 'draft', label: 'Not sent yet' };
     case 'void':
-      return { status: 'void', label: 'Cancelled' };
+      return { status: 'void', label: 'Canceled' };
     // "Uncollectible" and "written off" are accounts-package words. What it means to a masjid
     // is that Stripe stopped trying and the money never came.
     case 'uncollectible':
@@ -278,7 +278,7 @@ function addMonthsUTC(d: Date, months: number): void {
 }
 
 /** `from` (unix seconds) plus `times` billing intervals. Returns 0 when the interval is
- *  one we don't recognise — the caller must treat 0 as "can't work this out" and refuse
+ *  one we don't recognize — the caller must treat 0 as "can't work this out" and refuse
  *  rather than guess a cancel date. */
 export function addIntervals(fromUnix: number, interval: string, intervalCount: number, times: number): number {
   if (!Number.isFinite(fromUnix) || fromUnix <= 0) return 0;
@@ -541,7 +541,7 @@ export async function fetchPlanInvoices(secretKey: string, subscriptionId: strin
   }
 }
 
-/** Pause collection. 'void' is the only honest behaviour for a donation: the donor is
+/** Pause collection. 'void' is the only honest behavior for a donation: the donor is
  *  not charged AND is not billed for the missed months later. Returns false on failure. */
 export async function pausePlan(secretKey: string, subscriptionId: string): Promise<boolean> {
   try {

@@ -4,7 +4,7 @@
 // Locks the money conversions — every amount this app charges passes through them, and before the
 // 2026-08-03 audit not one of them had a test (DONATIONS-044).
 //
-// IMPORTANT, so nobody is misled by a green run: some tests below assert the CURRENT behaviour of
+// IMPORTANT, so nobody is misled by a green run: some tests below assert the CURRENT behavior of
 // two known-wrong conversions rather than the correct answer, and say so at the assertion. They
 // exist to make the wrongness visible and to fail loudly when it is fixed, because the fix changes
 // what donors are charged and must be reconciled against Stripe by a human first:
@@ -133,7 +133,7 @@ test('toMinor: hostile inputs do not silently become a charge', () => {
 // ── withCoveredFees ──────────────────────────────────────────────────────────
 
 test('withCoveredFees: grosses up so the masjid nets ~the intended amount', () => {
-  // Model is 2.9% + 0.30. For £10.00: (1000 + 30) / (1 - 0.029) = 1060.76… → 1061.
+  // Model is 2.9% + 0.30. For $10.00: (1000 + 30) / (1 - 0.029) = 1060.76… → 1061.
   const gross = withCoveredFees(1000, 'GBP');
   assert.equal(gross, 1061);
   // Verify the point of the exercise: fee on the GROSS leaves the masjid with ~the original net.

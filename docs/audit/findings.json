@@ -168,7 +168,7 @@
       "category": "audit-logging",
       "file": "server/src/index.ts",
       "line": 826,
-      "summary": "Nothing recorded who exported the donor ledger, cancelled a plan, rotated a Stripe key or deleted a campaign. A second volunteer with panel access is in the threat model and CLAUDE.md promises a financial record.",
+      "summary": "Nothing recorded who exported the donor ledger, canceled a plan, rotated a Stripe key or deleted a campaign. A second volunteer with panel access is in the threat model and CLAUDE.md promises a financial record.",
       "status": "fixed",
       "commit": "87033d3"
     },

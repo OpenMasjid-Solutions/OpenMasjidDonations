@@ -11,7 +11,7 @@
 //     at $99.91: open for ever, showing a family as unpaid over ten cents. The worked examples the
 //     contract publishes are asserted verbatim.
 //  2. **`enabled: false` must change nothing.** It is what almost every install returns. No
-//     gross-up, no metadata key, no `feeCents` — byte-identical behaviour to before the feature.
+//     gross-up, no metadata key, no `feeCents` — byte-identical behavior to before the feature.
 //  3. **The ledger gets the TUITION.** The contract's failure directions are deliberately lopsided:
 //     forget the metadata key and reconciliation credits one family slightly too much; put a gross
 //     in `amountCents` and the ledger is wrong until a human notices. So the net is what is stored
@@ -203,7 +203,7 @@ test('end to end: full balance, fee on — the card pays the gross and the ledge
     campaignId: 'cmp_1', familyId: 'fam_x1', studentId: 'stu_1', familyLabel: 'Ismail family',
     currency: 'USD', balanceCents: 10_000,
     invoices: [{ id: 'inv_9', studentId: 'stu_1', balanceCents: 10_000, items: [] }],
-    itemised: false,
+    itemized: false,
     students: [{ ref: 'c0', studentId: 'stu_1', balanceCents: 10_000 }],
     allowAdvance: true, minAmountCents: 100,
     fee: CARD,
@@ -239,7 +239,7 @@ test('end to end: the same session with the fee OFF changes nothing at all', () 
     campaignId: 'cmp_1', familyId: 'fam_x1', studentId: 'stu_1', familyLabel: 'Ismail family',
     currency: 'USD', balanceCents: 10_000,
     invoices: [{ id: 'inv_9', studentId: 'stu_1', balanceCents: 10_000, items: [] }],
-    itemised: false,
+    itemized: false,
     students: [{ ref: 'c0', studentId: 'stu_1', balanceCents: 10_000 }],
     allowAdvance: true, minAmountCents: 100,
     fee: null, // the default for almost every school
@@ -260,7 +260,7 @@ test('end to end: the same session with the fee OFF changes nothing at all', () 
 test('end to end: an advance is grossed up too, and the floor applies to the TUITION', () => {
   const session = createTuitionSession({
     campaignId: 'cmp_1', familyId: 'fam_x1', studentId: 'stu_1', familyLabel: '',
-    currency: 'USD', balanceCents: 0, invoices: [], itemised: false,
+    currency: 'USD', balanceCents: 0, invoices: [], itemized: false,
     students: [{ ref: 'c0', studentId: 'stu_1', balanceCents: 0 }],
     allowAdvance: true, minAmountCents: 100, fee: CARD,
   });
