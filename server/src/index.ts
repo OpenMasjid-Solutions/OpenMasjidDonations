@@ -17,7 +17,8 @@ import fastifyMultipart from '@fastify/multipart';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID } from './store';
+import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NEW_EMAIL_EVENTS } from './store';
+import { DIALS, DEFAULT_DIAL, toE164 } from './phone';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch, WhatsAppEventOutcome } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
@@ -513,9 +514,8 @@ async function main(): Promise<void> {
    * with every other app on the box, and a blocked one cannot be recovered.
    *
    * The event that needs this is "a donation was received": it fires once per transaction, so a
-   * Ramadan Friday is hundreds, and `minAmount` is opt-in so a masjid that never set it has no
-   * protection at all. The events that actually matter — a refund, a payment setup that broke —
-   * arrive a handful of times a year and will never come near the cap.
+   * Ramadan Friday is hundreds. The events that actually matter — a refund, a payment setup that
+   * broke — arrive a handful of times a year and will never come near the cap.
    *
    * 20/hour per destination, and what it holds back is COUNTED and shown on the settings screen: an
    * admin told "12 messages were held back in the last hour" can act, where one whose phone simply
@@ -523,10 +523,33 @@ async function main(): Promise<void> {
    */
   const waBudget = makeSendBudget(20);
 
-  /** Remember what became of a WhatsApp message, so the panel can say so. Never throws. */
-  const recordWaOutcome = (event: NotifyEventId, state: WhatsAppEventOutcome['state'], reason = ''): void => {
+  /**
+   * AND A CEILING ACROSS ALL DESTINATIONS TOGETHER, which is new in v0.44.0 and is the price of
+   * letting a masjid list more than one number.
+   *
+   * The per-destination cap above bounds what any ONE person receives. It does not bound what the
+   * masjid's number SENDS, and that is the thing that gets banned: five numbers on the donation event
+   * is five messages per donation from one gateway, so the old cap would have quietly become 100/hour
+   * the moment this feature shipped. CLAUDE.md §13 said "one message per event, never a loop over
+   * recipients" precisely to avoid that, and a loop is exactly what a recipient list is — so the
+   * invariant now has to be carried by a number instead of by the shape of the code.
+   *
+   * 40/hour total: enough for two busy destinations, or for the handful of real events across many,
+   * and far below the volume that makes a gateway look like a broadcaster. Held-back sends are counted
+   * into the same figure the panel already shows, so this cannot make a phone go quiet unexplained.
+   */
+  const waTotalBudget = makeSendBudget(40);
+  const WA_ALL = 'all';
+
+  /** Remember what became of a WhatsApp message, so the panel can say so. Never throws.
+   *
+   *  Keyed by RECIPIENT and event since v0.44.0 — with several destinations on one event, an
+   *  event-only key meant the second recipient's refusal overwrote the first's and the panel showed
+   *  one row's problem against everybody. */
+  const waKey = (recipientId: string, event: NotifyEventId): string => `${recipientId}|${event}`;
+  const recordWaOutcome = (recipientId: string, event: NotifyEventId, state: WhatsAppEventOutcome['state'], reason = ''): void => {
     try {
-      store.setWhatsAppOutcome(event, { state, reason, at: new Date().toISOString() });
+      store.setWhatsAppOutcome(waKey(recipientId, event), { state, reason, at: new Date().toISOString() });
     } catch {
       /* a health indicator must never break the thing it reports on */
     }
@@ -535,38 +558,93 @@ async function main(): Promise<void> {
   /** Ask the platform what happened to a message, shortly after queueing it (0.51.1+ only).
    *
    *  Once, after a short delay, and never in a loop: the platform's own records are bounded to the
-   *  most recent 200, so asking soon is the only time the answer exists — and a poll that keeps
-   *  retrying would be a second queue of our own for no gain. A message still `queued` when we look
-   *  is left as queued rather than reported as a problem; the next one will overwrite it. */
-  const checkWaOutcome = (event: NotifyEventId, id: string): void => {
+   *  most recent 500 per app and kept 24 hours, so asking soon is the only time the answer exists —
+   *  and a poll that keeps retrying would be a second queue of our own for no gain. A message still
+   *  `queued` when we look is left as queued rather than reported as a problem. */
+  const checkWaOutcome = (recipientId: string, event: NotifyEventId, id: string): void => {
     if (!id) return;
     setTimeout(() => {
       void whatsappOutcome(id)
         .then((o) => {
           if (!o) return; // unknown / not ours / no endpoint — not evidence of anything
           if (o.state === 'failed' || o.state === 'expired') {
-            recordWaOutcome(event, o.state, o.reason);
+            recordWaOutcome(recipientId, event, o.state, o.reason);
             // Worth a log line at warn: this is the case that used to be invisible.
             log.warn(`WhatsApp ${event} ${o.state}${o.reason ? `: ${o.reason}` : ''}`);
           } else if (o.state === 'sent') {
-            recordWaOutcome(event, 'sent');
+            recordWaOutcome(recipientId, event, 'sent');
           }
         })
         .catch(() => {});
     }, 45_000).unref?.();
   };
 
+  /**
+   * Send one WhatsApp message to one destination, recording whatever became of it.
+   *
+   * Split out of `raise()` when recipients became a list, so that the two budgets, the availability
+   * check and the outcome recording are written once and cannot drift apart per caller. Returns
+   * nothing: a notification channel never reports upward, because nothing may depend on it arriving.
+   */
+  const sendWaTo = async (
+    rec: { id: string; address: string },
+    event: NotifyEventId,
+    title: string,
+    text: string,
+    st: Awaited<ReturnType<typeof whatsappStatus>>,
+  ): Promise<void> => {
+    // The masjid's own number first: it bounds what any one person is sent.
+    if (!waBudget.take(rec.address)) {
+      recordWaOutcome(
+        rec.id,
+        event,
+        'refused',
+        'Held back to protect your WhatsApp number — too many messages to this destination in the last hour. Turning off “a donation was received” for it is usually the fix.',
+      );
+      log.warn(`WhatsApp ${event} held back by our own per-destination cap`);
+      return;
+    }
+    // Then the gateway as a whole. Checked SECOND so a single destination can never spend the shared
+    // ceiling without also spending its own — the two counts then tell the admin different things.
+    if (!waTotalBudget.take(WA_ALL)) {
+      recordWaOutcome(
+        rec.id,
+        event,
+        'refused',
+        'Held back to protect your WhatsApp number — too many messages from this masjid in the last hour, across every number on the list.',
+      );
+      log.warn(`WhatsApp ${event} held back by our own total hourly ceiling`);
+      return;
+    }
+    const target = looksLikeGroupId(rec.address) ? { group: rec.address } : { to: rec.address };
+    // Title and body together: a WhatsApp message has no subject line to carry the first half.
+    const r = await sendWhatsApp(target, `${title}\n${text}`);
+    if (r.queued) {
+      recordWaOutcome(rec.id, event, 'queued');
+      // Ask what became of it, once, if the platform can tell us (0.51.1+).
+      if (st.outcomes) checkWaOutcome(rec.id, event, r.id);
+    } else {
+      // A message the platform REFUSED — an unapproved group, the gateway's own number, a bad country
+      // code — must stay distinguishable from one that vanished. The platform's sentence is written
+      // for an admin, so keep it and show it on the settings screen.
+      recordWaOutcome(rec.id, event, 'refused', r.error);
+      log.warn(`WhatsApp ${event} ${r.refused ? 'refused' : 'not queued'}: ${r.error}`);
+    }
+    // Status and reason only. Never the body, which carries figures, and never the destination.
+  };
+
   const raise = (event: NotifyEventId, title: string, text: string, level: NotifyLevel = 'info'): void => {
     void (async () => {
-      const cfg = store.getNotify().events[event];
+      const cfg = store.getNotify();
+      const wants = (r: { events: NotifyEventId[] }): boolean => r.events.includes(event);
 
       // 1. The OpenMasjidOS alert → the admin's own email + webhook, per THEIR matrix. An AND with
       //    that matrix, never an override: we ask the platform to deliver and it still honors the
       //    admin's per-alert channel choices, so `disabled_by_admin` is a normal answer here.
-      if (cfg.os) await fabricAlert(NOTIFY_ALERT_ID[event], title, text, level).catch(() => {});
+      if (cfg.events[event].os) await fabricAlert(NOTIFY_ALERT_ID[event], title, text, level).catch(() => {});
 
-      // 2. A specific address the admin typed in — the treasurer, the school office. Sent through
-      //    the platform's provider, so we never see their mail credentials.
+      // 2. Every address the admin listed for this event — the treasurer, the school office. Sent
+      //    through the platform's provider, so we never see their mail credentials.
       //
       //    TWO THINGS TO KEEP IN MIND BEFORE CHANGING `title`/`text` ANYWHERE ABOVE:
       //    • They are read by somebody OUTSIDE the masjid's admin account, whom the platform never
@@ -575,42 +653,31 @@ async function main(): Promise<void> {
       //      third party. Adding `${donorName}` to a title would be the leak.
       //    • This shares the app's per-app email rate budget with DONOR receipts and refund notices.
       //      A receipt has an outbox and survives being throttled; the refund notice deliberately
-      //      does not, so it is what gets lost. That is the other reason the per-donation event is
-      //      opt-in and carries a minimum.
-      if (cfg.email && ssoConfigured()) {
-        await fabricEmail({ to: cfg.email, subject: title, text }).catch(() => {});
+      //      does not, so it is what gets lost. A recipient LIST multiplies that, which is why a new
+      //      address does not start subscribed to the per-donation event (NEW_EMAIL_EVENTS) — and
+      //      why removing `minAmount` in v0.44.0 was a trade rather than a tidy-up.
+      //
+      //    Sequential rather than Promise.all, deliberately: these go through one rate-limited
+      //    provider, and firing five at once is how a masjid's whole allowance goes on one event.
+      if (ssoConfigured()) {
+        for (const r of cfg.emails) {
+          if (wants(r)) await fabricEmail({ to: r.address, subject: title, text }).catch(() => {});
+        }
       }
 
-      // 3. WhatsApp, if they opted this event in. Checked against the platform first rather than
-      //    assumed: the phone may have been unlinked, and queueing into that achieves nothing.
-      if (cfg.whatsappOn && cfg.whatsapp && ssoConfigured()) {
+      // 3. WhatsApp, for every destination that opted THIS event in. Checked against the platform
+      //    once rather than per recipient: the phone may have been unlinked, and queueing into that
+      //    achieves nothing — and asking once per destination would be a probe per message.
+      const waWanted = cfg.whatsapps.filter(wants);
+      if (waWanted.length > 0 && ssoConfigured()) {
         const st = await whatsappStatus();
         if (!st.available) {
           // A channel that cannot deliver is worth recording, not just skipping — otherwise the
           // switch says on, the phone stays quiet, and nothing anywhere explains why.
-          recordWaOutcome(event, 'refused', whatsappUnavailableMessage(st.reason));
-        } else if (!waBudget.take(cfg.whatsapp)) {
-          // OUR cap, not the platform's — see waBudget. Recorded so the admin can see it happened
-          // and set a minimum amount, rather than concluding WhatsApp is broken.
-          recordWaOutcome(event, 'refused', 'Held back to protect your WhatsApp number — too many messages in the last hour. Setting a smallest amount for donation alerts stops this.');
-          log.warn(`WhatsApp ${event} held back by our own hourly cap`);
+          const why = whatsappUnavailableMessage(st.reason);
+          for (const r of waWanted) recordWaOutcome(r.id, event, 'refused', why);
         } else {
-          const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };
-          // Title and body together: a WhatsApp message has no subject line to carry the first half.
-          const r = await sendWhatsApp(target, `${title}\n${text}`);
-          if (r.queued) {
-            recordWaOutcome(event, 'queued');
-            // Ask what became of it, once, if the platform can tell us (0.51.1+).
-            if (st.outcomes) checkWaOutcome(event, r.id);
-          } else {
-            // THE IMPORTANT CHANGE. This used to be one log line, so a message the platform REFUSED
-            // — an unapproved group, the gateway's own number, a bad country code — was
-            // indistinguishable from one that vanished. The platform's sentence is written for an
-            // admin, so keep it and show it on the settings screen.
-            recordWaOutcome(event, 'refused', r.error);
-            log.warn(`WhatsApp ${event} ${r.refused ? 'refused' : 'not queued'}: ${r.error}`);
-          }
-          // Status and reason only. Never the body, which carries figures, and never the destination.
+          for (const r of waWanted) await sendWaTo(r, event, title, text, st);
         }
       }
     })().catch(() => {
@@ -1038,16 +1105,23 @@ async function main(): Promise<void> {
   // WhatsApp message, and it is not where a masjid would think to look for "tell Yusuf about
   // refunds". So the platform keeps owning delivery, and this owns the choice.
   //
-  // The `os` channel is an AND with that matrix, and the UI says so — see NotifyChannels.
+  // The `os` channel is an AND with that matrix, and the UI says so — see NotifyEventConfig.
   const notifyView = async (force = false) => {
     const cfg = store.getNotify();
     const wa = await whatsappStatus(force);
     return {
-      ...cfg,
-      /** Minor → major, like every other amount crossing this API. */
-      minAmount: toMajorCur(cfg.minAmount),
-      /** So the form can label each row without hardcoding our internal ids. */
       events: cfg.events,
+      /** Who the masjid listed, and what each of them hears about. Addresses and numbers, never a
+       *  donor — see NotifySettings. */
+      emails: cfg.emails,
+      whatsapps: cfg.whatsapps,
+      /** The country dropdown, sent rather than duplicated in the bundle: the browser formats a
+       *  number and the SERVER decides whether it is one, so there is a single list and a single
+       *  validator. See server/src/phone.ts for why that split is the whole point. */
+      dials: DIALS,
+      /** What a brand-new email address starts subscribed to, so the panel can say so honestly
+       *  instead of hardcoding a list that could drift from the server's. */
+      newEmailEvents: NEW_EMAIL_EVENTS,
       embedded: ssoConfigured(),
       /** Whether the email channel can work at all, and whether WhatsApp is even set up. Asked
        *  before the switches are drawn, so a channel that cannot deliver is explained rather than
@@ -1056,11 +1130,11 @@ async function main(): Promise<void> {
       whatsapp: {
         ...wa,
         groups: wa.available ? await whatsappGroups() : [],
-        /** What became of the last WhatsApp message for each event — so a refusal or a failure is
-         *  something the admin can SEE. Before this it was a log line on a box nobody reads. */
+        /** What became of the last WhatsApp message for each recipient + event (`<id>|<event>`) — so a
+         *  refusal or a failure is something the admin can SEE, against the row it happened to. */
         lastOutcomes: store.getWhatsAppOutcomes(),
-        /** How many sends our own hourly cap has held back since boot, across all destinations. */
-        heldBack: waBudget.totalSuppressed(),
+        /** How many sends our own caps have held back since boot, across every destination. */
+        heldBack: waBudget.totalSuppressed() + waTotalBudget.totalSuppressed(),
       },
     };
   };
@@ -1070,133 +1144,142 @@ async function main(): Promise<void> {
     data: await notifyView((req.query as { refresh?: string }).refresh === '1'),
   }));
 
-  const ChannelsBody = z.object({
-    os: z.boolean().optional(),
-    email: z.string().max(200).optional(),
-    whatsapp: z.string().max(64).optional(),
-    whatsappOn: z.boolean().optional(),
-  });
+  /** The per-event platform switch, and nothing else. Recipients have their own routes below —
+   *  see NotifyPatch for why they are never posted back as a whole list. */
   const NotifyBody = z.object({
-    defaultEmail: z.string().max(200).optional(),
-    defaultWhatsapp: z.string().max(64).optional(),
-    minAmount: z.number().nonnegative().optional(), // major units
-    events: z.record(z.string().max(40), ChannelsBody).optional(),
+    events: z.record(z.string().max(40), z.object({ os: z.boolean().optional() })).optional(),
   });
-
-  /** Normalize one recipient, or return the sentence to show the admin.
-   *
-   *  Both directions refuse rather than repair. An address that cannot be posted to, or a number
-   *  without a country code, would otherwise be accepted here and fail silently weeks later at the
-   *  moment it mattered — and for the number, "repairing" it by guessing a country code would send
-   *  the masjid's donation figures to whoever holds it there. */
-  const cleanEmail = (raw: string, where: string): { value: string } | { error: string } => {
-    const v = raw.trim();
-    if (!v) return { value: '' };
-    if (!EMAIL_RE.test(v)) return { error: `“${v.slice(0, 40)}” doesn’t look like an email address (${where}).` };
-    return { value: v };
-  };
-  const cleanWhatsApp = async (raw: string, where: string): Promise<{ value: string } | { error: string }> => {
-    const v = raw.trim();
-    if (!v) return { value: '' };
-    if (looksLikeGroupId(v)) {
-      // Verified against the APPROVED list, not merely shape-checked. The platform would refuse an
-      // unapproved id with a 403 anyway, but that arrives silently at send time — long after the
-      // admin left this screen believing it was set up.
-      const groups = await whatsappGroups();
-      if (!groups.some((g) => g.id === v)) return { error: `That group isn’t approved for this app any more (${where}). Please choose another.` };
-      return { value: v };
-    }
-    const digits = toWhatsAppDigits(v);
-    if (!digits) {
-      return { error: `“${v.slice(0, 24)}” doesn’t look like a full number (${where}). Include the country code — for example 447700900123, not 07700900123.` };
-    }
-    return { value: digits };
-  };
 
   app.put('/api/admin/notifications', { preHandler: requireAdmin }, async (req, reply) => {
     const parsed = NotifyBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
-    const p = parsed.data;
     const patch: NotifyPatch = {};
-
-    if (p.defaultEmail !== undefined) {
-      const r = cleanEmail(p.defaultEmail, 'the default address');
-      if ('error' in r) return reply.code(400).send({ error: r.error });
-      patch.defaultEmail = r.value;
-    }
-    if (p.defaultWhatsapp !== undefined) {
-      const r = await cleanWhatsApp(p.defaultWhatsapp, 'the default WhatsApp destination');
-      if ('error' in r) return reply.code(400).send({ error: r.error });
-      patch.defaultWhatsapp = r.value;
-    }
-    if (p.minAmount !== undefined) patch.minAmount = toMinorCur(p.minAmount);
-
-    if (p.events) {
+    if (parsed.data.events) {
       const events: NonNullable<NotifyPatch['events']> = {};
-      for (const [id, c] of Object.entries(p.events)) {
+      for (const [id, c] of Object.entries(parsed.data.events)) {
         // An id we do not know is refused rather than ignored: a form posting `refunds` instead of
         // `refund` would otherwise report success and change nothing at all.
         if (!(NOTIFY_EVENTS as readonly string[]).includes(id)) {
           return reply.code(400).send({ error: 'Please check the details and try again.' });
         }
-        const out: Partial<import('./store').NotifyChannels> = {};
-        if (c.os !== undefined) out.os = c.os;
-        if (c.email !== undefined) {
-          const r = cleanEmail(c.email, `the address for “${id}”`);
-          if ('error' in r) return reply.code(400).send({ error: r.error });
-          out.email = r.value;
-        }
-        if (c.whatsapp !== undefined) {
-          const r = await cleanWhatsApp(c.whatsapp, `the WhatsApp destination for “${id}”`);
-          if ('error' in r) return reply.code(400).send({ error: r.error });
-          out.whatsapp = r.value;
-          // Clearing the number turns the channel off too, so the panel can never show a tick
-          // beside an empty field and imply something is being sent.
-          if (!r.value) out.whatsappOn = false;
-        }
-        if (c.whatsappOn !== undefined) out.whatsappOn = c.whatsappOn;
-        events[id as NotifyEventId] = out;
+        if (c.os !== undefined) events[id as NotifyEventId] = { os: c.os };
       }
       patch.events = events;
     }
-
     const before = store.getNotify();
     const saved = store.setNotify(patch);
-    // Worth a line in the record — it changes who at the masjid is told about money, and the panel is
-    // shared. WHICH channels changed, never an address or a number.
-    const changed = NOTIFY_EVENTS.some((e) => {
-      const a = before.events[e];
-      const b = saved.events[e];
-      return a.os !== b.os || a.email !== b.email || a.whatsapp !== b.whatsapp;
-    });
+    const changed = NOTIFY_EVENTS.some((e) => before.events[e].os !== saved.events[e].os);
     if (changed) {
-      // Counts only. Never an address and never a number — not even a masked one: in a small
-      // community the last two digits of a phone number still name somebody.
       const on = NOTIFY_EVENTS.filter((e) => saved.events[e].os).length;
-      const byEmail = NOTIFY_EVENTS.filter((e) => saved.events[e].email).length;
-      const byWhatsApp = NOTIFY_EVENTS.filter((e) => saved.events[e].whatsappOn && saved.events[e].whatsapp).length;
-      audit(
-        req,
-        'notifications.settings',
-        '',
-        `changed notification settings (${on} of ${NOTIFY_EVENTS.length} to OpenMasjidOS, ${byEmail} by email, ${byWhatsApp} by WhatsApp)`,
-      );
+      audit(req, 'notifications.settings', '', `changed which alerts go to OpenMasjidOS (${on} of ${NOTIFY_EVENTS.length} on)`);
     }
     return { data: await notifyView() };
   });
 
-  /** Send one real notification down one channel, so the admin finds out now rather than when
-   *  something matters. Reports WhatsApp honestly as queued — the platform paces every message and
-   *  quiet hours can hold one for hours, so "sent" would be a lie and an admin watching a silent
-   *  phone would conclude it is broken. */
+  /**
+   * Add or edit one recipient.
+   *
+   * Both directions refuse rather than repair. An address that cannot be posted to, or a number whose
+   * country we would have to guess, would otherwise be accepted here and fail silently weeks later at
+   * the moment it mattered — and for a number, "repairing" it means guessing whose phone it is.
+   *
+   * A WhatsApp number arrives as a COUNTRY plus a national number, never as one string. That is the
+   * fix for the bug in server/src/phone.ts's header comment: a bare American ten-digit number has no
+   * leading zero, so the old single-field path accepted it and addressed it as a Dutch number.
+   */
+  const RecipientBody = z.object({
+    kind: z.enum(['email', 'whatsapp']),
+    /** Present when editing an existing row; absent when adding. */
+    id: z.string().max(40).optional(),
+    label: z.string().max(80).optional(),
+    events: z.array(z.string().max(40)).max(20).optional(),
+    /** An email address, or an approved WhatsApp group id. */
+    address: z.string().max(200).optional(),
+    /** A WhatsApp number, as two fields. */
+    dialId: z.string().max(12).optional(),
+    national: z.string().max(24).optional(),
+  });
+
+  app.post('/api/admin/notifications/recipients', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = RecipientBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const b = parsed.data;
+    for (const e of b.events ?? []) {
+      if (!(NOTIFY_EVENTS as readonly string[]).includes(e)) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    }
+
+    let address = '';
+    if (b.kind === 'email') {
+      const v = (b.address ?? '').trim();
+      if (!EMAIL_RE.test(v)) return reply.code(400).send({ error: `“${v.slice(0, 40)}” doesn’t look like an email address.` });
+      // Lowercased so "Office@…" and "office@…" cannot both subscribe and double every message.
+      address = v.toLowerCase();
+    } else if (b.address) {
+      const v = b.address.trim();
+      if (!looksLikeGroupId(v)) return reply.code(400).send({ error: 'Please choose a group from the list, or enter a phone number.' });
+      // Verified against the APPROVED list, not merely shape-checked. The platform would refuse an
+      // unapproved id with a 403 anyway, but that arrives silently at send time — long after the
+      // admin left this screen believing it was set up.
+      const groups = await whatsappGroups();
+      if (!groups.some((g) => g.id === v)) return reply.code(400).send({ error: 'That group isn’t approved for this app any more. Please choose another.' });
+      address = v;
+    } else {
+      const r = toE164(b.dialId ?? DEFAULT_DIAL, b.national ?? '');
+      if ('error' in r) return reply.code(400).send({ error: r.error });
+      // The final gate is still `toWhatsAppDigits` — pinned by §13, and the one function that decides
+      // what may be addressed. `toE164` composes; this refuses.
+      const digits = toWhatsAppDigits(r.digits);
+      if (!digits) return reply.code(400).send({ error: 'That doesn’t look like a full phone number. Please check the country and the number.' });
+      address = digits;
+    }
+
+    const kind = b.kind === 'email' ? 'emails' : 'whatsapps';
+    const before = store.getNotify()[kind];
+    // A new WHATSAPP row starts on NOTHING, whatever the form asked for — §13, and the one default in
+    // this app that is not a matter of taste. A new EMAIL row may start on the alerts that cost money.
+    const events = b.events ?? (b.kind === 'email' ? [...NEW_EMAIL_EVENTS] : []);
+    const saved = store.upsertNotifyRecipient(kind, { id: b.id, address, label: b.label, events });
+    if (saved[kind].length === before.length && !b.id && !before.some((r) => r.address === address)) {
+      return reply.code(400).send({ error: `That’s as many as this app will send to. Remove one first, or use an address that forwards to several people.` });
+    }
+    // Counts only. Never an address and never a number — not even a masked one: in a small community
+    // the last two digits of a phone number still name somebody.
+    audit(
+      req,
+      'notifications.recipient',
+      '',
+      `${b.id ? 'changed' : 'added'} ${b.kind === 'email' ? 'an email recipient' : 'a WhatsApp recipient'} (${events.length} of ${NOTIFY_EVENTS.length} alerts; ${saved[kind].length} on the list)`,
+    );
+    return { data: await notifyView() };
+  });
+
+  app.delete<{ Params: { kind: string; id: string } }>('/api/admin/notifications/recipients/:kind/:id', { preHandler: requireAdmin }, async (req, reply) => {
+    const kind = req.params.kind === 'email' ? 'emails' : req.params.kind === 'whatsapp' ? 'whatsapps' : null;
+    if (!kind) return reply.code(404).send({ error: 'Not found.' });
+    const before = store.getNotify()[kind].length;
+    const saved = store.removeNotifyRecipient(kind, req.params.id);
+    if (saved[kind].length !== before) {
+      audit(req, 'notifications.recipient', '', `removed ${kind === 'emails' ? 'an email recipient' : 'a WhatsApp recipient'} (${saved[kind].length} left on the list)`);
+    }
+    return { data: await notifyView() };
+  });
+
+  /** Send one real notification to one recipient, so the admin finds out now rather than when
+   *  something matters. Reports WhatsApp honestly as queued — WhatsApp gives no delivery receipt, so
+   *  "sent" would be a lie and an admin watching a silent phone would conclude it is broken. */
   app.post('/api/admin/notifications/test', { preHandler: requireAdmin }, async (req, reply) => {
     const parsed = z
-      .object({ channel: z.enum(['os', 'email', 'whatsapp']), event: z.string().max(40).optional() })
+      .object({
+        channel: z.enum(['os', 'email', 'whatsapp']),
+        event: z.string().max(40).optional(),
+        /** Which listed recipient to send to. Required for email and WhatsApp. */
+        recipientId: z.string().max(40).optional(),
+      })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose what to test.' });
     const event = (parsed.data.event ?? 'donation') as NotifyEventId;
     if (!(NOTIFY_EVENTS as readonly string[]).includes(event)) return reply.code(400).send({ error: 'Unknown notification.' });
-    const cfg = store.getNotify().events[event];
+    const cfg = store.getNotify();
     const TITLE = 'Test from OpenMasjid Donations';
     const TEXT = 'If you can read this, your donation notifications will reach you here.';
 
@@ -1216,9 +1299,10 @@ async function main(): Promise<void> {
     }
 
     if (parsed.data.channel === 'email') {
-      if (!cfg.email) return reply.code(400).send({ error: 'Add an email address for this notification first.' });
-      const r = await fabricEmail({ to: cfg.email, subject: TITLE, text: TEXT });
-      if (r.sent) return { data: { ok: true, message: `Sent ✓ to ${cfg.email}.` } };
+      const rec = cfg.emails.find((r) => r.id === parsed.data.recipientId);
+      if (!rec) return reply.code(400).send({ error: 'Add an email address first.' });
+      const r = await fabricEmail({ to: rec.address, subject: TITLE, text: TEXT });
+      if (r.sent) return { data: { ok: true, message: `Sent ✓ to ${rec.address}.` } };
       return reply.code(r.reason === 'not_configured' ? 400 : 502).send({
         error:
           r.reason === 'not_configured'
@@ -1227,28 +1311,32 @@ async function main(): Promise<void> {
       });
     }
 
-    if (!cfg.whatsapp) return reply.code(400).send({ error: 'Add a WhatsApp number or group for this notification first.' });
-    // A test sends regardless of the switch — the admin pressed the button, and "it works but is
-    // currently off" is a useful thing to be able to find out.
+    const rec = cfg.whatsapps.find((r) => r.id === parsed.data.recipientId);
+    if (!rec) return reply.code(400).send({ error: 'Add a WhatsApp number or group first.' });
+    // A test sends regardless of the ticks — the admin pressed the button, and "it works but is
+    // currently off for this alert" is a useful thing to be able to find out.
     const st = await whatsappStatus(true); // forced: they may have just linked the phone
     if (!st.available) return reply.code(400).send({ error: whatsappUnavailableMessage(st.reason) });
-    const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };
+    // Deliberately NOT counted against either hourly budget. A test is one message the admin asked
+    // for, at a moment they are watching; spending their allowance on it — or refusing it because a
+    // Friday already spent it — would make the button useless exactly when it is needed.
+    const target = looksLikeGroupId(rec.address) ? { group: rec.address } : { to: rec.address };
     const r = await sendWhatsApp(target, `${TITLE}\n${TEXT}`);
     if (!r.queued) {
       // A test that is refused tells the admin the same thing a real notification would have, so
-      // record it against the event: the block then keeps saying so after they leave this screen.
-      recordWaOutcome(event, 'refused', r.error);
+      // record it against the row: it then keeps saying so after they leave this screen.
+      recordWaOutcome(rec.id, event, 'refused', r.error);
       return reply.code(r.retry ? 502 : 400).send({ error: r.error });
     }
-    recordWaOutcome(event, 'queued');
-    if (st.outcomes) checkWaOutcome(event, r.id);
+    recordWaOutcome(rec.id, event, 'queued');
+    if (st.outcomes) checkWaOutcome(rec.id, event, r.id);
     return {
       data: {
         ok: true,
         // Since platform 0.51.1 there is no pacing left to explain — a message goes out in seconds.
         // Still "queued", never "sent": WhatsApp gives no delivery receipt to report.
         message: st.outcomes
-          ? 'Queued ✓ — it should arrive within seconds. If it doesn’t, this notification will say why.'
+          ? 'Queued ✓ — it should arrive within seconds. If it doesn’t, this row will say why.'
           : 'Queued ✓ — it should arrive within seconds. There’s no delivery receipt, so this is as much as we can promise.',
       },
     };
@@ -2696,12 +2784,12 @@ async function main(): Promise<void> {
       cardLast4: pi.cardLast4,
     });
     if (succeeded && wasPending) {
-      // Gated on `minAmount`, and on EVERY channel rather than WhatsApp alone: a masjid that asked
-      // not to hear about $2 gifts meant it, and telling them by email instead would be a strange
-      // reading of that. Never carries the donor's name — all three channels forward easily.
-      if (pi.amount >= store.getNotify().minAmount) {
-        raise('donation', 'A donation was received', `${formatMoney(pi.amount, pi.currency)} was donated to “${c.title}”.`, 'success');
-      }
+      // UNGATED since v0.44.0. This used to be `if (pi.amount >= minAmount)` — a site-wide floor the
+      // admin set beside the donation row — and that field was removed on Hasan's instruction when
+      // recipients became a per-event matrix (see NOTIFY_DEFAULT for the trade). "Only the big ones"
+      // is no longer expressible; who hears about a donation at all is, per recipient.
+      // Never carries the donor's name — every channel here forwards easily.
+      raise('donation', 'A donation was received', `${formatMoney(pi.amount, pi.currency)} was donated to “${c.title}”.`, 'success');
       // Branded receipt — ONLY when we recorded 'pending' at intent (i.e. Stripe's receipt was
       // suppressed in favor of ours), so there's never a double. Non-blocking; a transient
       // failure stays 'pending' for the outbox to retry, a permanent one is marked 'skipped'.
@@ -3411,11 +3499,9 @@ async function main(): Promise<void> {
               subscriptionId: inv.subscription,
             });
             const camp = store.getCampaign(original.campaignId);
-            // The same event as any other donation, so the same channels and the same minimum — a
-            // masjid that asked not to hear about small gifts did not mean "except monthly ones".
-            if (amt >= store.getNotify().minAmount) {
-              raise('donation', 'A monthly donation was received', `${formatMoney(amt, ccy)} was donated to “${camp?.title ?? 'your masjid'}”.`, 'success');
-            }
+            // The same event as any other donation, so the same recipients — and, since v0.44.0, no
+            // amount floor on either path (see the sibling call in the confirm route).
+            raise('donation', 'A monthly donation was received', `${formatMoney(amt, ccy)} was donated to “${camp?.title ?? 'your masjid'}”.`, 'success');
           }
         }
       }

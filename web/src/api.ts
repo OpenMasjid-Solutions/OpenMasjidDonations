@@ -365,37 +365,52 @@ export interface WhatsAppAvailability {
 /** Every notification this app can raise. The ids are the app's own; the labels live in the UI. */
 export type NotifyEventId = 'donation' | 'donationRecovered' | 'refund' | 'planStopped' | 'paymentFailed' | 'tuitionFailed';
 
-export interface NotifyChannels {
-  /** Raise the OpenMasjidOS alert → the admin's own email + webhook. On by default. An AND with
-   *  their matrix in OpenMasjidOS → Settings → Alerts, which the UI must say out loud. */
+/** Whether an event is raised as an OpenMasjidOS alert → the admin's own email + webhook. On by
+ *  default. An AND with their matrix in OpenMasjidOS → Settings → Alerts, which the UI must say out
+ *  loud: on here means "we will raise it", never "it will arrive". */
+export interface NotifyEventConfig {
   os: boolean;
-  /** A specific address, via the platform's email provider. '' = off. */
-  email: string;
-  /** Digits with a country code, or an approved group id. */
-  whatsapp: string;
-  /** A separate switch, not "non-empty means on" — so turning the channel off for a month doesn't
-   *  lose the number, and the tick box means what a tick box normally means. Both must be true to
-   *  send. Off by default for every event. */
-  whatsappOn: boolean;
+}
+
+/** One address, or one WhatsApp destination, and what it hears about.
+ *
+ *  A row is an ADDRESS, NOT AN ACCOUNT — adding one grants no access to the app. `id` is what edits
+ *  and deletes are keyed on, never the address. */
+export interface NotifyRecipient {
+  id: string;
+  /** An email address, or WhatsApp digits with a country code / an approved group id. */
+  address: string;
+  label: string;
+  events: NotifyEventId[];
+}
+
+/** One entry in the country dropdown. Sent by the server so the list and the validator that refuses
+ *  a bad number are the same one — see web/src/phone.ts. */
+export interface NotifyDial {
+  id: string;
+  label: string;
+  dial: string;
+  lengths: number[];
 }
 
 export interface NotifySettings {
-  defaultEmail: string;
-  defaultWhatsapp: string;
-  /** MAJOR units across the API. 0 = tell me about every donation. */
-  minAmount: number;
-  events: Record<NotifyEventId, NotifyChannels>;
+  events: Record<NotifyEventId, NotifyEventConfig>;
+  emails: NotifyRecipient[];
+  whatsapps: NotifyRecipient[];
+  dials: NotifyDial[];
+  /** What a brand-new email address starts subscribed to, so the panel's hint cannot drift from what
+   *  the server actually does. A new WhatsApp row starts on nothing at all. */
+  newEmailEvents: NotifyEventId[];
   embedded: boolean;
   /** The last real outcome of a send through the platform's email provider. */
   emailStatus: string;
   whatsapp: WhatsAppAvailability;
 }
 
+/** The per-event platform switch, and nothing else — recipients have their own calls, so a stale
+ *  panel can never post a whole list back and silently drop somebody. */
 export type NotifyPatch = {
-  defaultEmail?: string;
-  defaultWhatsapp?: string;
-  minAmount?: number;
-  events?: Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+  events?: Partial<Record<NotifyEventId, Partial<NotifyEventConfig>>>;
 };
 
 /** `refresh` re-probes WhatsApp instead of using the 60-second cache — what the admin presses after
@@ -404,11 +419,30 @@ export const getNotifications = (refresh = false) =>
   request<NotifySettings>(`/api/admin/notifications${refresh ? '?refresh=1' : ''}`);
 export const saveNotifications = (patch: NotifyPatch) =>
   request<NotifySettings>('/api/admin/notifications', { method: 'PUT', body: JSON.stringify(patch) });
-/** Sends one real notification down one channel. WhatsApp resolves on QUEUED, never delivered. */
-export const testNotification = (channel: 'os' | 'email' | 'whatsapp', event: NotifyEventId) =>
+
+/** Add a recipient, or edit one by `id`.
+ *
+ *  A WhatsApp number goes as `dialId` + `national`, never as one string: the country is something the
+ *  admin picked from a list, so the server never has to infer it from digits. A group goes as
+ *  `address`. */
+export const saveRecipient = (body: {
+  kind: 'email' | 'whatsapp';
+  id?: string;
+  label?: string;
+  events?: NotifyEventId[];
+  address?: string;
+  dialId?: string;
+  national?: string;
+}) => request<NotifySettings>('/api/admin/notifications/recipients', { method: 'POST', body: JSON.stringify(body) });
+
+export const removeRecipient = (kind: 'email' | 'whatsapp', id: string) =>
+  request<NotifySettings>(`/api/admin/notifications/recipients/${kind}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+/** Sends one real notification to one recipient. WhatsApp resolves on QUEUED, never delivered. */
+export const testNotification = (channel: 'os' | 'email' | 'whatsapp', event: NotifyEventId, recipientId?: string) =>
   request<{ ok: true; message: string }>('/api/admin/notifications/test', {
     method: 'POST',
-    body: JSON.stringify({ channel, event }),
+    body: JSON.stringify({ channel, event, recipientId }),
   });
 /** Fire the `test` alert — the platform delivers it to the admin's own email/webhook (the app
  *  never learns the admin address). Confirms OpenMasjidOS can reach you. */

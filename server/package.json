@@ -1,7 +1,7 @@
 {
   "name": "openmasjid-donations-server",
   "private": true,
-  "version": "0.44.0-dev.4",
+  "version": "0.44.0-dev.5",
   "description": "API + Stripe + storage + static web host for OpenMasjid Donations",
   "license": "AGPL-3.0-only",
   "scripts": {
@@ -9,7 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/auth.test.ts src/csv.test.ts src/rateLimit.test.ts src/store.test.ts src/stripe.test.ts src/students.test.ts src/studentsFabric.test.ts src/email.test.ts src/emailStatus.test.ts src/whatsapp.test.ts src/commands.test.ts src/notify.test.ts src/plans.test.ts src/refunds.test.ts src/accounts.test.ts src/tuitionFee.test.ts"
+    "test": "node --import tsx --test src/auth.test.ts src/csv.test.ts src/rateLimit.test.ts src/store.test.ts src/stripe.test.ts src/students.test.ts src/studentsFabric.test.ts src/email.test.ts src/emailStatus.test.ts src/whatsapp.test.ts src/commands.test.ts src/notify.test.ts src/phone.test.ts src/plans.test.ts src/refunds.test.ts src/accounts.test.ts src/tuitionFee.test.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

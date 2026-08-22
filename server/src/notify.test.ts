@@ -23,7 +23,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Store, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NOTIFY_DEFAULT, type NotifyEventId } from './store';
+import { Store, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NOTIFY_DEFAULT, NEW_EMAIL_EVENTS, type NotifyEventId } from './store';
 
 const MANIFEST = path.join(__dirname, '..', '..', 'manifest.yaml');
 
@@ -77,12 +77,22 @@ test('the OS channel is on by default for EVERY event', () => {
     assert.equal(NOTIFY_DEFAULT.events[event].os, true, `${event} should default to the channel the masjid already has`);
   }
 });
+test('a new WhatsApp row starts on NOTHING, and there are no recipients at all by default', () => {
+  // Not a matter of taste (CLAUDE.md §13). WhatsApp sends from the MASJID's own number, shared with
+  // every other app on the box and unrecoverable if it is banned — so an update must never begin
+  // sending on their behalf. The email list is empty for a duller reason: we cannot guess who.
+  assert.deepEqual(NOTIFY_DEFAULT.emails, [], 'no address may be configured for a masjid');
+  assert.deepEqual(NOTIFY_DEFAULT.whatsapps, [], 'no number may be configured for a masjid');
+});
 
-test('email and WhatsApp are off by default for every event — nothing is switched on for a masjid', () => {
-  for (const event of NOTIFY_EVENTS) {
-    assert.equal(NOTIFY_DEFAULT.events[event].email, '', `${event} must not default to an address`);
-    assert.equal(NOTIFY_DEFAULT.events[event].whatsapp, '', `${event} must not default to a WhatsApp destination`);
-  }
+test('a brand-new email address does NOT start on the per-donation event', () => {
+  // `donation` fires on every transaction. An address that started on it would bury a treasurer who
+  // only wanted to hear about refunds, and would spend the shared email budget — the one the refund
+  // notice has no outbox to survive — on good news.
+  assert.ok(!NEW_EMAIL_EVENTS.includes('donation'), 'the per-transaction event must be opt-IN');
+  for (const e of NEW_EMAIL_EVENTS) assert.ok((NOTIFY_EVENTS as readonly string[]).includes(e), `${e} is not a real event`);
+  assert.ok(NEW_EMAIL_EVENTS.includes('refund'), 'money going back out is worth hearing about unprompted');
+  assert.ok(NEW_EMAIL_EVENTS.includes('paymentFailed'), 'so is nobody being able to give at all');
 });
 
 test('a fresh store reads back the defaults', () => {
@@ -90,21 +100,18 @@ test('a fresh store reads back the defaults', () => {
   const cfg = s.getNotify();
   assert.equal(cfg.events.donation.os, true);
   assert.equal(cfg.events.refund.os, true);
-  assert.equal(cfg.events.donation.whatsappOn, false, 'WhatsApp is never switched on for a masjid');
-  assert.equal(cfg.minAmount, 0);
-  assert.equal(cfg.defaultEmail, '');
+  assert.deepEqual(cfg.emails, []);
+  assert.deepEqual(cfg.whatsapps, []);
 });
 
 // ── Partial writes ───────────────────────────────────────────────────────────
 
-test('one channel can be changed without restating the others', () => {
+test('one platform switch can be changed without restating the others', () => {
   const s = new Store(':memory:');
-  s.setNotify({ events: { refund: { email: 'treasurer@masjid.org' } } });
+  s.setNotify({ events: { refund: { os: false } } });
   const cfg = s.getNotify();
-  assert.equal(cfg.events.refund.email, 'treasurer@masjid.org');
-  assert.equal(cfg.events.refund.os, true, 'the OS channel must be untouched');
-  assert.equal(cfg.events.refund.whatsapp, '');
-  assert.equal(cfg.events.donation.email, '', 'and no other event may be affected');
+  assert.equal(cfg.events.refund.os, false);
+  assert.equal(cfg.events.donation.os, true, 'no other event may be affected');
 });
 
 test('an unknown event id in a patch is ignored rather than stored', () => {
@@ -115,13 +122,134 @@ test('an unknown event id in a patch is ignored rather than stored', () => {
   for (const e of NOTIFY_EVENTS) assert.ok(typeof cfg.events[e].os === 'boolean');
 });
 
-test('minAmount is clamped to a whole non-negative number of minor units', () => {
+// ── Recipients ───────────────────────────────────────────────────────────────
+
+test('a recipient is added with the events it was given, and gets a stable id', () => {
   const s = new Store(':memory:');
-  assert.equal(s.setNotify({ minAmount: -500 }).minAmount, 0);
-  assert.equal(s.setNotify({ minAmount: 1050.7 }).minAmount, 1051);
+  const cfg = s.upsertNotifyRecipient('emails', { address: 'treasurer@masjid.org', label: 'Treasurer', events: ['refund'] });
+  assert.equal(cfg.emails.length, 1);
+  assert.equal(cfg.emails[0].address, 'treasurer@masjid.org');
+  assert.equal(cfg.emails[0].label, 'Treasurer');
+  assert.deepEqual(cfg.emails[0].events, ['refund']);
+  assert.ok(cfg.emails[0].id, 'a row without an id could never be edited or deleted');
 });
 
-// ── The dev.2/dev.3 migration ────────────────────────────────────────────────
+test('adding the SAME address twice edits that row instead of doubling every message', () => {
+  const s = new Store(':memory:');
+  s.upsertNotifyRecipient('emails', { address: 'office@masjid.org', events: ['refund'] });
+  const cfg = s.upsertNotifyRecipient('emails', { address: 'office@masjid.org', events: ['refund', 'planStopped'] });
+  assert.equal(cfg.emails.length, 1, 'two rows with one address would be sent everything twice');
+  assert.deepEqual(cfg.emails[0].events, ['refund', 'planStopped']);
+});
+
+test('an existing row is edited by ID, so re-typing the label cannot move the ticks', () => {
+  const s = new Store(':memory:');
+  const id = s.upsertNotifyRecipient('emails', { address: 'a@masjid.org', events: ['refund'] }).emails[0].id;
+  const cfg = s.upsertNotifyRecipient('emails', { id, address: 'a@masjid.org', label: 'Accounts', events: ['refund'] });
+  assert.equal(cfg.emails.length, 1);
+  assert.equal(cfg.emails[0].id, id, 'the id must survive an edit');
+  assert.equal(cfg.emails[0].label, 'Accounts');
+});
+
+test('an unknown event id on a recipient is filtered on READ, so a downgraded row cannot widen', () => {
+  // A row written by a NEWER build (or hand-edited) must never end up subscribed to something this
+  // build does not understand — the platform would 400 it, and the admin would see a tick that means
+  // nothing. Order is normalized to NOTIFY_EVENTS too, so the panel and the row always agree.
+  const s = new Store(':memory:');
+  seedNotify(s, { emails: [{ id: 'em_1', address: 'a@masjid.org', label: '', events: ['refund', 'somethingNew', 'donation'] }] });
+  assert.deepEqual(s.getNotify().emails[0].events, ['donation', 'refund']);
+});
+
+test('a stored row with no id or no address is dropped rather than repaired', () => {
+  const s = new Store(':memory:');
+  seedNotify(s, {
+    emails: [
+      { id: '', address: 'a@masjid.org', events: [] },
+      { id: 'em_2', address: '', events: [] },
+      { id: 'em_3', address: 'good@masjid.org', events: [] },
+    ],
+  });
+  const rows = s.getNotify().emails;
+  assert.equal(rows.length, 1, 'something we cannot address is not a recipient');
+  assert.equal(rows[0].address, 'good@masjid.org');
+});
+
+test('the recipient list is bounded — a list is a blast radius, not a storage question', () => {
+  const s = new Store(':memory:');
+  let cfg = s.getNotify();
+  for (let i = 0; i < 40; i += 1) cfg = s.upsertNotifyRecipient('whatsapps', { address: `1313555${String(1000 + i)}`, events: [] });
+  assert.ok(cfg.whatsapps.length <= 25, `expected a cap, got ${cfg.whatsapps.length}`);
+});
+
+test('removing a recipient takes its WhatsApp health lines with it', () => {
+  // Otherwise a number the admin deleted leaves its last refusal on the screen attached to nothing.
+  const s = new Store(':memory:');
+  const id = s.upsertNotifyRecipient('whatsapps', { address: '13135550142', events: ['refund'] }).whatsapps[0].id;
+  s.setWhatsAppOutcome(`${id}|refund`, { state: 'refused', reason: 'that group is not approved', at: '2026-08-21T12:00:00Z' });
+  assert.ok(s.getWhatsAppOutcomes()[`${id}|refund`], 'precondition: the outcome was recorded');
+  s.removeNotifyRecipient('whatsapps', id);
+  assert.equal(s.getWhatsAppOutcomes()[`${id}|refund`], undefined);
+});
+
+test('outcomes are keyed per RECIPIENT, so one number’s refusal is not shown against another', () => {
+  // This is why the key stopped being the event alone in v0.44.0: with two destinations on one event,
+  // the second refusal used to overwrite the first and the panel blamed both.
+  const s = new Store(':memory:');
+  let cfg = s.upsertNotifyRecipient('whatsapps', { address: '13135550142', events: ['refund'] });
+  const a = cfg.whatsapps[0].id;
+  cfg = s.upsertNotifyRecipient('whatsapps', { address: '13135550143', events: ['refund'] });
+  const b = cfg.whatsapps.find((r) => r.id !== a)!.id;
+  s.setWhatsAppOutcome(`${a}|refund`, { state: 'queued', reason: '', at: '2026-08-21T12:00:00Z' });
+  s.setWhatsAppOutcome(`${b}|refund`, { state: 'refused', reason: 'needs a country code', at: '2026-08-21T12:01:00Z' });
+  const all = s.getWhatsAppOutcomes();
+  assert.equal(all[`${a}|refund`].state, 'queued', 'the first number was fine and must still look fine');
+  assert.equal(all[`${b}|refund`].state, 'refused');
+});
+
+// ── The v0.43.0 → v0.44.0 migration (per-event → lists) ──────────────────────
+
+test('migration: one address typed against three events becomes ONE row on three events', () => {
+  // Three identical rows would each be sent the same message, tripling what a masjid gets from an
+  // upgrade they never asked for.
+  const s = new Store(':memory:');
+  seedNotify(s, {
+    events: {
+      donation: { os: true, email: 'treasurer@masjid.org', whatsapp: '', whatsappOn: false },
+      refund: { os: true, email: 'treasurer@masjid.org', whatsapp: '', whatsappOn: false },
+      planStopped: { os: true, email: 'treasurer@masjid.org', whatsapp: '', whatsappOn: false },
+    },
+  });
+  const cfg = s.getNotify();
+  assert.equal(cfg.emails.length, 1, 'the same address must not become three subscribers');
+  assert.equal(cfg.emails[0].address, 'treasurer@masjid.org');
+  assert.deepEqual(cfg.emails[0].events, ['donation', 'refund', 'planStopped']);
+});
+
+test('migration: a number stored with the switch OFF is dropped, not carried over unticked', () => {
+  // It would otherwise reappear as a configured destination the admin does not remember, attached to
+  // the masjid's own phone number.
+  const s = new Store(':memory:');
+  seedNotify(s, {
+    events: {
+      refund: { os: true, email: '', whatsapp: '447700900123', whatsappOn: false },
+      donation: { os: true, email: '', whatsapp: '13135550142', whatsappOn: true },
+    },
+  });
+  const cfg = s.getNotify();
+  assert.equal(cfg.whatsapps.length, 1);
+  assert.equal(cfg.whatsapps[0].address, '13135550142');
+  assert.deepEqual(cfg.whatsapps[0].events, ['donation']);
+});
+
+test('migration: the platform switches are carried across unchanged', () => {
+  const s = new Store(':memory:');
+  seedNotify(s, { events: { refund: { os: false, email: '', whatsapp: '', whatsappOn: false } } });
+  const cfg = s.getNotify();
+  assert.equal(cfg.events.refund.os, false, 'an admin who turned this off must stay turned off');
+  assert.equal(cfg.events.donation.os, true, 'and an event the old blob said nothing about takes the default');
+});
+
+// ── The dev.2/dev.3 migration (the `whatsapp` key), still two generations back ─
 
 /** Write the OLD shape straight into kv, as a 0.43.0-dev.2/3 box would hold it. */
 function seedOldWhatsApp(s: Store, value: unknown): void {
@@ -131,7 +259,14 @@ function seedOldWhatsApp(s: Store, value: unknown): void {
     .run('whatsapp', JSON.stringify(value));
 }
 
-test('migration: a configured dev.3 box keeps its recipient on the events it had chosen', () => {
+/** Write a `notify` blob straight into kv — used for both the v0.43.0 shape and malformed rows. */
+function seedNotify(s: Store, value: unknown): void {
+  (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
+    .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
+    .run('notify', JSON.stringify(value));
+}
+
+test('migration: a configured dev.3 box keeps its number on the events it had chosen', () => {
   const s = new Store(':memory:');
   seedOldWhatsApp(s, {
     enabled: true,
@@ -141,87 +276,58 @@ test('migration: a configured dev.3 box keeps its recipient on the events it had
     minAmount: 5000,
   });
   const cfg = s.getNotify();
-  assert.equal(cfg.events.donation.whatsapp, '447700900123', 'the first number carries over');
-  assert.equal(cfg.events.refund.whatsapp, '447700900123');
-  assert.equal(cfg.events.planStopped.whatsapp, '', 'an event that was off stays off');
-  assert.equal(cfg.minAmount, 5000, 'the minimum they chose is preserved');
-  assert.equal(cfg.defaultWhatsapp, '447700900123', 'and is offered as the prefill');
-  // Numbers 2..5 cannot survive a one-destination model. The release note says so and points at a
-  // group, which is strictly better anyway: one message, one queue slot.
-  assert.equal(cfg.events.donation.os, true, 'and the OS channel takes the same default a fresh install would');
-  assert.equal(cfg.events.donation.whatsappOn, true, 'an event that WAS on must come back on, not merely keep a number');
-  assert.equal(cfg.events.planStopped.whatsappOn, false);
+  assert.equal(cfg.whatsapps.length, 1, 'the first number carries over as one row');
+  assert.equal(cfg.whatsapps[0].address, '447700900123');
+  // `donationRecovered` follows the `donation` choice — the same money, the same news. The order is
+  // NOTIFY_EVENTS order, not the order they were written: normalizing on read is what keeps a stored
+  // row and the panel's columns from ever disagreeing about which tick means what.
+  assert.deepEqual(cfg.whatsapps[0].events, ['donation', 'donationRecovered', 'refund']);
+  assert.equal(cfg.events.donation.os, true, 'the OS channel takes the same default a fresh install would');
+  // Numbers 2..5 cannot survive a one-destination model, and the v0.43.0 release note said so. A
+  // masjid on this path can now simply add the second number back.
 });
 
 test('migration: a group is carried over when there was no number', () => {
   const s = new Store(':memory:');
-  seedOldWhatsApp(s, {
-    enabled: true,
-    numbers: [],
-    groupId: '120363012345678901@g.us',
-    events: { refund: true },
-    minAmount: 0,
-  });
-  assert.equal(s.getNotify().events.refund.whatsapp, '120363012345678901@g.us');
+  seedOldWhatsApp(s, { enabled: true, numbers: [], groupId: '120363012345678901@g.us', events: { refund: true }, minAmount: 0 });
+  const cfg = s.getNotify();
+  assert.equal(cfg.whatsapps[0].address, '120363012345678901@g.us');
+  assert.deepEqual(cfg.whatsapps[0].events, ['refund']);
 });
 
 test('migration: a box that had WhatsApp switched OFF gets no destinations at all', () => {
   const s = new Store(':memory:');
   seedOldWhatsApp(s, { enabled: false, numbers: ['447700900123'], events: { donation: true, refund: true } });
-  const cfg = s.getNotify();
-  for (const e of NOTIFY_EVENTS) assert.equal(cfg.events[e].whatsapp, '', `${e} must have no destination`);
-});
-
-test('migration: donationRecovered follows the donation choice — the same money, the same news', () => {
-  const s = new Store(':memory:');
-  seedOldWhatsApp(s, { enabled: true, numbers: ['447700900123'], events: { donation: true } });
-  assert.equal(s.getNotify().events.donationRecovered.whatsapp, '447700900123');
+  assert.deepEqual(s.getNotify().whatsapps, []);
 });
 
 test('migration: a CORRUPT notify value falls back to the migration rather than to defaults', () => {
   // getJson answers {} for anything that will not parse, so "the key exists" is not enough — a
   // truncated write would otherwise drop a configured masjid onto defaults AND skip the migration.
+  // DO NOT "simplify" this away; it is the reason a half-written file does not lose recipients.
   const s = new Store(':memory:');
   seedOldWhatsApp(s, { enabled: true, numbers: ['447700900123'], events: { refund: true } });
   (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
     .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
     .run('notify', '{"events":');
-  assert.equal(s.getNotify().events.refund.whatsapp, '447700900123', 'the old settings must still be honored');
+  assert.equal(s.getNotify().whatsapps[0]?.address, '447700900123', 'the old settings must still be honored');
 });
 
 test('migration: once written, the new settings win and the old key is not consulted again', () => {
   const s = new Store(':memory:');
   seedOldWhatsApp(s, { enabled: true, numbers: ['447700900123'], events: { refund: true } });
-  s.setNotify({ events: { refund: { whatsapp: '' } } });
-  assert.equal(s.getNotify().events.refund.whatsapp, '', 'turning it off must stick');
+  const id = s.getNotify().whatsapps[0].id;
+  s.removeNotifyRecipient('whatsapps', id);
+  assert.deepEqual(s.getNotify().whatsapps, [], 'removing it must stick');
 });
 
 test('migration: a fresh install with no old key is untouched by any of this', () => {
   const s = new Store(':memory:');
   const cfg = s.getNotify();
-  assert.equal(cfg.defaultWhatsapp, '');
-  for (const e of NOTIFY_EVENTS) assert.equal(cfg.events[e as NotifyEventId].whatsapp, '');
+  assert.deepEqual(cfg.whatsapps, []);
+  assert.deepEqual(cfg.emails, []);
+  for (const e of NOTIFY_EVENTS) assert.equal(cfg.events[e as NotifyEventId].os, true);
 });
-
-test('the WhatsApp switch is separate from the number, so turning it off keeps the number', () => {
-  const s = new Store(':memory:');
-  s.setNotify({ events: { refund: { whatsapp: '447700900123', whatsappOn: true } } });
-  s.setNotify({ events: { refund: { whatsappOn: false } } });
-  const c = s.getNotify().events.refund;
-  assert.equal(c.whatsappOn, false, 'the channel is off');
-  assert.equal(c.whatsapp, '447700900123', 'but the number they typed is still there');
-});
-
-test('a row written before the switch existed treats a stored number as ON', () => {
-  // Otherwise the upgrade that ADDED the switch would silently stop a masjid's WhatsApp messages,
-  // which is the worst kind of change: nothing on screen says anything happened.
-  const s = new Store(':memory:');
-  (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
-    .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
-    .run('notify', JSON.stringify({ events: { refund: { os: true, email: '', whatsapp: '447700900123' } } }));
-  assert.equal(s.getNotify().events.refund.whatsappOn, true);
-});
-
 // ── Bursts: an event that fires per EXTERNAL failure must gate itself ────────
 //
 // Kiosk found this the hard way and it applies here: `paymentFailed` fires once per PaymentIntent
