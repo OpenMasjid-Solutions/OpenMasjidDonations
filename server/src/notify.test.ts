@@ -426,15 +426,6 @@ test('a gap window is news exactly once, however often the platform re-reports i
   assert.equal(s.getWhatsAppGaps().length, 1);
 });
 
-test('a growing count on the SAME window is not a second alarm', () => {
-  // A window that is still open accumulates messages. Re-alarming because 9 became 11 would be noise
-  // about something the admin has already been told, so the key is the bounds and not the count.
-  const s = new Store(':memory:');
-  s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9 });
-  assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 11 }), false);
-  assert.equal(s.getWhatsAppGaps()[0].count, 9, 'and the first figure is what was reported');
-});
-
 test('a genuinely different window IS a second alarm', () => {
   const s = new Store(':memory:');
   s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9 });
@@ -561,13 +552,25 @@ test('a gap read back drops an event id this build does not know', () => {
 
 test('a seven-day window re-reported every hour is still one alarm', () => {
   // Platform 0.51.1-dev.13 retains a window for 7 days after the outage ends, so an hourly poll sees
-  // the same one about 168 times — and its count grows while it is still open.
+  // the SAME immutable window about 168 times. Every one of those must be silent.
+  const s = new Store(':memory:');
+  const w = { from: 1755900000000, to: 1755911000000, count: 9, cause: 'session-expired' };
+  assert.equal(s.addWhatsAppGap(w), true);
+  for (let i = 0; i < 168; i += 1) assert.equal(s.addWhatsAppGap(w), false, `poll ${i + 2} must be silent`);
+  assert.equal(s.getWhatsAppGaps().length, 1);
+});
+
+test('DEFENSIVE: a revised count could never become a second alarm', () => {
+  // The platform snapshots a window at detection and never revises it, so this cannot currently
+  // happen — an earlier version of this test asserted a GROWING count as though it were expected
+  // platform behaviour, which was wrong and is corrected here rather than deleted. Keeping the count
+  // out of the dedupe key costs nothing and means a future platform that did revise a figure could not
+  // turn that into a second message to the masjid.
   const s = new Store(':memory:');
   assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9, cause: 'session-expired' }), true);
-  for (let i = 0; i < 168; i += 1) {
-    assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9 + i, cause: 'session-expired' }), false);
-  }
-  assert.equal(s.getWhatsAppGaps().length, 1);
+  assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 11, cause: 'session-expired' }), false);
+  assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9, cause: 'key-rejected' }), false, 'nor a revised cause');
+  assert.equal(s.getWhatsAppGaps()[0].count, 9, 'and the first snapshot is what we keep quoting');
 });
 
 test('every event has a label, so the gap sentence can always name what was missed', () => {

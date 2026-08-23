@@ -559,10 +559,21 @@ async function main(): Promise<void> {
 
   /** Ask the platform what happened to a message, shortly after queueing it (0.51.1+ only).
    *
-   *  Once, after a short delay, and never in a loop: the platform's own records are bounded to the
-   *  most recent 500 per app and kept 24 hours, so asking soon is the only time the answer exists —
-   *  and a poll that keeps retrying would be a second queue of our own for no gain. A message still
-   *  `queued` when we look is left as queued rather than reported as a problem. */
+   *  Once, after a short delay, and never in a loop. A message still `queued` when we look is left as
+   *  queued rather than reported as a problem — which is the safe reading and the reason this is not a
+   *  source of false alarms.
+   *
+   *  **HALF THE ORIGINAL REASONING IS NOW DEAD, and it is recorded rather than quietly dropped.** This
+   *  used to say that records were kept 24 hours, so asking soon was the only time an answer existed.
+   *  Since platform 0.51.1-dev.13 a STILL-QUEUED message keeps its record for as long as it waits, and
+   *  the queue now HOLDS messages through an outage until an admin releases them — so a message can be
+   *  queued for hours and then resolve. The consequence for this one-shot check is a reporting hole: a
+   *  message held for three hours and then failing after release is looked at once, at 45 seconds, when
+   *  the only truthful answer was `queued`, and never again. Nothing is misreported (the panel renders
+   *  only bad outcomes, so a permanently-`queued` row shows nothing and claims nothing) and nothing
+   *  depends on it, but such a failure is invisible here. Widening this is a real change to a §13
+   *  invariant — "we ask once, never in a loop" — so it is Hasan's call, not a tidy-up. Kiosk and
+   *  Display hit the same dead premise from the other side, as a hard-coded 24h give-up. */
   const checkWaOutcome = (recipientId: string, event: NotifyEventId, id: string): void => {
     if (!id) return;
     setTimeout(() => {

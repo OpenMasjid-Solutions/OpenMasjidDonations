@@ -1024,10 +1024,17 @@ export class Store {
    *  raise this again" — the check and the write are one call so a slow notification cannot let a
    *  second poll slip past it. Newest first, bounded to 20.
    *
-   *  Keyed on the BOUNDS and not the count, and since platform 0.51.1-dev.13 a window is retained for
-   *  seven days after the outage ends — so an hourly poll re-reports the same one about 168 times, and
-   *  its count grows while it is still open. Re-alarming because 9 became 11 would be noise about
-   *  something the admin has already been told. */
+   *  Keyed on the BOUNDS, and since platform 0.51.1-dev.13 a window is retained for seven days after
+   *  the outage ends — so an hourly poll re-reports the same one about 168 times and every one of those
+   *  must be silent.
+   *
+   *  **A WINDOW IS IMMUTABLE, corrected 2026-08-23.** This used to say the count grows while the window
+   *  is open, and re-alarming because 9 became 11 would be noise. That was wrong: the platform
+   *  snapshots everything — bounds, cause, counts, ids — at detection and never revises it, because the
+   *  queue pauses at that moment and nothing else writes outcome records. So the dedupe is not
+   *  protecting against a rising count; it is simply identifying the incident, which is what the bounds
+   *  are. Leaving the count OUT of the key stays deliberate all the same: it costs nothing and means a
+   *  future platform that did revise a figure could never turn that into a second alarm. */
   addWhatsAppGap(w: { from: number; to: number; count: number; cause?: string; truncated?: boolean; events?: readonly string[] }): boolean {
     const all = this.getWhatsAppGaps();
     if (all.some((g) => g.from === w.from && g.to === w.to)) return false;
@@ -1056,6 +1063,17 @@ export class Store {
    * outcome per recipient+event (a health indicator, not an audit trail), so a three-hour window
    * holding forty donation notices leaves us one id to match. That is why the platform's `count`
    * remains the number we quote, and this only ever adds detail to it.
+   *
+   * **IDS ONLY, AND DELIBERATELY NO TIMESTAMP FALLBACK.** The obvious way to enrich this when a
+   * window carries no ids — an older platform, or `truncated` — is to match our outcome records by
+   * time against `[from, to]`. We do not, because that test has a false positive the platform's own
+   * holding behaviour created: a message queued DURING an outage and delivered perfectly well after the
+   * re-link still falls inside the window. (The platform recommended interval-overlap on 2026-08-22 and
+   * withdrew it on 2026-08-23, after Display found exactly that.) A complete id list is authoritative
+   * in both directions — a message not named is a message not lost, whatever the timing looks like —
+   * and where there are no ids we say only the count, which is always true. This detail line is garnish
+   * on an authoritative figure; naming a notification that actually arrived would be worse than naming
+   * none.
    */
   eventsForMessageIds(ids: readonly string[]): NotifyEventId[] {
     if (ids.length === 0) return [];

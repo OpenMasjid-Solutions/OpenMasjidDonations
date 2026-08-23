@@ -382,8 +382,13 @@ export interface WhatsAppSuspectWindow {
  * the outage was open, so re-linking the phone closed the window and destroyed the evidence exactly
  * when an admin would come looking — Kiosk found that. Two consequences here: hourly polling is
  * sufficient (there is no longer a race to catch it before it closes), and a window is now re-reported
- * on roughly 168 consecutive polls, which is why `store.addWhatsAppGap` keying on the BOUNDS rather
- * than the count is load-bearing rather than tidy.
+ * on roughly 168 consecutive polls, every one of which `store.addWhatsAppGap` must answer silently.
+ *
+ * **A window is IMMUTABLE** — bounds, cause, counts and ids are snapshotted at detection and never
+ * revised, because the queue pauses then and nothing else writes outcome records. `cause` therefore
+ * cannot change mid-window either: one incident, one cause, and a session expiry followed by a key
+ * rotation during recovery arrives as two separate windows. (Both confirmed by the platform team
+ * against their source, 2026-08-23, after this file assumed the opposite.)
  *
  * A non-ok answer is `[]`, not an error, and that is the same reading as `whatsappOutcome`: a 404 is
  * a platform too old to have the endpoint, and nothing about an absent answer is evidence that
