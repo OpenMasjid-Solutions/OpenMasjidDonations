@@ -342,6 +342,11 @@ export async function whatsappOutcome(id: string): Promise<WhatsAppMessageOutcom
   }
 }
 
+/** Why the link was down. Platform 0.51.1-dev.13; **more values may be added**, and an unrecognized
+ *  one must read as `unknown` rather than being rendered raw at a masjid. */
+export type WhatsAppGapCause = 'session-expired' | 'needs-relink' | 'key-rejected' | 'unknown';
+const CAUSES: readonly WhatsAppGapCause[] = ['session-expired', 'needs-relink', 'key-rejected', 'unknown'];
+
 /** A period during which our messages were reported `sent` but may never have arrived. */
 export interface WhatsAppSuspectWindow {
   /** Epoch ms. */
@@ -349,6 +354,14 @@ export interface WhatsAppSuspectWindow {
   to: number;
   /** How many of OUR messages were reported sent inside it — the platform scopes this to our app id. */
   count: number;
+  /** What went wrong, so the sentence an admin reads is the platform's fact and not our guess. */
+  cause: WhatsAppGapCause;
+  /** The ids of our messages in the window, for exact reconciliation. Capped at 500 per app per
+   *  window by the platform — so this may be SHORTER than `count`, and `truncated` says when. */
+  ids: string[];
+  /** The platform's own admission that the id cap bit. Kept rather than inferred from
+   *  `ids.length < count`, because those two can also differ for reasons of ours. */
+  truncated: boolean;
 }
 
 /**
@@ -364,6 +377,13 @@ export interface WhatsAppSuspectWindow {
  * can do anything about them.
  *
  * On the READ budget (600/min), not the send budget, so polling this costs us no sends.
+ *
+ * **Retention: 7 days after the outage ENDS** (platform 0.51.1-dev.13). It used to answer only while
+ * the outage was open, so re-linking the phone closed the window and destroyed the evidence exactly
+ * when an admin would come looking — Kiosk found that. Two consequences here: hourly polling is
+ * sufficient (there is no longer a race to catch it before it closes), and a window is now re-reported
+ * on roughly 168 consecutive polls, which is why `store.addWhatsAppGap` keying on the BOUNDS rather
+ * than the count is load-bearing rather than tidy.
  *
  * A non-ok answer is `[]`, not an error, and that is the same reading as `whatsappOutcome`: a 404 is
  * a platform too old to have the endpoint, and nothing about an absent answer is evidence that
@@ -382,7 +402,13 @@ export async function whatsappSuspect(): Promise<WhatsAppSuspectWindow[]> {
     });
     clearTimeout(t);
     if (!res.ok) return []; // 404 = a platform without the endpoint. Not evidence of a gap.
-    const j = (await res.json().catch(() => null)) as { windows?: unknown } | null;
+    const j = (await res.json().catch(() => null)) as { ok?: unknown; windows?: unknown } | null;
+    // `ok` (platform 0.51.1-dev.13) exists because of exactly the trap Students named on `/groups`: an
+    // empty list is indistinguishable from "we could not tell you". A body that does not say ok is
+    // NO INFORMATION, so it takes the same quiet fallback as a 404 — never "there is no gap".
+    // Absent `ok` is tolerated: 0.52.0 shipped the endpoint before the field, and on that platform an
+    // HTTP 200 was the only signal there was.
+    if (j?.ok !== undefined && j.ok !== true) return [];
     const raw = Array.isArray(j?.windows) ? j.windows : [];
     const out: WhatsAppSuspectWindow[] = [];
     // Bounded and validated: this drives a notification to the masjid, so a malformed row must be
@@ -394,7 +420,18 @@ export async function whatsappSuspect(): Promise<WhatsAppSuspectWindow[]> {
       const to = typeof o.to === 'number' ? o.to : 0;
       const count = typeof o.count === 'number' ? Math.max(0, Math.round(o.count)) : 0;
       if (from <= 0 || to < from || count <= 0) continue;
-      out.push({ from, to, count });
+      // An unrecognized cause reads as `unknown`, because the platform says more values may be added
+      // and a raw enum token is not a sentence to show a masjid.
+      const causeRaw = typeof o.cause === 'string' ? o.cause : '';
+      const cause = (CAUSES as readonly string[]).includes(causeRaw) ? (causeRaw as WhatsAppGapCause) : 'unknown';
+      const ids = Array.isArray(o.ids)
+        ? o.ids.filter((x): x is string => typeof x === 'string' && !!x).slice(0, 500)
+        : [];
+      // `truncated` is taken from the platform, and ALSO inferred when it plainly must be true — an
+      // older platform sends no flag, and `ids` shorter than `count` would otherwise let us imply we
+      // had accounted for every message when we had not.
+      const truncated = o.truncated === true || ids.length < count;
+      out.push({ from, to, count, cause, ids, truncated });
     }
     return out;
   } catch (err) {

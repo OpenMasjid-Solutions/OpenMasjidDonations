@@ -374,9 +374,14 @@ test('budget: the window slides rather than resetting on the hour', () => {
 // gap". The loud fallback would raise a false alarm on every platform too old to have the endpoint.
 
 test('a suspect window is read off the wire as given', async () => {
-  reply({ windows: [{ from: 1755900000000, to: 1755911000000, count: 9 }] });
+  reply({ ok: true, windows: [{ from: 1755900000000, to: 1755911000000, cause: 'session-expired', count: 9, ids: ['m1', 'm2'], truncated: false }] });
   const out = await wa.whatsappSuspect();
-  assert.deepEqual(out, [{ from: 1755900000000, to: 1755911000000, count: 9 }]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].from, 1755900000000);
+  assert.equal(out[0].to, 1755911000000);
+  assert.equal(out[0].count, 9);
+  assert.equal(out[0].cause, 'session-expired');
+  assert.deepEqual(out[0].ids, ['m1', 'm2']);
   assert.match(calls[0].url, /\/api\/fabric\/whatsapp\/suspect$/);
   assert.equal(calls[0].method, 'GET');
   assert.ok(calls[0].secret, 'the app secret must be sent, like every other Fabric route');
@@ -422,7 +427,10 @@ test('a malformed window is dropped rather than shown to a masjid as nonsense', 
       { from: 1755990000000, to: 1755999000000, count: 2 },            // the only good one
     ],
   });
-  assert.deepEqual(await wa.whatsappSuspect(), [{ from: 1755990000000, to: 1755999000000, count: 2 }]);
+  const out = await wa.whatsappSuspect();
+  assert.equal(out.length, 1);
+  assert.equal(out[0].from, 1755990000000);
+  assert.equal(out[0].count, 2);
 });
 
 test('a garbage body, or a missing windows key, is not a gap', async () => {
@@ -437,4 +445,75 @@ test('a garbage body, or a missing windows key, is not a gap', async () => {
 test('the window list is bounded, so a runaway platform cannot flood the panel', async () => {
   reply({ windows: Array.from({ length: 200 }, (_, i) => ({ from: 1_700_000_000_000 + i * 1000, to: 1_700_000_000_500 + i * 1000, count: 1 })) });
   assert.ok((await wa.whatsappSuspect()).length <= 50);
+});
+
+// ── cause / ids / truncated / ok (platform 0.51.1-dev.13) ───────────────────
+//
+// The platform added these after we asked for `ids` and Students pointed out that an empty list on a
+// throttle is indistinguishable from "nothing is wrong". Both of those are failure directions rather
+// than features, which is why they get their own tests.
+
+test('every documented cause survives the wire unchanged', async () => {
+  for (const cause of ['session-expired', 'needs-relink', 'key-rejected', 'unknown'] as const) {
+    reply({ ok: true, windows: [{ from: 1, to: 2, cause, count: 1, ids: [], truncated: false }] });
+    const out = await wa.whatsappSuspect();
+    assert.equal(out[0].cause, cause, `${cause} must not be flattened`);
+  }
+});
+
+test('an UNRECOGNIZED cause reads as unknown, not as itself', async () => {
+  // The platform says more values may be added. A raw enum token is not a sentence to show a masjid,
+  // and the notification picks its wording from a fixed map — an unmapped value would be a crash or a
+  // blank where an explanation should be.
+  reply({ ok: true, windows: [{ from: 1, to: 2, cause: 'phone-fell-in-the-wudu-area', count: 1, ids: [], truncated: false }] });
+  assert.equal((await wa.whatsappSuspect())[0].cause, 'unknown');
+  reply({ ok: true, windows: [{ from: 1, to: 2, count: 1 }] });
+  assert.equal((await wa.whatsappSuspect())[0].cause, 'unknown', 'and so does an absent one');
+});
+
+test('ok:false is NO INFORMATION, and never "there is no gap"', async () => {
+  // Students' point, and it is the same trap `/groups` had: a 200 carrying an empty list looks
+  // identical to a healthy answer. Getting this backwards would tell a masjid everything was fine
+  // during the exact minutes it was not.
+  reply({ ok: false, windows: [] });
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+  reply({ ok: false, error: 'rate limited', windows: [{ from: 1, to: 2, count: 5 }] });
+  assert.deepEqual(await wa.whatsappSuspect(), [], 'and windows alongside ok:false are not trusted either');
+});
+
+test('an ABSENT ok is tolerated, because 0.52.0 shipped without the field', async () => {
+  // Requiring it would make every window invisible on the platform that introduced the endpoint.
+  reply({ windows: [{ from: 1755900000000, to: 1755911000000, count: 4 }] });
+  assert.equal((await wa.whatsappSuspect()).length, 1);
+});
+
+test('truncated is believed when the platform says so', async () => {
+  reply({ ok: true, windows: [{ from: 1, to: 2, cause: 'unknown', count: 900, ids: ['a'], truncated: true }] });
+  assert.equal((await wa.whatsappSuspect())[0].truncated, true);
+});
+
+test('truncated is INFERRED when ids cannot account for the count', async () => {
+  // An older platform sends no flag. Without inferring it, "we matched 2 of your messages" would imply
+  // we had accounted for all 9 — and the admin would under-read what they missed.
+  reply({ ok: true, windows: [{ from: 1, to: 2, cause: 'unknown', count: 9, ids: ['a', 'b'] }] });
+  assert.equal((await wa.whatsappSuspect())[0].truncated, true);
+  reply({ ok: true, windows: [{ from: 1, to: 2, cause: 'unknown', count: 2, ids: ['a', 'b'] }] });
+  assert.equal((await wa.whatsappSuspect())[0].truncated, false, 'but a complete list is not truncated');
+});
+
+test('ids are capped and non-strings are dropped rather than carried as junk', async () => {
+  reply({
+    ok: true,
+    windows: [{ from: 1, to: 2, cause: 'unknown', count: 4, ids: ['good', 42, null, '', { id: 'x' }, 'also-good'], truncated: false }],
+  });
+  assert.deepEqual((await wa.whatsappSuspect())[0].ids, ['good', 'also-good']);
+  reply({ ok: true, windows: [{ from: 1, to: 2, cause: 'unknown', count: 9999, ids: Array.from({ length: 900 }, (_, i) => `m${i}`), truncated: true }] });
+  assert.ok((await wa.whatsappSuspect())[0].ids.length <= 500, 'the platform caps at 500 per app per window');
+});
+
+test('a missing ids array is an empty one, not a crash', async () => {
+  reply({ ok: true, windows: [{ from: 1, to: 2, cause: 'unknown', count: 3 }] });
+  assert.deepEqual((await wa.whatsappSuspect())[0].ids, []);
+  reply({ ok: true, windows: [{ from: 1, to: 2, cause: 'unknown', count: 3, ids: 'm1' }] });
+  assert.deepEqual((await wa.whatsappSuspect())[0].ids, []);
 });

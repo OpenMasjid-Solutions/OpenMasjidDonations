@@ -17,7 +17,7 @@ import fastifyMultipart from '@fastify/multipart';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NEW_EMAIL_EVENTS } from './store';
+import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NEW_EMAIL_EVENTS, NOTIFY_EVENT_LABEL } from './store';
 import { DIALS, DEFAULT_DIAL, toE164 } from './phone';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch, WhatsAppEventOutcome } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
@@ -47,6 +47,7 @@ import {
   whatsappUnavailableMessage,
   whatsappOutcome,
   whatsappSuspect,
+  type WhatsAppGapCause,
   makeSendBudget,
 } from './whatsapp';
 import {
@@ -548,9 +549,9 @@ async function main(): Promise<void> {
    *  event-only key meant the second recipient's refusal overwrote the first's and the panel showed
    *  one row's problem against everybody. */
   const waKey = (recipientId: string, event: NotifyEventId): string => `${recipientId}|${event}`;
-  const recordWaOutcome = (recipientId: string, event: NotifyEventId, state: WhatsAppEventOutcome['state'], reason = ''): void => {
+  const recordWaOutcome = (recipientId: string, event: NotifyEventId, state: WhatsAppEventOutcome['state'], reason = '', msgId = ''): void => {
     try {
-      store.setWhatsAppOutcome(waKey(recipientId, event), { state, reason, at: new Date().toISOString() });
+      store.setWhatsAppOutcome(waKey(recipientId, event), { state, reason, at: new Date().toISOString(), ...(msgId ? { msgId } : {}) });
     } catch {
       /* a health indicator must never break the thing it reports on */
     }
@@ -569,11 +570,13 @@ async function main(): Promise<void> {
         .then((o) => {
           if (!o) return; // unknown / not ours / no endpoint — not evidence of anything
           if (o.state === 'failed' || o.state === 'expired') {
-            recordWaOutcome(recipientId, event, o.state, o.reason);
+            recordWaOutcome(recipientId, event, o.state, o.reason, id);
             // Worth a log line at warn: this is the case that used to be invisible.
             log.warn(`WhatsApp ${event} ${o.state}${o.reason ? `: ${o.reason}` : ''}`);
           } else if (o.state === 'sent') {
-            recordWaOutcome(recipientId, event, 'sent');
+            // `sent` is the state a suspect window is ABOUT — the platform reported these as sent and
+            // they may never have arrived — so the id matters most here of anywhere.
+            recordWaOutcome(recipientId, event, 'sent', '', id);
           }
         })
         .catch(() => {});
@@ -621,7 +624,9 @@ async function main(): Promise<void> {
     // Title and body together: a WhatsApp message has no subject line to carry the first half.
     const r = await sendWhatsApp(target, `${title}\n${text}`);
     if (r.queued) {
-      recordWaOutcome(rec.id, event, 'queued');
+      // The id is kept, not just used: the platform reports the ids that fell in a suspect window, and
+      // this is the only thing on our side that can turn one back into "the refund notice".
+      recordWaOutcome(rec.id, event, 'queued', '', r.id);
       // Ask what became of it, once, if the platform can tell us (0.51.1+).
       if (st.outcomes) checkWaOutcome(rec.id, event, r.id);
     } else {
@@ -1133,7 +1138,11 @@ async function main(): Promise<void> {
         groups: wa.available ? await whatsappGroups() : [],
         /** What became of the last WhatsApp message for each recipient + event (`<id>|<event>`) — so a
          *  refusal or a failure is something the admin can SEE, against the row it happened to. */
-        lastOutcomes: store.getWhatsAppOutcomes(),
+        lastOutcomes: Object.fromEntries(
+          // msgId stripped: the panel renders a state and a sentence, and an opaque platform id in the
+          // DOM is a question somebody will have to answer later for no benefit.
+          Object.entries(store.getWhatsAppOutcomes()).map(([k, o]) => [k, { state: o.state, reason: o.reason, at: o.at }]),
+        ),
         /** How many sends our own caps have held back since boot, across every destination. */
         heldBack: waBudget.totalSuppressed() + waTotalBudget.totalSuppressed(),
         /** Periods the platform no longer trusts — messages reported sent that may never have
@@ -1333,7 +1342,7 @@ async function main(): Promise<void> {
       recordWaOutcome(rec.id, event, 'refused', r.error);
       return reply.code(r.retry ? 502 : 400).send({ error: r.error });
     }
-    recordWaOutcome(rec.id, event, 'queued');
+    recordWaOutcome(rec.id, event, 'queued', '', r.id);
     if (st.outcomes) checkWaOutcome(rec.id, event, r.id);
     return {
       data: {
@@ -4003,29 +4012,72 @@ async function main(): Promise<void> {
    */
   {
     const GAP_POLL_MS = 3600_000;
+
+    /**
+     * The platform's `cause` in a masjid's words, plus what they can actually do about it.
+     *
+     * Written from the platform's own value rather than guessed — the earlier version of this said
+     * "your connection had stopped working" for every window, which was true for the outage that
+     * prompted the feature and would have been wrong for `key-rejected` (nothing about the phone, and
+     * re-linking it would have achieved nothing). An unrecognized value has already been flattened to
+     * `unknown` by `whatsappSuspect`, so this map cannot be missing an arm.
+     */
+    const CAUSE_TEXT: Record<WhatsAppGapCause, { what: string; fix: string }> = {
+      'session-expired': {
+        what: 'Your masjid’s WhatsApp connection had signed itself out — the way being signed out of WhatsApp on a computer does.',
+        fix: 'It has been reconnected, or can be, by linking the phone again in OpenMasjidOS → Settings → WhatsApp.',
+      },
+      'needs-relink': {
+        what: 'Your masjid’s WhatsApp phone needed linking again, and until it was, messages were accepted but not delivered.',
+        fix: 'Link the phone again in OpenMasjidOS → Settings → WhatsApp and messages will start arriving.',
+      },
+      'key-rejected': {
+        what: 'The WhatsApp gateway on this server rejected OpenMasjidOS’s credentials, so messages were accepted but never sent on.',
+        fix: 'This one is not about your phone — whoever set up the WhatsApp gateway needs to check it in OpenMasjidOS.',
+      },
+      unknown: {
+        what: 'Your masjid’s WhatsApp connection had stopped working without OpenMasjidOS noticing.',
+        fix: 'If messages are still not arriving, re-linking the phone in OpenMasjidOS → Settings → WhatsApp is the usual fix.',
+      },
+    };
+
     const gapWatch = async (): Promise<void> => {
       if (!ssoConfigured()) return;
       const windows = await whatsappSuspect();
       for (const w of windows) {
-        // The platform re-reports a window on every poll while it is inside its retention, so the
-        // store decides whether this is news. Check-and-write in one call, before the notification,
-        // so a slow send cannot let the next poll raise the same window twice.
-        if (!store.addWhatsAppGap(w)) continue;
+        // Reconcile the reported ids to our own notifications BEFORE recording, so the stored row
+        // carries the labels the panel will need. Partial by construction — we keep the newest outcome
+        // per recipient+event, not a message log — so everything below says "at least".
+        const events = store.eventsForMessageIds(w.ids);
+        // The platform re-reports a window on every poll for seven days after the outage ends, so the
+        // store decides whether this is news. Check-and-write in one call, before the notification, so
+        // a slow send cannot let the next poll raise the same window twice.
+        if (!store.addWhatsAppGap({ from: w.from, to: w.to, count: w.count, cause: w.cause, truncated: w.truncated, events })) continue;
+
+        const c = CAUSE_TEXT[w.cause];
         const when = `${new Date(w.from).toLocaleString()} and ${new Date(w.to).toLocaleString()}`;
-        log.warn(`WhatsApp gap reported by the platform: ${w.count} message(s) between ${w.from} and ${w.to}`);
+        const n = w.count === 1 ? 'One message' : `${w.count} messages`;
+        const labels = events.map((e) => NOTIFY_EVENT_LABEL[e]);
+        const which = labels.length === 0
+          ? ''
+          : `\n\nAt least ${labels.length === 1 ? 'one of them was' : 'some of them were'} about: ${labels.join('; ')}. ` +
+            'There may have been others of the same kind — this is what we could match exactly.';
+        log.warn(`WhatsApp gap reported by the platform: ${w.count} message(s), cause ${w.cause}, ${w.from}–${w.to}${w.truncated ? ' (ids truncated)' : ''}`);
         raise(
           'whatsappGap',
           'Some WhatsApp messages may not have arrived',
-          `Your masjid’s WhatsApp connection had stopped working without OpenMasjidOS noticing, so ${w.count === 1 ? 'a message' : `${w.count} messages`} sent between ${when} ${w.count === 1 ? 'was' : 'were'} reported as sent but never delivered.\n\n` +
+          `${c.what}\n\n${n} sent between ${when} ${w.count === 1 ? 'was' : 'were'} reported as sent, but ${w.count === 1 ? 'it' : 'they'} may never have arrived. ${c.fix}${which}\n\n` +
             'Nothing was lost. Every donation, refund and monthly change from that period is in your records exactly as normal — it was only the messages that went missing, so there is nothing to put right. ' +
-            'If you want to see what you missed, the Donations tab and the Overview cover that period as usual.\n\n' +
+            'The Donations tab and the Overview cover that period as usual if you want to see what you missed.\n\n' +
             'We have deliberately not re-sent them: they were all notices about things already in your records, and re-sending a day of them to a phone that has only just been re-linked is the quickest way to get that number blocked.',
           'warning',
         );
       }
     };
     // A short delay rather than immediately: at boot the Fabric config watcher may not have settled,
-    // and an unconfigured platform would just answer nothing.
+    // and an unconfigured platform would just answer nothing. The boot pass is what catches a gap that
+    // happened while the box was off — and since platform 0.51.1-dev.13 retains a window for seven days
+    // after the outage ends, that pass now reliably finds one instead of racing the admin's re-link.
     setTimeout(() => void gapWatch().catch(() => {}), 90_000).unref?.();
     const iv = setInterval(nonOverlapping(gapWatch), GAP_POLL_MS);
     iv.unref?.();

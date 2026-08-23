@@ -26,7 +26,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Store, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NOTIFY_DEFAULT, NEW_EMAIL_EVENTS, type NotifyEventId } from './store';
+import { Store, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NOTIFY_DEFAULT, NEW_EMAIL_EVENTS, NOTIFY_EVENT_LABEL, type NotifyEventId } from './store';
 
 const MANIFEST = path.join(__dirname, '..', '..', 'manifest.yaml');
 
@@ -468,4 +468,118 @@ test('a new email address hears about a gap, and a new WhatsApp row still does n
   // the tempting one, since a gap is a WhatsApp fact.
   assert.ok(NEW_EMAIL_EVENTS.includes('whatsappGap'), 'an address should hear that its channel broke');
   assert.deepEqual(NOTIFY_DEFAULT.whatsapps, [], 'and no number is ever configured for a masjid');
+});
+
+// ── Reconciling reported ids back to our own notifications (0.51.1-dev.13) ───
+//
+// The platform now reports the message ids that fell in a gap, which is what we asked for. It turns
+// "9 messages" into "at least one of them was the refund notice" — the difference between an admin
+// shrugging and an admin checking. It is PARTIAL by construction and every test here says so.
+
+/** Queue-time record: a message we sent, with the id the platform gave us back. */
+function seedSent(s: Store, recipientId: string, event: string, msgId: string): void {
+  s.setWhatsAppOutcome(`${recipientId}|${event}`, { state: 'sent', reason: '', at: '2026-08-23T12:00:00Z', msgId });
+}
+
+test('a reported id is mapped back to the notification it was', () => {
+  const s = new Store(':memory:');
+  const id = s.upsertNotifyRecipient('whatsapps', { address: '13135550142', events: ['refund', 'donation'] }).whatsapps[0].id;
+  seedSent(s, id, 'refund', 'msg-aaa');
+  seedSent(s, id, 'donation', 'msg-bbb');
+  assert.deepEqual(s.eventsForMessageIds(['msg-aaa']), ['refund']);
+  assert.deepEqual(s.eventsForMessageIds(['msg-bbb']), ['donation']);
+});
+
+test('several ids collapse to the distinct notifications they were', () => {
+  const s = new Store(':memory:');
+  let cfg = s.upsertNotifyRecipient('whatsapps', { address: '13135550142', events: ['refund'] });
+  const a = cfg.whatsapps[0].id;
+  cfg = s.upsertNotifyRecipient('whatsapps', { address: '13135550143', events: ['refund'] });
+  const b = cfg.whatsapps.find((r) => r.id !== a)!.id;
+  seedSent(s, a, 'refund', 'msg-1');
+  seedSent(s, b, 'refund', 'msg-2');
+  // Two people, same event: the admin needs the EVENT, and naming who was written to adds nothing.
+  assert.deepEqual(s.eventsForMessageIds(['msg-1', 'msg-2']), ['refund']);
+});
+
+test('the result is ordered by NOTIFY_EVENTS, so the sentence reads the same every time', () => {
+  const s = new Store(':memory:');
+  const id = s.upsertNotifyRecipient('whatsapps', { address: '13135550142', events: [] }).whatsapps[0].id;
+  seedSent(s, id, 'tuitionFailed', 'm-t');
+  seedSent(s, id, 'donation', 'm-d');
+  seedSent(s, id, 'refund', 'm-r');
+  assert.deepEqual(s.eventsForMessageIds(['m-t', 'm-r', 'm-d']), ['donation', 'refund', 'tuitionFailed']);
+});
+
+test('an id we never saw matches nothing, and does not throw', () => {
+  const s = new Store(':memory:');
+  assert.deepEqual(s.eventsForMessageIds(['who-knows']), []);
+  assert.deepEqual(s.eventsForMessageIds([]), []);
+});
+
+test('a record with no id cannot be matched, which is why the wording says "at least"', () => {
+  // We keep the newest outcome per recipient+event, not a message log. A three-hour window holding
+  // forty donation notices leaves us one id to match — so the platform's `count` stays the number we
+  // quote, and this only ever ADDS detail to it.
+  const s = new Store(':memory:');
+  const id = s.upsertNotifyRecipient('whatsapps', { address: '13135550142', events: ['refund'] }).whatsapps[0].id;
+  s.setWhatsAppOutcome(`${id}|refund`, { state: 'sent', reason: '', at: '2026-08-23T12:00:00Z' }); // pre-0.44.0 shape
+  assert.deepEqual(s.eventsForMessageIds(['msg-aaa']), []);
+});
+
+test('the newest outcome overwrites the older id for the same recipient and event', () => {
+  // Documenting the known limit rather than pretending it away: the second message's id is what
+  // survives, so the first is unmatchable. This is the reason for "there may have been others".
+  const s = new Store(':memory:');
+  const id = s.upsertNotifyRecipient('whatsapps', { address: '13135550142', events: ['donation'] }).whatsapps[0].id;
+  seedSent(s, id, 'donation', 'msg-first');
+  seedSent(s, id, 'donation', 'msg-second');
+  assert.deepEqual(s.eventsForMessageIds(['msg-second']), ['donation']);
+  assert.deepEqual(s.eventsForMessageIds(['msg-first']), [], 'the earlier one is gone, by design');
+});
+
+test('a gap stores the cause, the truncation and the events it could name', () => {
+  const s = new Store(':memory:');
+  assert.equal(
+    s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9, cause: 'session-expired', truncated: true, events: ['refund'] }),
+    true,
+  );
+  const g = s.getWhatsAppGaps()[0];
+  assert.equal(g.cause, 'session-expired');
+  assert.equal(g.truncated, true);
+  assert.deepEqual(g.events, ['refund']);
+  assert.equal(g.count, 9, 'the platform’s count is what we quote, not the number we matched');
+});
+
+test('a gap read back drops an event id this build does not know', () => {
+  const s = new Store(':memory:');
+  (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
+    .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
+    .run('whatsapp_gaps', JSON.stringify([{ from: 1, to: 2, count: 1, cause: 'unknown', truncated: false, events: ['refund', 'fromTheFuture'], at: '' }]));
+  assert.deepEqual(s.getWhatsAppGaps()[0].events, ['refund']);
+});
+
+test('a seven-day window re-reported every hour is still one alarm', () => {
+  // Platform 0.51.1-dev.13 retains a window for 7 days after the outage ends, so an hourly poll sees
+  // the same one about 168 times — and its count grows while it is still open.
+  const s = new Store(':memory:');
+  assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9, cause: 'session-expired' }), true);
+  for (let i = 0; i < 168; i += 1) {
+    assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9 + i, cause: 'session-expired' }), false);
+  }
+  assert.equal(s.getWhatsAppGaps().length, 1);
+});
+
+test('every event has a label, so the gap sentence can always name what was missed', () => {
+  // The gap notification composes its own sentence server-side and sends it by email, so a new event
+  // added without a label would print `undefined` to a masjid.
+  for (const e of NOTIFY_EVENTS) {
+    const label = NOTIFY_EVENT_LABEL[e];
+    assert.ok(label, `${e} has no label`);
+    // They are joined into "…were about: X; Y." — so each must be a noun phrase, not a sentence.
+    // Deliberately NOT asserting a lowercase first letter: "WhatsApp messages going missing" is a
+    // proper noun and reads correctly mid-sentence exactly as it is.
+    assert.ok(!label.endsWith('.'), `${e}'s label should not be a full sentence`);
+    assert.ok(label.split(/\s+/).join(' ') === label, `${e}'s label must be a single clean line`);
+  }
 });

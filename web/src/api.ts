@@ -361,8 +361,21 @@ export interface WhatsAppAvailability {
    *  stopped limiting anything in 0.51.1, so this bound is ours, and worth admitting to. */
   heldBack?: number;
   /** Periods when the masjid's WhatsApp link had expired without OpenMasjidOS noticing, so
-   *  messages were reported sent and never delivered (platform 0.52.0). Newest first. */
-  gaps?: { from: number; to: number; count: number; at: string }[];
+   *  messages were reported sent and never delivered (platform 0.52.0). Newest first.
+   *
+   *  `cause` is the platform's word for what broke — treat an unfamiliar value as unknown, since more
+   *  may be added. `events` is which of our notifications we could match to the reported message ids,
+   *  and is deliberately INCOMPLETE: `count` is the real total, and `truncated` says when even the
+   *  platform's id list was capped. So the UI must never present `events` as the full story. */
+  gaps?: {
+    from: number;
+    to: number;
+    count: number;
+    cause: string;
+    truncated: boolean;
+    events: NotifyEventId[];
+    at: string;
+  }[];
 }
 
 /** Every notification this app can raise. The ids are the app's own; the labels live in the UI. */

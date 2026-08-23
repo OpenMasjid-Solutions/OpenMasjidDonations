@@ -206,6 +206,24 @@ export const NOTIFY_ALERT_ID: Record<NotifyEventId, string> = {
 };
 
 /**
+ * Each event in a masjid's words, for the rare places the SERVER has to name one.
+ *
+ * The panel has its own copy with column headings and tooltips, which is the right place for UI text
+ * — this exists because the WhatsApp gap notification has to say which notifications were caught in an
+ * outage, and that sentence is composed server-side and sent by email. Kept beside the event list so a
+ * new event cannot be added without a label to print.
+ */
+export const NOTIFY_EVENT_LABEL: Record<NotifyEventId, string> = {
+  donation: 'a donation was received',
+  donationRecovered: 'a donation was found and added',
+  refund: 'a donation was refunded',
+  planStopped: 'a monthly donation was stopped',
+  paymentFailed: 'a payment couldn’t be started',
+  tuitionFailed: 'a tuition payment wasn’t recorded',
+  whatsappGap: 'WhatsApp messages going missing',
+};
+
+/**
  * Whether an event is raised as an OpenMasjidOS **alert**, which reaches the admin's own email and
  * webhook.
  *
@@ -235,6 +253,19 @@ export interface WhatsAppEventOutcome {
   reason: string;
   /** ISO timestamp of when WE recorded this. */
   at: string;
+  /**
+   * The platform's message id from the `202`, when we have one.
+   *
+   * Kept only so a suspect WINDOW can be reconciled exactly: the platform reports the ids of our
+   * messages that fell in a gap, and without this there is nothing on our side to match them
+   * against — the count alone cannot say whether the lost message was a $5 donation notice or the
+   * refund alert somebody needed. Opaque, not a secret, and useless without our app secret; it is
+   * stripped from the settings view all the same, because the panel has no use for it.
+   *
+   * Absent on a record written before v0.44.0, and on one recorded from a refusal (there was no
+   * message, so there is no id).
+   */
+  msgId?: string;
 }
 
 /**
@@ -264,6 +295,22 @@ export interface NotifyRecipient {
   /** What to call them on screen (“Office”, “Br. Osman”). Optional — the address is the identity. */
   label: string;
   events: NotifyEventId[];
+}
+
+/** A period the platform no longer trusts: our messages were reported `sent` and may never have
+ *  arrived. `cause` is the platform's own word for what broke (see WhatsAppGapCause), kept as a plain
+ *  string here so an unrecognized future value survives a round-trip through storage rather than being
+ *  flattened on the way in. `events` is what we could reconcile from the reported message ids, and is
+ *  deliberately incomplete — see `eventsForMessageIds`. */
+export interface WhatsAppGap {
+  from: number;
+  to: number;
+  count: number;
+  cause: string;
+  truncated: boolean;
+  events: NotifyEventId[];
+  /** ISO timestamp of when WE first saw it. */
+  at: string;
 }
 
 export interface NotifySettings {
@@ -907,6 +954,7 @@ export class Store {
         state: state as WhatsAppEventOutcome['state'],
         reason: String(o.reason ?? '').slice(0, 200),
         at: String(o.at ?? ''),
+        ...(typeof o.msgId === 'string' && o.msgId ? { msgId: o.msgId.slice(0, 120) } : {}),
       };
     }
     return out;
@@ -925,7 +973,12 @@ export class Store {
       const owner = k.includes('|') ? k.slice(0, k.indexOf('|')) : '';
       if (!owner || !live.has(owner)) delete all[k];
     }
-    all[key] = { state: outcome.state, reason: (outcome.reason || '').slice(0, 200), at: outcome.at };
+    all[key] = {
+      state: outcome.state,
+      reason: (outcome.reason || '').slice(0, 200),
+      at: outcome.at,
+      ...(outcome.msgId ? { msgId: outcome.msgId.slice(0, 120) } : {}),
+    };
     this.setRaw('whatsapp_outcomes', JSON.stringify(all));
   }
 
@@ -941,20 +994,26 @@ export class Store {
    * Kept so the panel can go on showing it after the notification has scrolled away: a gap is the one
    * WhatsApp fact an admin may need to act on days later ("did I miss a refund last Tuesday?").
    */
-  getWhatsAppGaps(): { from: number; to: number; count: number; at: string }[] {
+  getWhatsAppGaps(): WhatsAppGap[] {
     const raw = this.getJson<unknown>('whatsapp_gaps');
     if (!Array.isArray(raw)) return [];
-    const out: { from: number; to: number; count: number; at: string }[] = [];
+    const out: WhatsAppGap[] = [];
     for (const v of raw.slice(0, 20)) {
       if (!v || typeof v !== 'object') continue;
       const o = v as Record<string, unknown>;
       const from = typeof o.from === 'number' ? o.from : 0;
       const to = typeof o.to === 'number' ? o.to : 0;
       if (from <= 0 || to < from) continue;
+      const events = Array.isArray(o.events) ? (o.events as unknown[]) : [];
       out.push({
         from,
         to,
         count: typeof o.count === 'number' ? Math.max(0, Math.round(o.count)) : 0,
+        cause: typeof o.cause === 'string' ? o.cause.slice(0, 40) : 'unknown',
+        truncated: o.truncated === true,
+        // Filtered against the live event list, like a recipient's: a stale id from another build
+        // must not become a label nobody can explain.
+        events: NOTIFY_EVENTS.filter((e) => events.includes(e)),
         at: typeof o.at === 'string' ? o.at : '',
       });
     }
@@ -963,13 +1022,51 @@ export class Store {
 
   /** Record a window as reported. Returns false if it already was, which is the caller's "don't
    *  raise this again" — the check and the write are one call so a slow notification cannot let a
-   *  second poll slip past it. Newest first, bounded to 20. */
-  addWhatsAppGap(w: { from: number; to: number; count: number }): boolean {
+   *  second poll slip past it. Newest first, bounded to 20.
+   *
+   *  Keyed on the BOUNDS and not the count, and since platform 0.51.1-dev.13 a window is retained for
+   *  seven days after the outage ends — so an hourly poll re-reports the same one about 168 times, and
+   *  its count grows while it is still open. Re-alarming because 9 became 11 would be noise about
+   *  something the admin has already been told. */
+  addWhatsAppGap(w: { from: number; to: number; count: number; cause?: string; truncated?: boolean; events?: readonly string[] }): boolean {
     const all = this.getWhatsAppGaps();
     if (all.some((g) => g.from === w.from && g.to === w.to)) return false;
-    all.unshift({ from: w.from, to: w.to, count: w.count, at: new Date().toISOString() });
+    all.unshift({
+      from: w.from,
+      to: w.to,
+      count: w.count,
+      cause: (w.cause ?? 'unknown').slice(0, 40),
+      truncated: w.truncated === true,
+      events: NOTIFY_EVENTS.filter((e) => (w.events ?? []).includes(e)),
+      at: new Date().toISOString(),
+    });
     this.setRaw('whatsapp_gaps', JSON.stringify(all.slice(0, 20)));
     return true;
+  }
+
+  /**
+   * Which of our notifications the platform's message ids belong to.
+   *
+   * The platform reports the ids of our messages that fell in a gap; this turns them back into event
+   * names, so an admin is told "including the refund notice" rather than only "9 messages". Never
+   * returns a recipient or a number — the affected EVENT is the actionable part, and in a small
+   * community naming who was written to adds nothing an admin needs.
+   *
+   * PARTIAL BY CONSTRUCTION, and the caller must word it as "at least": we keep only the newest
+   * outcome per recipient+event (a health indicator, not an audit trail), so a three-hour window
+   * holding forty donation notices leaves us one id to match. That is why the platform's `count`
+   * remains the number we quote, and this only ever adds detail to it.
+   */
+  eventsForMessageIds(ids: readonly string[]): NotifyEventId[] {
+    if (ids.length === 0) return [];
+    const want = new Set(ids);
+    const hit = new Set<NotifyEventId>();
+    for (const [key, o] of Object.entries(this.getWhatsAppOutcomes())) {
+      if (!o.msgId || !want.has(o.msgId)) continue;
+      const event = key.slice(key.indexOf('|') + 1);
+      if ((NOTIFY_EVENTS as readonly string[]).includes(event)) hit.add(event as NotifyEventId);
+    }
+    return NOTIFY_EVENTS.filter((e) => hit.has(e));
   }
 
   getEmailStatus(): string {

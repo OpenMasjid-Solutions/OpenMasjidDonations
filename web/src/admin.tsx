@@ -2329,6 +2329,20 @@ const NOTIFY_COLS: { id: NotifyEventId; short: string; label: string; hint: stri
 ];
 
 /**
+ * What OpenMasjidOS said went wrong, in a masjid's words.
+ *
+ * Keyed by the platform's `cause` and looked up with a fallback, rather than switched on: the platform
+ * says more values may be added, and an unfamiliar one must produce the vague-but-true sentence
+ * instead of a blank space where the explanation should be.
+ */
+const GAP_CAUSE: Record<string, string> = {
+  'session-expired': 'Your WhatsApp connection had signed itself out, the way being signed out of WhatsApp on a computer does.',
+  'needs-relink': 'Your WhatsApp phone needed linking again, and until it was, messages were accepted but not delivered.',
+  'key-rejected': 'The WhatsApp gateway rejected this server’s credentials — this one isn’t about your phone, so whoever set the gateway up needs to look at it.',
+  unknown: 'Your WhatsApp connection had stopped working without OpenMasjidOS noticing.',
+};
+
+/**
  * A phone number as two fields: the country, chosen from a list, and the national number.
  *
  * TWO FIELDS RATHER THAN ONE IS THE POINT, not a convenience. A single box cannot tell "3135550142"
@@ -2627,19 +2641,34 @@ function NotificationsCard() {
           because "did I miss a refund last Tuesday?" is a question asked days later. Deliberately
           says nothing was lost, because nothing was — and says we did not re-send, because an admin
           who assumes we did would stop looking. */}
-      {(wa.gaps ?? []).map((g) => (
-        <p className="form-error notify-outcome" key={`${g.from}-${g.to}`}>
-          <AlertTriangle size={13} aria-hidden="true" />{' '}
-          <span>
-            <b>{g.count === 1 ? 'A message' : `${g.count} messages`} may not have arrived.</b>{' '}
-            Your WhatsApp connection had stopped working without OpenMasjidOS noticing, between{' '}
-            {new Date(g.from).toLocaleString()} and {new Date(g.to).toLocaleString()}. Your records are
-            unaffected — every donation and refund from then is in the Donations tab as usual, so there is
-            nothing to put right. We haven’t re-sent them: they were all notices about things already in
-            your records, and a burst of them to a newly re-linked number risks getting it blocked.
-          </span>
-        </p>
-      ))}
+      {(wa.gaps ?? []).map((g) => {
+        // The platform's own word for what broke, so this says the right thing rather than assuming a
+        // dead phone every time. An unfamiliar value falls back to the vague sentence, which is the
+        // honest one — the platform says more causes may be added.
+        const why = GAP_CAUSE[g.cause] ?? GAP_CAUSE.unknown;
+        const missed = NOTIFY_COLS.filter((c) => g.events.includes(c.id)).map((c) => c.label.toLowerCase());
+        return (
+          <p className="form-error notify-outcome" key={`${g.from}-${g.to}`}>
+            <AlertTriangle size={13} aria-hidden="true" />{' '}
+            <span>
+              <b>{g.count === 1 ? 'A message' : `${g.count} messages`} may not have arrived.</b>{' '}
+              {why} Between {new Date(g.from).toLocaleString()} and {new Date(g.to).toLocaleString()}.
+              {missed.length > 0 && (
+                <>
+                  {' '}At least {missed.length === 1 ? 'one was' : 'some were'} about {missed.join('; ')}
+                  {/* Never claim this is the whole list: we keep the newest message per notification,
+                      not a log of every one, and the platform caps its own id list too. */}
+                  {' '}— there may have been others of the same kind.
+                </>
+              )}
+              {' '}Your records are unaffected — every donation and refund from then is in the Donations
+              tab as usual, so there is nothing to put right. We haven’t re-sent them: they were all
+              notices about things already in your records, and a burst of them to a newly re-linked
+              number risks getting it blocked.
+            </span>
+          </p>
+        );
+      })}
       <RecipientMatrix
         kind="whatsapp" rows={value.whatsapps} dials={value.dials} outcomes={wa.lastOutcomes} groups={wa.groups}
         disabled={saving || !wa.available}
