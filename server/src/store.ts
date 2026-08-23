@@ -180,7 +180,7 @@ export const EMAIL_RECEIPT_DEFAULT: EmailReceipt = {
  * Each maps to a declared alert id in `manifest.yaml` (kebab-case there, camelCase here); the
  * platform 400s an alert id it was not told about, so the two lists must stay in step.
  */
-export const NOTIFY_EVENTS = ['donation', 'donationRecovered', 'refund', 'planStopped', 'paymentFailed', 'tuitionFailed'] as const;
+export const NOTIFY_EVENTS = ['donation', 'donationRecovered', 'refund', 'planStopped', 'paymentFailed', 'tuitionFailed', 'whatsappGap'] as const;
 export type NotifyEventId = (typeof NOTIFY_EVENTS)[number];
 
 /**
@@ -202,6 +202,7 @@ export const NOTIFY_ALERT_ID: Record<NotifyEventId, string> = {
   planStopped: 'plan-stopped',
   paymentFailed: 'payment-failed',
   tuitionFailed: 'tuition-record-failed',
+  whatsappGap: 'whatsapp-gap',
 };
 
 /**
@@ -327,7 +328,7 @@ const MAX_RECIPIENTS = 25;
  * A new WHATSAPP row starts on NOTHING. See NotifySettings.whatsapps for why that is a different rule
  * rather than an inconsistency.
  */
-export const NEW_EMAIL_EVENTS: readonly NotifyEventId[] = ['refund', 'planStopped', 'paymentFailed', 'tuitionFailed'];
+export const NEW_EMAIL_EVENTS: readonly NotifyEventId[] = ['refund', 'planStopped', 'paymentFailed', 'tuitionFailed', 'whatsappGap'];
 
 /**
  * The OS channel is ON for every event, `donation` included — Hasan's call, made after the risk below
@@ -926,6 +927,49 @@ export class Store {
     }
     all[key] = { state: outcome.state, reason: (outcome.reason || '').slice(0, 200), at: outcome.at };
     this.setRaw('whatsapp_outcomes', JSON.stringify(all));
+  }
+
+  /**
+   * Periods the platform told us it no longer trusts, and which we have already reported (0.44.0).
+   *
+   * The platform returns its suspect windows on EVERY poll while they are still within its retention,
+   * so this is what stops an hourly job raising the same alarm every hour for a day. Keyed on the
+   * window bounds rather than a count, because the count can grow as more of our messages land inside
+   * a window that is still open — and re-alarming because a number went from 9 to 11 would be noise
+   * about something the admin has already been told.
+   *
+   * Kept so the panel can go on showing it after the notification has scrolled away: a gap is the one
+   * WhatsApp fact an admin may need to act on days later ("did I miss a refund last Tuesday?").
+   */
+  getWhatsAppGaps(): { from: number; to: number; count: number; at: string }[] {
+    const raw = this.getJson<unknown>('whatsapp_gaps');
+    if (!Array.isArray(raw)) return [];
+    const out: { from: number; to: number; count: number; at: string }[] = [];
+    for (const v of raw.slice(0, 20)) {
+      if (!v || typeof v !== 'object') continue;
+      const o = v as Record<string, unknown>;
+      const from = typeof o.from === 'number' ? o.from : 0;
+      const to = typeof o.to === 'number' ? o.to : 0;
+      if (from <= 0 || to < from) continue;
+      out.push({
+        from,
+        to,
+        count: typeof o.count === 'number' ? Math.max(0, Math.round(o.count)) : 0,
+        at: typeof o.at === 'string' ? o.at : '',
+      });
+    }
+    return out;
+  }
+
+  /** Record a window as reported. Returns false if it already was, which is the caller's "don't
+   *  raise this again" — the check and the write are one call so a slow notification cannot let a
+   *  second poll slip past it. Newest first, bounded to 20. */
+  addWhatsAppGap(w: { from: number; to: number; count: number }): boolean {
+    const all = this.getWhatsAppGaps();
+    if (all.some((g) => g.from === w.from && g.to === w.to)) return false;
+    all.unshift({ from: w.from, to: w.to, count: w.count, at: new Date().toISOString() });
+    this.setRaw('whatsapp_gaps', JSON.stringify(all.slice(0, 20)));
+    return true;
   }
 
   getEmailStatus(): string {

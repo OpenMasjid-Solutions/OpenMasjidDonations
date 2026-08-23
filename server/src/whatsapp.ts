@@ -342,6 +342,67 @@ export async function whatsappOutcome(id: string): Promise<WhatsAppMessageOutcom
   }
 }
 
+/** A period during which our messages were reported `sent` but may never have arrived. */
+export interface WhatsAppSuspectWindow {
+  /** Epoch ms. */
+  from: number;
+  to: number;
+  /** How many of OUR messages were reported sent inside it — the platform scopes this to our app id. */
+  count: number;
+}
+
+/**
+ * Ask whether any of our messages fall in a period the platform no longer trusts (platform 0.52.0).
+ *
+ * WHY THIS EXISTS. A masjid's WhatsApp session expired on its own, the way WhatsApp Desktop signs
+ * itself out. The platform did not notice for over a day: the gateway kept accepting messages, every
+ * one came back `202 {queued}` and was then recorded `sent`, and none of them was delivered. The
+ * platform now spots that within ~10 minutes and HOLDS messages instead of losing them, but there is
+ * a residual window between the link dying and the detection — and the platform cannot resend those,
+ * because it deletes a message's contents the moment it hands it to the gateway (deliberately: a
+ * child's name and a family's fees should not sit on disk). Only the app that has the source data
+ * can do anything about them.
+ *
+ * On the READ budget (600/min), not the send budget, so polling this costs us no sends.
+ *
+ * A non-ok answer is `[]`, not an error, and that is the same reading as `whatsappOutcome`: a 404 is
+ * a platform too old to have the endpoint, and nothing about an absent answer is evidence that
+ * anything went wrong. This must never become "assume a gap" — the fallback has to be the quiet one,
+ * because the loud one would raise a false alarm on every older platform.
+ */
+export async function whatsappSuspect(): Promise<WhatsAppSuspectWindow[]> {
+  if (!fabricReady()) return [];
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch(`${config.omosBaseUrl}/api/fabric/whatsapp/suspect`, {
+      headers: headers(),
+      signal: ctrl.signal,
+      redirect: 'error',
+    });
+    clearTimeout(t);
+    if (!res.ok) return []; // 404 = a platform without the endpoint. Not evidence of a gap.
+    const j = (await res.json().catch(() => null)) as { windows?: unknown } | null;
+    const raw = Array.isArray(j?.windows) ? j.windows : [];
+    const out: WhatsAppSuspectWindow[] = [];
+    // Bounded and validated: this drives a notification to the masjid, so a malformed row must be
+    // dropped rather than rendered as "0 messages between 1970 and 1970".
+    for (const v of raw.slice(0, 50)) {
+      if (!v || typeof v !== 'object') continue;
+      const o = v as Record<string, unknown>;
+      const from = typeof o.from === 'number' ? o.from : 0;
+      const to = typeof o.to === 'number' ? o.to : 0;
+      const count = typeof o.count === 'number' ? Math.max(0, Math.round(o.count)) : 0;
+      if (from <= 0 || to < from || count <= 0) continue;
+      out.push({ from, to, count });
+    }
+    return out;
+  } catch (err) {
+    log.debug(`WhatsApp suspect check failed: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+}
+
 function isState(v: string): v is WhatsAppState {
   return v === 'queued' || v === 'sent' || v === 'failed' || v === 'expired';
 }

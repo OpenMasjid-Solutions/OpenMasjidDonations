@@ -144,7 +144,7 @@ Eight tabs behind a login, with a bottom dock like the rest of the family:
 | **Thank-you** | Write the on-screen thank-you, and design the emailed receipt — subject, heading, body, accent — with a **"send me a test"** |
 | **Large gifts** | The threshold, your wording, and the QR image for the bank-transfer suggestion |
 | **Payments** | **Several Stripe accounts** — add, edit, test the keys and remove accounts whose keys live on this device, and pick which **vaulted OpenMasjidOS account** is the default for the site. Any appeal can then be pointed at a different one, so Zakat and general funds settle separately; the currency; a clear **TEST MODE** badge; and the optional per-account webhook with the URL to paste into Stripe |
-| **Settings** | **Your masjid** (name, address, email, phone, website, currency) · **Appearance** (light/dark/follow-system, accent, logo, wallpaper, or mirror the dashboard) · **Notifications** — the six things the app can tell someone about, as a grid: add as many email addresses and WhatsApp numbers as you need, then tick what each person hears about. Your OpenMasjidOS inbox is a row of its own, and WhatsApp is kept separate because it sends from your masjid's own number and is never switched on for you. A **Test** beside every recipient · **Email receipts** on/off · **Public access** via a Cloudflare Tunnel |
+| **Settings** | **Your masjid** (name, address, email, phone, website, currency) · **Appearance** (light/dark/follow-system, accent, logo, wallpaper, or mirror the dashboard) · **Notifications** — the seven things the app can tell someone about, as a grid: add as many email addresses and WhatsApp numbers as you need, then tick what each person hears about. Your OpenMasjidOS inbox is a row of its own, and WhatsApp is kept separate because it sends from your masjid's own number and is never switched on for you. A **Test** beside every recipient · **Email receipts** on/off · **Public access** via a Cloudflare Tunnel |
 
 Plus a **guided first-run setup**, a top-right account menu (theme · settings · sign
 out) with a live clock, and a **What's new** dialog that tells you what changed after
@@ -163,9 +163,11 @@ the app, so it works with no internet.
 - **Email without credentials.** Receipts go out through the platform's email provider,
   so this app never sees your mail password or From address.
 - **WhatsApp, to the people who look after the money.** If your masjid runs the WhatsApp
-  gateway in OpenMasjidOS, any of the six notifications can also go to a number you enter — or
-  to a group your OpenMasjidOS admin has approved — and each one can go somewhere different, so
+  gateway in OpenMasjidOS, any of the notifications can also go to numbers you enter — or
+  to a group your OpenMasjidOS admin has approved — and you tick what each of them hears about, so
   refunds can reach the treasurer while a broken payment setup reaches whoever fixes things.
+  If WhatsApp ever stops delivering without saying so, the app notices and tells you when the gap
+  was — your records are never affected by it, only the messages.
   **Donors are never messaged and this app never asks anyone for a phone number.** WhatsApp is
   never switched on for you: it sends from your masjid's own number, so that has to be your
   choice. Messages are queued and spaced out to keep the number safe, which is why a test says

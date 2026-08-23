@@ -10,15 +10,18 @@
 // only way that fails loudly instead.
 //
 // THE OTHER THREE PROPERTIES:
-//  1. The OS channel is on by default for every event, and WhatsApp is off for every event. The
-//     first is Hasan's call and the second is not negotiable — an update must never start sending
-//     WhatsApp on a masjid's behalf. The known cost of the first is volume on `donation`, which
-//     fires per transaction; `minAmount` is the mitigation and lives beside it in the panel.
-//  2. A 0.43.0-dev WhatsApp configuration must survive the upgrade. Those masjids typed in real
-//     recipients; losing them would mean the refund notification they set up simply stops.
-//  3. The WhatsApp switch is separate from the number, and a row written before that switch existed
-//     reads a stored number as ON — otherwise the upgrade that added the switch would silently stop
-//     the messages it was meant to make clearer.
+//  1. The OS channel is on by default for every event; a new EMAIL address starts on the alerts that
+//     cost money or hide a problem; a new WHATSAPP row starts on nothing at all. The first is Hasan's
+//     call and the third is not negotiable — an update must never start sending from a masjid's own
+//     number on their behalf. The known cost of the first is volume on `donation`, which fires per
+//     transaction; the mitigation used to be a `minAmount` floor and is now simply that `donation` is
+//     one tick per person, which a new address does not get by default.
+//  2. A configuration from either older shape must survive the upgrade — the v0.43.0 per-event blob
+//     (one address and one number per event) and the 0.43.0-dev `whatsapp` key before it. Those
+//     masjids typed in real recipients; losing them would mean the refund notification they set up
+//     simply stops arriving, with nothing on screen to say so.
+//  3. A recipient's event list is filtered against NOTIFY_EVENTS on read, so a row left behind by a
+//     downgrade can never widen what it receives.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -70,9 +73,10 @@ test('the manifest ids are kebab-case, as the platform requires', () => {
 test('the OS channel is on by default for EVERY event', () => {
   // Hasan's call, made after the volume risk was put to him: `donation` fires per transaction, and
   // the platform defaults a newly-declared alert to email+webhook ON — so a masjid updating into
-  // this gets an email per donation. `minAmount` is the mitigation, which is why the donation row
-  // carries that field beside its switches. If this ever needs revisiting, change the default here
-  // and say so in the release note; do not let it drift.
+  // this gets an email per donation. The `minAmount` floor that used to mitigate that was removed in
+  // v0.44.0, also on his instruction; what carries it now is that `donation` is a per-recipient tick
+  // and a new address does not start on it. If this default ever needs revisiting, change it here and
+  // say so in the release note; do not let it drift.
   for (const event of NOTIFY_EVENTS) {
     assert.equal(NOTIFY_DEFAULT.events[event].os, true, `${event} should default to the channel the masjid already has`);
   }
@@ -400,4 +404,68 @@ test('the "and N more" sentence is only there when there were more', () => {
   assert.equal(alsoHeld(0), '');
   assert.match(alsoHeld(1), /1 more time since/);
   assert.match(alsoHeld(41), /41 more times since/);
+});
+
+// ── WhatsApp gap windows (platform 0.52.0) ───────────────────────────────────
+//
+// The platform can now report periods when a masjid's WhatsApp link had silently expired: messages
+// were accepted, reported `sent`, and never delivered. It cannot resend them (it deletes a message's
+// contents on handover, deliberately), so it tells each app and each app decides.
+//
+// THIS APP DOES NOT RESEND — every WhatsApp message it sends is an admin notice about something
+// already in the ledger, no donor is ever messaged, and `paymentFailed`/`tuitionFailed` are already
+// self-healing. So the whole behaviour under test is "report each window exactly once".
+
+test('a gap window is news exactly once, however often the platform re-reports it', () => {
+  // The platform returns a window on EVERY poll while it is inside its retention, and this job runs
+  // hourly — so without this, one expired link is one alarm per hour for a day.
+  const s = new Store(':memory:');
+  const w = { from: 1755900000000, to: 1755911000000, count: 9 };
+  assert.equal(s.addWhatsAppGap(w), true, 'the first sighting is news');
+  assert.equal(s.addWhatsAppGap(w), false, 'the second is not');
+  assert.equal(s.getWhatsAppGaps().length, 1);
+});
+
+test('a growing count on the SAME window is not a second alarm', () => {
+  // A window that is still open accumulates messages. Re-alarming because 9 became 11 would be noise
+  // about something the admin has already been told, so the key is the bounds and not the count.
+  const s = new Store(':memory:');
+  s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9 });
+  assert.equal(s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 11 }), false);
+  assert.equal(s.getWhatsAppGaps()[0].count, 9, 'and the first figure is what was reported');
+});
+
+test('a genuinely different window IS a second alarm', () => {
+  const s = new Store(':memory:');
+  s.addWhatsAppGap({ from: 1755900000000, to: 1755911000000, count: 9 });
+  assert.equal(s.addWhatsAppGap({ from: 1755990000000, to: 1755999000000, count: 2 }), true);
+  const all = s.getWhatsAppGaps();
+  assert.equal(all.length, 2);
+  assert.equal(all[0].from, 1755990000000, 'newest first, so the panel leads with the recent one');
+});
+
+test('gaps are bounded and malformed rows are dropped rather than rendered', () => {
+  // This drives a sentence shown to a masjid; "0 messages between 1970 and 1970" must be impossible.
+  const s = new Store(':memory:');
+  for (let i = 0; i < 30; i += 1) s.addWhatsAppGap({ from: 1_700_000_000_000 + i * 1000, to: 1_700_000_000_500 + i * 1000, count: 1 });
+  assert.ok(s.getWhatsAppGaps().length <= 20, 'bounded');
+  (s as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db
+    .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
+    .run('whatsapp_gaps', JSON.stringify([{ from: 0, to: 0, count: 5 }, { from: 5, to: 1, count: 1 }, 'nonsense', null]));
+  assert.deepEqual(s.getWhatsAppGaps(), [], 'a window with no real bounds is not a window');
+});
+
+test('the gap event is a declared alert, like every other event', () => {
+  // Covered by the contract test at the top of this file too, but named here so a future rename that
+  // misses the manifest fails against the thing it broke rather than against a generic loop.
+  assert.equal(NOTIFY_ALERT_ID.whatsappGap, 'whatsapp-gap');
+  assert.ok(declaredAlertIds().includes('whatsapp-gap'), 'the platform 400s an id it was not told about');
+});
+
+test('a new email address hears about a gap, and a new WhatsApp row still does not', () => {
+  // A gap is news about the notification channel itself, so it belongs with the alerts that hide a
+  // problem. It must NOT make WhatsApp default to on — that rule has no exceptions (§13), and this is
+  // the tempting one, since a gap is a WhatsApp fact.
+  assert.ok(NEW_EMAIL_EVENTS.includes('whatsappGap'), 'an address should hear that its channel broke');
+  assert.deepEqual(NOTIFY_DEFAULT.whatsapps, [], 'and no number is ever configured for a masjid');
 });

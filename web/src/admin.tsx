@@ -2325,6 +2325,7 @@ const NOTIFY_COLS: { id: NotifyEventId; short: string; label: string; hint: stri
   { id: 'paymentFailed', short: 'Payments broken', label: 'A payment couldn’t be started', hint: 'Stripe refused to set a payment up — usually keys, or Stripe itself being down. At most one an hour.' },
   { id: 'tuitionFailed', short: 'Tuition not recorded', label: 'A tuition payment wasn’t recorded', hint: 'A card payment succeeded but OpenMasjid Students rejected it. The money is safe; please check.' },
   { id: 'donationRecovered', short: 'Donation found', label: 'A donation was found and added', hint: 'A payment that went through but never reached your records. Your totals will go up.' },
+  { id: 'whatsappGap', short: 'WhatsApp missed some', label: 'Some WhatsApp messages may not have arrived', hint: 'Your WhatsApp link had expired without OpenMasjidOS noticing. Your records are unaffected — only the messages went missing.' },
 ];
 
 /**
@@ -2621,6 +2622,24 @@ function NotificationsCard() {
           </button>
         </p>
       )}
+      {/* A period the platform has told us it no longer trusts: messages it reported as sent, that a
+          dead WhatsApp link meant were never delivered. Shown here as well as raised as an alert,
+          because "did I miss a refund last Tuesday?" is a question asked days later. Deliberately
+          says nothing was lost, because nothing was — and says we did not re-send, because an admin
+          who assumes we did would stop looking. */}
+      {(wa.gaps ?? []).map((g) => (
+        <p className="form-error notify-outcome" key={`${g.from}-${g.to}`}>
+          <AlertTriangle size={13} aria-hidden="true" />{' '}
+          <span>
+            <b>{g.count === 1 ? 'A message' : `${g.count} messages`} may not have arrived.</b>{' '}
+            Your WhatsApp connection had stopped working without OpenMasjidOS noticing, between{' '}
+            {new Date(g.from).toLocaleString()} and {new Date(g.to).toLocaleString()}. Your records are
+            unaffected — every donation and refund from then is in the Donations tab as usual, so there is
+            nothing to put right. We haven’t re-sent them: they were all notices about things already in
+            your records, and a burst of them to a newly re-linked number risks getting it blocked.
+          </span>
+        </p>
+      ))}
       <RecipientMatrix
         kind="whatsapp" rows={value.whatsapps} dials={value.dials} outcomes={wa.lastOutcomes} groups={wa.groups}
         disabled={saving || !wa.available}

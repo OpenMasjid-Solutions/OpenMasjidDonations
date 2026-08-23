@@ -360,3 +360,81 @@ test('budget: the window slides rather than resetting on the hour', () => {
   assert.equal(budget.take('x'), true);
   assert.equal(budget.take('x'), false);
 });
+
+// ── The suspect-window endpoint (platform 0.52.0) ────────────────────────────
+//
+// A masjid's WhatsApp session expired on its own; the platform did not notice for over a day. Every
+// message came back `202 {queued}`, was recorded `sent`, and was never delivered. The platform now
+// spots that in ~10 minutes and HOLDS messages, but it cannot resend what fell in the window — it
+// deletes a message's contents on handover, deliberately — so it reports the window instead.
+//
+// What this app does with a window is a domain decision (it does not resend; see the gap watch in
+// index.ts). What is pinned HERE is the wire reading, and the load-bearing half of it is the
+// FALLBACK DIRECTION: an absent or broken answer must be "nothing to worry about", never "assume a
+// gap". The loud fallback would raise a false alarm on every platform too old to have the endpoint.
+
+test('a suspect window is read off the wire as given', async () => {
+  reply({ windows: [{ from: 1755900000000, to: 1755911000000, count: 9 }] });
+  const out = await wa.whatsappSuspect();
+  assert.deepEqual(out, [{ from: 1755900000000, to: 1755911000000, count: 9 }]);
+  assert.match(calls[0].url, /\/api\/fabric\/whatsapp\/suspect$/);
+  assert.equal(calls[0].method, 'GET');
+  assert.ok(calls[0].secret, 'the app secret must be sent, like every other Fabric route');
+});
+
+test('the normal answer is an empty array and means nothing is wrong', async () => {
+  reply({ windows: [] });
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+});
+
+test('a 404 is a platform without the endpoint, NOT a gap', async () => {
+  // The same reading as /status/:id. Getting this backwards would alarm every masjid on an older
+  // platform, about nothing, for ever.
+  reply({}, 404);
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+});
+
+test('a throttle or an outage is not a gap either', async () => {
+  reply({}, 429);
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+  reply({}, 503);
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+});
+
+test('a network failure is swallowed as "nothing to worry about"', async () => {
+  const boom = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error('network down'); }) as typeof globalThis.fetch;
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+  globalThis.fetch = boom;
+});
+
+test('a malformed window is dropped rather than shown to a masjid as nonsense', async () => {
+  // This drives a sentence an admin reads. "0 messages between 1970 and 1970" must be impossible, and
+  // so must a window that ends before it starts.
+  reply({
+    windows: [
+      { from: 0, to: 5, count: 3 },                                    // no real start
+      { from: 1755911000000, to: 1755900000000, count: 3 },            // ends before it starts
+      { from: 1755900000000, to: 1755911000000, count: 0 },            // nothing of ours in it
+      { from: 1755900000000, to: 1755911000000 },                      // no count at all
+      'nonsense',
+      null,
+      { from: 1755990000000, to: 1755999000000, count: 2 },            // the only good one
+    ],
+  });
+  assert.deepEqual(await wa.whatsappSuspect(), [{ from: 1755990000000, to: 1755999000000, count: 2 }]);
+});
+
+test('a garbage body, or a missing windows key, is not a gap', async () => {
+  reply({ windows: 'soon' });
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+  reply({});
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+  reply(null);
+  assert.deepEqual(await wa.whatsappSuspect(), []);
+});
+
+test('the window list is bounded, so a runaway platform cannot flood the panel', async () => {
+  reply({ windows: Array.from({ length: 200 }, (_, i) => ({ from: 1_700_000_000_000 + i * 1000, to: 1_700_000_000_500 + i * 1000, count: 1 })) });
+  assert.ok((await wa.whatsappSuspect()).length <= 50);
+});

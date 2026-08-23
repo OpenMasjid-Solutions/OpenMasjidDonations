@@ -46,6 +46,7 @@ import {
   whatsappStatus,
   whatsappUnavailableMessage,
   whatsappOutcome,
+  whatsappSuspect,
   makeSendBudget,
 } from './whatsapp';
 import {
@@ -1135,6 +1136,10 @@ async function main(): Promise<void> {
         lastOutcomes: store.getWhatsAppOutcomes(),
         /** How many sends our own caps have held back since boot, across every destination. */
         heldBack: waBudget.totalSuppressed() + waTotalBudget.totalSuppressed(),
+        /** Periods the platform no longer trusts — messages reported sent that may never have
+         *  arrived. Shown on the screen as well as raised as an alert, because a gap is the one
+         *  WhatsApp fact an admin may need to look up days later. */
+        gaps: store.getWhatsAppGaps(),
       },
     };
   };
@@ -3957,6 +3962,72 @@ async function main(): Promise<void> {
       } catch { /* fail soft — never let the receipt outbox crash the app */ }
     };
     const iv = setInterval(nonOverlapping(receiptOutbox), 60_000);
+    iv.unref?.();
+  }
+
+  /**
+   * WHATSAPP GAP WATCH (platform 0.52.0).
+   *
+   * The platform can now tell us about periods when a masjid's WhatsApp link had silently expired:
+   * messages were accepted, reported `sent`, and never delivered. It cannot resend them — it deletes
+   * a message's contents the moment it hands them over, on purpose — so only the app that still has
+   * the source data can do anything, and the platform asks each app to decide what.
+   *
+   * THIS APP DOES NOT RESEND, AND THAT IS A DOMAIN ANSWER RATHER THAN LAZINESS.
+   *
+   * Every WhatsApp message this app sends is an ADMIN NOTIFICATION about something already recorded.
+   * No donor is ever messaged — the app collects no donor phone number at all — so nobody outside the
+   * masjid is waiting on one of these, and §13's "nothing depends on the message arriving" holds
+   * exactly. Taking the six events one at a time:
+   *
+   *  • `donation` / `donationRecovered` — the money is in the ledger, the totals and the charts. This
+   *    is also by far the highest-volume event (one per transaction), so re-sending a day of them to a
+   *    freshly re-linked number is precisely the volume risk the platform warns about, in exchange for
+   *    no information the admin cannot already see.
+   *  • `refund` — in the ledger and in the audit log, with who did it.
+   *  • `planStopped` — the plan is stopped at Stripe and shown in the Monthly tab.
+   *  • `paymentFailed` — self-healing, and re-sending it is actively misleading. It is `burst()`-gated
+   *    to one an hour, so if donations are STILL broken the next attempt raises it again; if they have
+   *    been fixed, a re-send is an alarm about a solved problem.
+   *  • `tuitionFailed` — the thing that actually matters is already retried by the record-payment
+   *    outbox for three days. A stale copy of the warning adds nothing to that.
+   *
+   * So a re-send would mean re-delivering old copies of news that is either visible in the panel or
+   * already being retried by better machinery. What an admin genuinely needs is to know that a gap
+   * happened, when, and that their records are unaffected — so we raise exactly ONE notification per
+   * window, whatever its count, and keep it on the settings screen afterwards.
+   *
+   * Hourly, plus one pass shortly after startup (the boot pass is what catches a gap that happened
+   * while the box was off). Cheap: the platform puts this on the read budget, not the send budget, and
+   * the normal answer is an empty array.
+   */
+  {
+    const GAP_POLL_MS = 3600_000;
+    const gapWatch = async (): Promise<void> => {
+      if (!ssoConfigured()) return;
+      const windows = await whatsappSuspect();
+      for (const w of windows) {
+        // The platform re-reports a window on every poll while it is inside its retention, so the
+        // store decides whether this is news. Check-and-write in one call, before the notification,
+        // so a slow send cannot let the next poll raise the same window twice.
+        if (!store.addWhatsAppGap(w)) continue;
+        const when = `${new Date(w.from).toLocaleString()} and ${new Date(w.to).toLocaleString()}`;
+        log.warn(`WhatsApp gap reported by the platform: ${w.count} message(s) between ${w.from} and ${w.to}`);
+        raise(
+          'whatsappGap',
+          'Some WhatsApp messages may not have arrived',
+          `Your masjid’s WhatsApp connection had stopped working without OpenMasjidOS noticing, so ${w.count === 1 ? 'a message' : `${w.count} messages`} sent between ${when} ${w.count === 1 ? 'was' : 'were'} reported as sent but never delivered.\n\n` +
+            'Nothing was lost. Every donation, refund and monthly change from that period is in your records exactly as normal — it was only the messages that went missing, so there is nothing to put right. ' +
+            'If you want to see what you missed, the Donations tab and the Overview cover that period as usual.\n\n' +
+            'We have deliberately not re-sent them: they were all notices about things already in your records, and re-sending a day of them to a phone that has only just been re-linked is the quickest way to get that number blocked.',
+          'warning',
+        );
+      }
+    };
+    // A short delay rather than immediately: at boot the Fabric config watcher may not have settled,
+    // and an unconfigured platform would just answer nothing.
+    setTimeout(() => void gapWatch().catch(() => {}), 90_000).unref?.();
+    const iv = setInterval(nonOverlapping(gapWatch), GAP_POLL_MS);
     iv.unref?.();
   }
 }

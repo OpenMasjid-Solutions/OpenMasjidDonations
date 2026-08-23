@@ -357,13 +357,16 @@ export interface WhatsAppAvailability {
   outcomes?: boolean;
   /** Per event id, what became of the last message — only events with something to report. */
   lastOutcomes?: Record<string, WhatsAppEventOutcome>;
-  /** How many messages the app's OWN hourly cap has held back since it started. The platform
+  /** How many messages the app's OWN hourly caps have held back since it started. The platform
    *  stopped limiting anything in 0.51.1, so this bound is ours, and worth admitting to. */
   heldBack?: number;
+  /** Periods when the masjid's WhatsApp link had expired without OpenMasjidOS noticing, so
+   *  messages were reported sent and never delivered (platform 0.52.0). Newest first. */
+  gaps?: { from: number; to: number; count: number; at: string }[];
 }
 
 /** Every notification this app can raise. The ids are the app's own; the labels live in the UI. */
-export type NotifyEventId = 'donation' | 'donationRecovered' | 'refund' | 'planStopped' | 'paymentFailed' | 'tuitionFailed';
+export type NotifyEventId = 'donation' | 'donationRecovered' | 'refund' | 'planStopped' | 'paymentFailed' | 'tuitionFailed' | 'whatsappGap';
 
 /** Whether an event is raised as an OpenMasjidOS alert → the admin's own email + webhook. On by
  *  default. An AND with their matrix in OpenMasjidOS → Settings → Alerts, which the UI must say out
