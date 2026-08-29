@@ -19,6 +19,7 @@ import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
 import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NEW_EMAIL_EVENTS, NOTIFY_EVENT_LABEL } from './store';
 import { DIALS, DEFAULT_DIAL, toE164 } from './phone';
+import { recoveryBreakdown } from './notify';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch, WhatsAppEventOutcome } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
@@ -2749,8 +2750,16 @@ async function main(): Promise<void> {
         if (g.allow) {
           raise(
             'paymentFailed',
-            'A donation payment failed to start',
-            `Stripe rejected a payment setup — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.${alsoHeld(g.skipped)}`,
+            `A donation payment failed to start on “${c.title}”`,
+            // The appeal is named because "a payment failed" gives an admin nowhere to look. But the
+            // GATE IS GLOBAL (`paymentFailed:donation`, not per campaign), because the usual cause —
+            // expired keys, or Stripe itself — breaks every appeal at once, and one message an hour is
+            // the point of the gate. So the appeal named is where it was NOTICED, and the sentence has
+            // to say that: naming one appeal while silently suppressing the others would leave an
+            // admin fixing that one and believing they were done. The genuinely appeal-specific
+            // failure has its own per-campaign alert (`alertAccountRefusal`), which correctly says the
+            // others are unaffected.
+            `Stripe rejected a payment setup on “${c.title}” — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments. That’s where it was noticed; if the cause is your keys or Stripe itself, every appeal is affected.${alsoHeld(g.skipped)}`,
             'error',
           );
         }
@@ -3095,10 +3104,13 @@ async function main(): Promise<void> {
       // log — what the gate drops is the repetition, never the record.
       const g = burst('tuitionFailed', HOUR);
       if (g.allow) {
+        // Which page it came in on. Still no Student ID and no child's name (§13 bans both from
+        // anything that leaves this app) — an appeal title names a page, never a family.
+        const failedOn = store.getCampaign(sp.campaignId)?.title ?? '';
         raise(
           'tuitionFailed',
           'A tuition payment wasn’t recorded in Students',
-          `A card payment succeeded (${pi}) but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.${alsoHeld(g.skipped)}`,
+          `A card payment succeeded (${pi})${failedOn ? ` on “${failedOn}”` : ''} but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.${alsoHeld(g.skipped)}`,
           'warning',
         );
       } else {
@@ -3362,8 +3374,10 @@ async function main(): Promise<void> {
         if (g.allow) {
           raise(
             'paymentFailed',
-            'A tuition payment failed to start',
-            `Stripe rejected a payment setup — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.${alsoHeld(g.skipped)}`,
+            `A tuition payment failed to start on “${c.title}”`,
+            // Named for the same reason as the donation path, and with the same caveat: the gate is
+            // global, so this is where it was noticed rather than necessarily the only page affected.
+            `Stripe rejected a payment setup on “${c.title}” — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments. That’s where it was noticed; if the cause is your keys or Stripe itself, every page is affected.${alsoHeld(g.skipped)}`,
             'error',
           );
         }
@@ -3950,10 +3964,16 @@ async function main(): Promise<void> {
         const totals = new Map<string, number>();
         for (const f of found) totals.set(f.currency, (totals.get(f.currency) ?? 0) + f.amountMinor);
         const money = [...totals].map(([ccy, minor]) => formatMoney(minor, ccy)).join(' + ');
+        // AND A BREAKDOWN BY APPEAL. The batch used to report only a count and a total, which
+        // answers "how much" and not "which fund went up" — and the second question is the one a
+        // treasurer reconciling a Zakat account actually has. The single-recovery branch above has
+        // always named its appeal; this is the one that dropped it. The grouping is a pure function in
+        // notify.ts so the sentence a masjid reads can be tested.
+        const breakdown = recoveryBreakdown(found, formatMoney);
         raise(
           'donationRecovered',
           `${found.length} donations were found and added`,
-          `${found.length} donations totalling ${money} had been paid but never recorded — they are now in your donations, each dated when its money arrived. Your totals will go up by that much.`,
+          `${found.length} donations totalling ${money} had been paid but never recorded — they are now in your donations, each dated when its money arrived. Your totals will go up by that much.${breakdown}`,
           'success',
         );
       }

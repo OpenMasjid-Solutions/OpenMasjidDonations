@@ -26,6 +26,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { groupRecoveries, recoveryBreakdown, type Recovered } from './notify';
 import { Store, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NOTIFY_DEFAULT, NEW_EMAIL_EVENTS, NOTIFY_EVENT_LABEL, type NotifyEventId } from './store';
 
 const MANIFEST = path.join(__dirname, '..', '..', 'manifest.yaml');
@@ -585,4 +586,94 @@ test('every event has a label, so the gap sentence can always name what was miss
     assert.ok(!label.endsWith('.'), `${e}'s label should not be a full sentence`);
     assert.ok(label.split(/\s+/).join(' ') === label, `${e}'s label must be a single clean line`);
   }
+});
+
+// ── Naming the appeal in a recovery notification ─────────────────────────────
+//
+// "3 donations totalling $140 were found" answers how much and not WHICH FUND WENT UP, and the second
+// question is the one a treasurer reconciling a Zakat account actually has. The single-recovery
+// message always named its appeal; the batch dropped it, which is what these pin.
+
+/** A plain money formatter, so the tests read the sentence a masjid would. */
+const money = (minor: number, ccy: string): string => `${ccy === 'usd' ? '$' : ccy === 'gbp' ? '£' : ''}${(minor / 100).toFixed(2)}`;
+const rec = (campaign: string, amountMinor: number, currency = 'usd'): Recovered => ({ campaign, amountMinor, currency });
+
+test('the breakdown names every appeal the money landed in', () => {
+  const out = recoveryBreakdown([rec('Zakat', 5000), rec('General Fund', 2500), rec('Zakat', 4000)], money);
+  assert.match(out, /Zakat/);
+  assert.match(out, /General Fund/);
+});
+
+test('donations to the same appeal are ONE row, counted and summed', () => {
+  const groups = groupRecoveries([rec('Zakat', 5000), rec('Zakat', 4000), rec('General Fund', 2500)]);
+  assert.equal(groups.length, 2);
+  const zakat = groups.find((g) => g.campaign === 'Zakat')!;
+  assert.equal(zakat.n, 2);
+  assert.equal(zakat.minor, 9000, 'the appeal total must be the sum, not the last one');
+});
+
+test('the biggest appeal comes first, so a cut list keeps the money that matters', () => {
+  const groups = groupRecoveries([rec('Small', 100), rec('Big', 90000), rec('Middle', 5000)]);
+  assert.deepEqual(groups.map((g) => g.campaign), ['Big', 'Middle', 'Small']);
+});
+
+test('two currencies on the same appeal never sum into a figure true of no money anywhere', () => {
+  // A masjid with two appeals on two Stripe accounts can genuinely have two currencies in one pass.
+  const groups = groupRecoveries([rec('Zakat', 5000, 'usd'), rec('Zakat', 5000, 'gbp')]);
+  assert.equal(groups.length, 2, 'same appeal, different currency, must stay two rows');
+  assert.deepEqual(groups.map((g) => g.minor), [5000, 5000]);
+});
+
+test('an appeal title containing punctuation cannot merge two appeals', () => {
+  // The key is JSON, not a delimiter — an admin-typed title may contain anything, and a naive
+  // `${campaign}|${currency}` would let a title ending in a separator swallow the next appeal.
+  const groups = groupRecoveries([rec('Ramadan | usd', 100), rec('Ramadan', 200)]);
+  assert.equal(groups.length, 2, 'two distinct appeals must stay distinct');
+});
+
+test('singular and plural both read correctly', () => {
+  assert.match(recoveryBreakdown([rec('Zakat', 5000)], money), /1 donation,/);
+  assert.ok(!/1 donations/.test(recoveryBreakdown([rec('Zakat', 5000)], money)));
+  assert.match(recoveryBreakdown([rec('Zakat', 5000), rec('Zakat', 100)], money), /2 donations,/);
+});
+
+test('a long list is CUT and what was cut is counted, never silently dropped', () => {
+  // The sweep is bounded to 25 rows, so this is at most 25 appeals — but a WhatsApp message that long
+  // stops being read. A truncated list that looked complete would be the same mistake as a suspect
+  // window implying it had named every lost message.
+  const many = Array.from({ length: 10 }, (_, i) => rec(`Appeal ${i}`, (10 - i) * 1000));
+  const out = recoveryBreakdown(many, money, 6);
+  assert.match(out, /and 4 other appeals\.$/);
+  assert.match(out, /Appeal 0/, 'the biggest is kept');
+  assert.ok(!out.includes('Appeal 9'), 'the smallest is what gets cut');
+});
+
+test('exactly one appeal over the cap says "1 other appeal", not "1 other appeals"', () => {
+  const many = Array.from({ length: 7 }, (_, i) => rec(`Appeal ${i}`, (7 - i) * 1000));
+  assert.match(recoveryBreakdown(many, money, 6), /and 1 other appeal\.$/);
+});
+
+test('a list that fits has no "and N others" tail at all', () => {
+  const out = recoveryBreakdown([rec('Zakat', 5000), rec('General Fund', 2500)], money, 6);
+  assert.ok(!out.includes('other'), out);
+  assert.match(out, /\.$/);
+});
+
+test('an empty pass produces nothing, so the caller can always concatenate it', () => {
+  assert.equal(recoveryBreakdown([], money), '');
+  assert.deepEqual(groupRecoveries([]), []);
+});
+
+test('the breakdown starts on its own line, so it never runs into the sentence before it', () => {
+  assert.ok(recoveryBreakdown([rec('Zakat', 5000)], money).startsWith('\n\n'));
+});
+
+test('PRIVACY: the breakdown carries appeals and amounts, never a donor', () => {
+  // §13 — these notifications reach an address outside the masjid's admin account, and a WhatsApp
+  // message is forwardable. An appeal title names a fund; nothing here may name a person. The
+  // function is given no donor field at all, which makes that structural rather than a habit.
+  const out = recoveryBreakdown([rec('Zakat', 5000)], money);
+  assert.match(out, /Zakat/);
+  const fields = Object.keys(groupRecoveries([rec('Zakat', 5000)])[0]);
+  assert.deepEqual(fields.sort(), ['campaign', 'currency', 'minor', 'n'], 'no field here may carry a donor');
 });
