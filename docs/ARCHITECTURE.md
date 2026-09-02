@@ -889,21 +889,38 @@ through the alerts matrix if the admin wants it there. So:
 - nothing auth-critical rides on it, ever. It is an unofficial client whose number can be restricted
   or banned without notice, and email has a real provider behind it.
 
-### `queued` is not `sent`, and the pacing is why
+### `queued` is not `sent`, and the pacing is ours now
 
-Ban risk attaches to the **number**, not to whoever sent a message — so one platform-wide queue paces
-every app at once: randomised 6–20s gaps, per-recipient cooldowns, hourly and daily caps, a warm-up
-ramp for a freshly linked number, and quiet hours that queue rather than drop. A success is
-`202 {queued:true}` and there is no delivery receipt.
+Ban risk attaches to the **number**, not to whoever sent a message, and the number belongs to the
+masjid and is shared with every other app on the box. A blocked one cannot be recovered.
 
-The panel therefore says **"Queued ✓ — … it may take a few minutes to arrive"** after a test, never
-"Sent". An admin told "sent" who then watches a silent phone concludes the feature is broken, when
-the truth is that it is working exactly as designed.
+**The platform used to carry that bound and no longer does.** Until 0.51.1 one platform-wide queue
+paced every app at once — randomised 6–20s gaps, per-recipient cooldowns, hourly and daily caps, a
+warm-up ramp, quiet hours that queued rather than dropped. All of it was removed; a message now leaves
+within seconds. So the bound lives here, in two budgets (`makeSendBudget`):
 
-The shared daily cap is also why the "a donation was received" event has a **`minAmount` floor**
-(default 0 = every donation, but prominent in the UI). A busy Friday of small gifts would otherwise
-spend the masjid's entire allowance on good news and push the refund and payment-failure messages —
-the ones that need someone to act — behind hours of queue.
+- **20/hour per destination**, which bounds what any one person receives; and
+- **40/hour across the whole gateway** (`waTotalBudget`), which bounds what the masjid's number
+  *sends*. Added in v0.44.0 with recipient lists: five numbers on the donation event is five messages
+  per donation, so the per-destination cap alone would have quietly become 100/hour. It is checked
+  **after** the per-destination one, so a single destination cannot spend the shared ceiling without
+  also spending its own.
+
+Both feed one held-back figure, which the settings screen shows. An admin whose phone went quiet has
+to be able to find out it was deliberate.
+
+A success is still `202 {queued:true}` and there is still no delivery receipt, so the panel says
+**"Queued ✓"** after a test and never "Sent" — an admin told "sent" who then watches a silent phone
+concludes the feature is broken. Since platform 0.52.0 a queued message may also wait a very long time
+*on purpose*: when the link is down the platform **holds** messages and an admin releases them after
+re-linking the phone. Nothing here may assume a `202` resolves quickly.
+
+There used to be a **`minAmount` floor** on the per-donation event as the other half of this bound. It
+was removed in v0.44.0 on Hasan's instruction, with the trade put to him first; what replaces it is
+per-recipient and explicit — `donation` is one tick in the matrix, a new email address does not start
+on it, and a new WhatsApp row starts on nothing at all. What is genuinely lost is "tell me, but only
+the big ones". If a masjid reports being buried, one site-wide floor is a smaller change than
+reinstating the old per-event field.
 
 ### One recipient per call, and never a client-chosen target
 
@@ -1066,22 +1083,43 @@ donation without having asked, and during a Ramadan appeal that is hundreds. Ale
 rate-limited on a bucket shared with the platform's own alerts and with this app's, so a flood of good
 news can push `payment-failed` — *nobody can give at all* — behind it.
 
-The decision was to keep the default consistent (every event on) and rely on **`minAmount`**, which is
-why the donation row carries "only if it's at least…" beside its switches rather than in a sub-menu.
-If a masjid reports being buried, that field — or turning that one row off — is the answer. Changing
-the default is not, without saying so in a release note.
+The decision was to keep the default consistent (every event on). The mitigation was a **`minAmount`**
+floor beside the donation row; that was removed in v0.44.0, also on Hasan's instruction, and what
+carries the risk now is that `donation` is **one tick per recipient** and a new email address does not
+start subscribed to it (`NEW_EMAIL_EVENTS`). If a masjid reports being buried, unticking that row for
+the people who do not need every gift is the answer. Changing the default is not, without saying so in
+a release note.
 
-WhatsApp is the opposite and is not a matter of taste: **off for every event**, always. An update must
-never begin sending messages from a masjid's phone number on their behalf.
+WhatsApp is the opposite and is not a matter of taste: a new row starts on **nothing at all**. An
+update must never begin sending messages from a masjid's phone number on their behalf.
 
-### The WhatsApp switch is separate from the number
+### Recipients are lists, and a row is an address rather than an account (v0.44.0)
 
-`whatsappOn` is its own boolean rather than "a non-empty number means on". Two reasons: an admin can
-mute the channel for a month without losing what they typed, and a tick box gets to mean what a tick
-box normally means. Both must be true to send, clearing the number also clears the switch (so a tick
-never sits beside an empty field), and a row written before the switch existed reads a stored number
-as **on** — otherwise the upgrade that added the switch would have silently stopped the very messages
-it was meant to make clearer.
+The model was one address and one WhatsApp destination **per event**, with a `whatsappOn` boolean
+beside the number. It is now two lists — `NotifySettings.emails` and `.whatsapps` — of
+`{ id, address, label, events[] }`, drawn as a matrix: recipients down the side, the seven events
+across the top, a tick box at each crossing. The shape follows OpenMasjidStudents, and so does the
+reasoning: **the person who must know that a monthly donor stopped is often not the person who logs
+in** — the treasurer, the imam, a trustee — so a row grants no access to anything.
+
+Three properties are load-bearing:
+
+- **`events` is filtered against `NOTIFY_EVENTS` on read**, so a row left behind by a downgrade can
+  never widen what it receives, and the stored order is normalised so a tick always means the column
+  it appears under.
+- **The two lists have different defaults, and that is not an inconsistency.** A new *email* address
+  starts on the alerts that cost money or hide a problem (`NEW_EMAIL_EVENTS`); a new *WhatsApp* row
+  starts on nothing, because that one sends from the masjid's own number.
+- **`whatsappOn` is gone with the shape it belonged to.** Its job — an empty tick list rather than a
+  lost number — is now the row's `events` array. The migration from the per-event blob deduplicates
+  (one treasurer typed against three events becomes one row on three events, not three rows each
+  sent the same message) and deliberately **drops** a number that was stored with the switch off,
+  rather than carrying it over unticked: it would otherwise reappear as a destination the admin does
+  not remember, attached to their own phone number.
+
+WhatsApp outcomes are keyed `<recipientId>|<event>` for the same reason. Keyed on the event alone —
+which was right while one event had one destination — the second recipient's refusal overwrote the
+first's and the panel showed one row's problem against everybody.
 
 ### Two floods that were already there
 
@@ -1100,12 +1138,73 @@ makes it load-bearing for a third party. Adding `${donorName}` to a title would 
 audit line records counts only, never an address and **not a masked number either**: in a small
 community the last two digits still name somebody.
 
-### Refuse, never repair — including a leading zero
+### Refuse, never repair — and the country is chosen, never inferred
 
 An address must be exactly one address: the platform's own check is a strict single-address regex and
 a comma list comes back `bad_recipient`, which `raise()` swallows, so an admin who types
-`treasurer@x, chair@x` would get total silence. And a number keeps the country-code rule, now with the
-check that makes the error message honest: **a leading zero is a national trunk prefix, never a
-country code.** The length floor alone accepts `07700900123` — eleven digits — and the platform would
-address it as `07700900123@c.us`, somebody else's number or nobody's. Found by probing the live route,
-not by reading the code.
+`treasurer@x, chair@x` would get total silence. That is also why a recipient LIST is a list of rows
+rather than one comma-separated field.
+
+For numbers, `toWhatsAppDigits` keeps the country-code rule: **a leading zero is a national trunk
+prefix, never a country code.** The length floor alone accepts `07700900123` — eleven digits — and the
+platform would address it as `07700900123@c.us`, somebody else's number or nobody's. Found by probing
+the live route, not by reading the code.
+
+**That rule has a blind spot, and for a year it was live.** It catches a British admin because a trunk
+prefix is a zero. It cannot catch the American equivalent: a bare ten-digit `3135550142` has no leading
+zero, so it passed — and read as E.164 that is **+31, the Netherlands**, number 35550142. A masjid in
+Michigan would have been sending its donation figures to a stranger in Amsterdam, and nothing on any
+screen would have looked wrong.
+
+The fix (v0.44.0) is not a cleverer parser. A single text box cannot carry a fact it was never given,
+so the panel now takes the **country from a dropdown** and the national number separately, the wire
+carries `dialId` + `national`, and `server/src/phone.ts`'s `toE164` composes the two. The dial code is
+then something an admin picked from a list. `toWhatsAppDigits` is unchanged and remains the **final
+gate**; `toE164` feeds it rather than replacing it. Three things must not be undone:
+
+- the panel must never offer a single combined number field again — that *is* the bug;
+- a trunk zero may be stripped only **after** a country is known, which is what makes it a correction
+  rather than a guess; and
+- an already-prefixed paste must be de-duplicated rather than doubled, since `1` + `13135550142` is a
+  plausible twelve-digit number belonging to nobody.
+
+`phone.test.ts` pins all of it, including the original bug as a regression witness. Note the split:
+`server/src/phone.ts` **validates** and `web/src/phone.ts` **formats**, and the formatting half was
+deliberately deleted from the server in v0.44.0 — it was dead, and its tests made the suite look like
+it covered the formatter a masjid sees when it covered a second copy.
+
+### A message reported `sent` may never have arrived (v0.44.0, platform 0.52.0)
+
+A masjid's WhatsApp session expired by itself, the platform did not notice for over a day, and every
+message in that period was accepted, recorded `sent`, and never delivered. The platform now detects
+that within ~10 minutes and **holds** messages instead, but it cannot resend what fell in the residual
+window — it deletes a message's contents on handover, deliberately — so it reports the window and each
+app decides what to do.
+
+`whatsappSuspect()` polls `GET /api/fabric/whatsapp/suspect` hourly, plus once ~90s after boot (the
+boot pass catches a gap that happened while the box was off). It is on the platform's **read** budget,
+so polling costs no sends. The fallback direction is the load-bearing half: an absent, 404, throttled,
+malformed or `ok !== true` answer is **`[]` — "nothing to worry about", never "assume a gap"**. The
+loud fallback would false-alarm every masjid on an older platform, for ever.
+
+**This app does not resend, and that is a domain answer.** Every WhatsApp message it sends is an admin
+notice about something already durably recorded, and no donor is ever messaged. `donation` and
+`donationRecovered` are in the ledger and are the highest-volume events, so replaying a day of them at
+a freshly re-linked number is precisely the ban risk for no new information; `refund` is in the ledger
+and the audit log; `planStopped` is stopped at Stripe; `paymentFailed` is `burst()`-gated, so a
+still-broken site re-raises it by itself while a fixed one would get an alarm about a solved problem;
+and `tuitionFailed`'s real remedy is the three-day record-payment outbox. So one notification is raised
+per window whatever its count (`whatsappGap`), and it stays on the settings screen afterwards, because
+"did I miss a refund last Tuesday?" is asked days later.
+
+A window is **immutable** — bounds, cause, counts and ids are snapshotted at detection and never
+revised — and retained for **7 days after the outage ends**, so an hourly poll re-reports the same one
+about 168 times and every one must be silent. `store.addWhatsAppGap` is check-and-write in one call,
+keyed on the window **bounds**. `cause` (`session-expired` / `needs-relink` / `key-rejected` /
+`unknown`) picks the admin sentence from a map with a fallback, never a switch: more causes may be
+added, and `key-rejected` in particular is not about the phone, so telling that masjid to re-link it
+would be wrong. `ids` are matched against `WhatsAppEventOutcome.msgId` to name the *events* caught in
+the window — matching is **by id only, never by timestamp overlap**, because a message queued during
+an outage and delivered fine after the re-link still falls inside the window. It is partial by
+construction (we keep the newest outcome per recipient+event, not a message log), so the platform's
+`count` is the figure quoted and every sentence says "at least".

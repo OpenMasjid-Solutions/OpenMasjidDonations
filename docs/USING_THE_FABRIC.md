@@ -32,9 +32,10 @@ stripe: true         # fetch vaulted Stripe keys from the OS               (v0.1
 domain: true         # learn our public URL + base path                     (v0.17.0)
 email: true          # send a donor a receipt through the OS provider       (v0.29.0)
 whatsapp: true       # message the masjid's own people                      (v0.43.0)
-alerts:              # seven declared ids, each routable to email/webhook   (v0.27.0)
+alerts:              # eight declared ids, each routable to email/webhook   (v0.27.0)
   - donation-received | donation-recovered | payment-failed
-  - tuition-record-failed | donation-refunded | plan-stopped | test
+  - tuition-record-failed | donation-refunded | plan-stopped
+  - whatsapp-gap | test
 commands:            # stats an admin can ask for by WhatsApp               (v0.43.0)
   - today | month | totals | appeal | monthly
 fabric:

@@ -18,6 +18,13 @@
  *
  * `toWhatsAppDigits` in whatsapp.ts stays exactly as it is and stays the final gate — it is pinned by
  * CLAUDE.md §13 and by tests, and this file feeds it rather than replacing it.
+ *
+ * VALIDATION ONLY. Formatting a number for display — grouping it as it is typed, splitting a stored
+ * one back into a country and a national part — lives in `web/src/phone.ts`, because the panel is the
+ * only thing that renders a number: §13 keeps them out of logs and out of the audit trail, and the
+ * notifications API sends raw digits. Copies of those helpers lived here until v0.44.0 and were dead,
+ * kept alive by their own tests, which made the suite look as though it covered the formatter a
+ * masjid sees. It covered a second copy. Do not reintroduce them without a server-side caller.
  */
 
 /** A country an admin can pick, with its E.164 dial code (no `+`). */
@@ -121,53 +128,4 @@ export function toE164(dialId: string, typed: string): { digits: string } | { er
   const digits = d.dial + national;
   if (digits.length < 8 || digits.length > 15) return { error: 'That doesn’t look like a full phone number.' };
   return { digits };
-}
-
-/**
- * Split stored E.164 digits back into a country choice and a national number, for editing.
- *
- * Longest dial code first, so +1 does not claim a +971 number. An unrecognized country comes back as
- * `other` with the whole thing in the field, which is the honest answer — inventing a country here
- * would put a wrong flag beside a right number.
- */
-export function fromE164(digits: string): { dialId: string; national: string } {
-  const all = digitsOnly(digits);
-  const byLongest = [...DIALS].sort((a, b) => b.dial.length - a.dial.length);
-  for (const d of byLongest) {
-    if (!all.startsWith(d.dial)) continue;
-    const national = all.slice(d.dial.length);
-    if (d.lengths.length > 0 && !d.lengths.includes(national.length)) continue;
-    if (national.length >= 6) return { dialId: d.id, national };
-  }
-  return { dialId: 'other', national: all };
-}
-
-/**
- * Format a national number for display as it is typed.
- *
- * Only the North American Numbering Plan gets real grouping — `(313) 555-0142` — because it is the one
- * shape this app's admins will recognize on sight, and a wrong guess elsewhere is worse than none.
- * Everything else is grouped loosely in threes, which is readable without claiming to be canonical.
- * Display only: the stored value is always plain digits.
- */
-export function formatNational(dialId: string, national: string): string {
-  const n = digitsOnly(national);
-  if (dialId === 'us') {
-    if (n.length <= 3) return n;
-    if (n.length <= 6) return `(${n.slice(0, 3)}) ${n.slice(3)}`;
-    return `(${n.slice(0, 3)}) ${n.slice(3, 6)}-${n.slice(6, 10)}`;
-  }
-  // Groups of three, except that a trailing SINGLE digit is merged into the group before it —
-  // "770 090 012 3" reads like something went wrong, where "770 090 0123" reads like a phone number.
-  const parts = n.match(/\d{1,3}/g) ?? [];
-  if (parts.length > 1 && parts[parts.length - 1].length === 1) parts[parts.length - 2] += parts.pop();
-  return parts.join(' ');
-}
-
-/** A stored destination rendered for the panel: `+1 (313) 555-0142`. Never used for sending. */
-export function formatE164(digits: string): string {
-  const { dialId, national } = fromE164(digits);
-  const d = dialById(dialId);
-  if (!d) return `+${digitsOnly(digits)}`;
-  return `+${d.dial} ${formatNational(dialId, national)}`.trim();
 }

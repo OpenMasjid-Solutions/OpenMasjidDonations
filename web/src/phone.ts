@@ -12,6 +12,18 @@
  *
  * What is here is what the browser genuinely has to do locally: group digits as they are typed, so the
  * field reads like a phone number instead of a serial number.
+ *
+ * THIS IS THE ONLY COPY, AND IT IS NOT COVERED BY THE SUITE. Copies of `formatNational`, `fromE164`
+ * and `formatE164` also lived in `server/src/phone.ts` until v0.44.0, tested there and called by
+ * nothing — so the suite looked as though it covered the formatter a masjid sees when it covered a
+ * second copy. They were deleted rather than kept: `node --test` only runs against `server/`, so there
+ * is no runner that can reach this file, and a mirror test is worse than an honest gap.
+ *
+ * The invariant to preserve by hand, then, is REVERSIBILITY: `digitsOnly(formatNational(id, n))` must
+ * equal `n` for every prefix of every number. The panel stores what `digitsOnly` gives back on each
+ * keystroke, so a formatter that drops a digit does not merely look wrong — it silently changes the
+ * number being saved. An earlier version grouped in threes and left "770 090 012 3" trailing a single
+ * digit; that was cosmetic, but the same class of edit one character further would not have been.
  */
 
 /** One entry in the country dropdown, as the server sends it. */

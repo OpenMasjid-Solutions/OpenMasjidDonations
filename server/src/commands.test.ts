@@ -224,7 +224,7 @@ test('PRIVACY: no reply can name a donor, because no reply is given one', () => 
     assert.ok(t.length <= 1000, 'the platform caps a reply at 1000 characters');
     // No control characters: the platform strips them, and a reply must not try to look like
     // several messages.
-    assert.ok(!/[ --]/.test(t), 'no control characters');
+    assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(t), 'no control characters');
   }
 });
 

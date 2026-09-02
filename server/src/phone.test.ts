@@ -15,7 +15,7 @@
 // place is refused rather than repaired.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DIALS, DEFAULT_DIAL, toE164, fromE164, formatNational, formatE164, dialById, digitsOnly } from './phone';
+import { DIALS, DEFAULT_DIAL, toE164, dialById, digitsOnly } from './phone';
 import { toWhatsAppDigits } from './whatsapp';
 
 const ok = (r: { digits: string } | { error: string }): string => {
@@ -34,7 +34,6 @@ test('THE BUG: a bare US ten-digit number used to pass as a Dutch number', () =>
   // the final gate, not the country resolver — which is precisely why nothing may reach it without a
   // country having been chosen first.
   assert.equal(toWhatsAppDigits('3135550142'), '3135550142', 'the old gate still cannot tell');
-  assert.equal(fromE164('3135550142').dialId, 'other', 'and we no longer pretend to know whose it is');
   // Through the new path, the same keystrokes produce the right number.
   assert.equal(ok(toE164('us', '3135550142')), '13135550142');
 });
@@ -111,50 +110,4 @@ test('"other" takes a full international number and adds nothing', () => {
   assert.match(err(toE164('other', '07700900123')), /country code/, 'a local number has no country to infer');
   err(toE164('other', '12345'));
   err(toE164('other', '1234567890123456'));
-});
-
-// ── Round-tripping, for editing an existing row ──────────────────────────────
-
-test('a stored number splits back into the country the admin picked', () => {
-  for (const [dialId, national] of [['us', '3135550142'], ['gb', '7700900123'], ['pk', '3001234567']] as const) {
-    const digits = ok(toE164(dialId, national));
-    assert.deepEqual(fromE164(digits), { dialId, national }, `${dialId} must round-trip`);
-  }
-});
-
-test('the longest dial code wins, so +1 cannot claim a +971 number', () => {
-  const uae = ok(toE164('ae', '501234567'));
-  assert.equal(fromE164(uae).dialId, 'ae');
-});
-
-test('a number we cannot place comes back as "other" with its digits intact', () => {
-  // The honest answer. Inventing a country would show a wrong flag beside a right number.
-  const r = fromE164('99912345678');
-  assert.equal(r.dialId, 'other');
-  assert.equal(r.national, '99912345678');
-});
-
-// ── Display only ─────────────────────────────────────────────────────────────
-
-test('US numbers format as they are typed, and never lose a digit', () => {
-  assert.equal(formatNational('us', '3'), '3');
-  assert.equal(formatNational('us', '313'), '313');
-  assert.equal(formatNational('us', '3135'), '(313) 5');
-  assert.equal(formatNational('us', '313555'), '(313) 555');
-  assert.equal(formatNational('us', '3135550142'), '(313) 555-0142');
-  // The invariant that matters: formatting is reversible, so nothing is ever silently dropped.
-  for (const n of ['3', '31', '313', '3135', '31355', '313555', '3135550', '3135550142']) {
-    assert.equal(digitsOnly(formatNational('us', n)), n, `formatting lost a digit at ${n.length}`);
-  }
-});
-
-test('a country without a fixed shape is grouped loosely rather than wrongly', () => {
-  assert.equal(digitsOnly(formatNational('gb', '7700900123')), '7700900123');
-  assert.ok(formatNational('gb', '7700900123').includes(' '), 'still readable');
-  assert.ok(!formatNational('gb', '7700900123').includes('('), 'but not pretending to be NANP');
-});
-
-test('a stored destination renders with its country for the panel', () => {
-  assert.equal(formatE164('13135550142'), '+1 (313) 555-0142');
-  assert.equal(formatE164('447700900123'), '+44 770 090 0123');
 });

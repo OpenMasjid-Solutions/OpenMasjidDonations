@@ -1234,8 +1234,26 @@ async function main(): Promise<void> {
       if (!(NOTIFY_EVENTS as readonly string[]).includes(e)) return reply.code(400).send({ error: 'Please check the details and try again.' });
     }
 
+    const kindKey = b.kind === 'email' ? 'emails' : 'whatsapps';
+    const existing = b.id ? store.getNotify()[kindKey].find((r) => r.id === b.id) : undefined;
+
     let address = '';
-    if (b.kind === 'email') {
+    if (existing) {
+      // EDITING an existing row: ticks and label only, and the address is taken from STORAGE rather
+      // than from the body. Two reasons, and the first is a bug this had:
+      //
+      //  • The panel's tick handler posts the row back whole, so a WhatsApp NUMBER arrived here as
+      //    `address: "13135550142"` — which is not a group id, so the branch below refused it and
+      //    every checkbox on a phone-number row answered 400. Numbers could be added and then never
+      //    subscribed to anything.
+      //  • Re-deriving it would also reopen the hole the country dropdown closed: a body-supplied
+      //    number would reach `toWhatsAppDigits` without a country ever having been chosen, which is
+      //    exactly the bare-ten-digits case that reads as the wrong country (see phone.ts).
+      //
+      // The panel has no affordance for changing an address — you remove the row and add it again —
+      // so nothing is lost by refusing to take one here.
+      address = existing.address;
+    } else if (b.kind === 'email') {
       const v = (b.address ?? '').trim();
       if (!EMAIL_RE.test(v)) return reply.code(400).send({ error: `“${v.slice(0, 40)}” doesn’t look like an email address.` });
       // Lowercased so "Office@…" and "office@…" cannot both subscribe and double every message.
@@ -1259,11 +1277,13 @@ async function main(): Promise<void> {
       address = digits;
     }
 
-    const kind = b.kind === 'email' ? 'emails' : 'whatsapps';
+    const kind = kindKey;
     const before = store.getNotify()[kind];
     // A new WHATSAPP row starts on NOTHING, whatever the form asked for — §13, and the one default in
     // this app that is not a matter of taste. A new EMAIL row may start on the alerts that cost money.
-    const events = b.events ?? (b.kind === 'email' ? [...NEW_EMAIL_EVENTS] : []);
+    // An EDIT that names no events keeps the ones it had: the defaults are for a row being created,
+    // and applying them to an existing row would silently re-subscribe somebody who had unticked.
+    const events = b.events ?? (existing ? existing.events : b.kind === 'email' ? [...NEW_EMAIL_EVENTS] : []);
     const saved = store.upsertNotifyRecipient(kind, { id: b.id, address, label: b.label, events });
     if (saved[kind].length === before.length && !b.id && !before.some((r) => r.address === address)) {
       return reply.code(400).send({ error: `That’s as many as this app will send to. Remove one first, or use an address that forwards to several people.` });
