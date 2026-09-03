@@ -25,11 +25,7 @@ services:
     # tag gets exactly this image (CLAUDE.md §16.1). The digest is the multi-arch INDEX digest,
     # which is what covers both amd64 and arm64; a per-platform one would break the Pi or the
     # mini-PC depending on which was picked.
-    #
-    # RELEASE IN PROGRESS: the tag is set here and the @sha256 lands in the very next commit,
-    # once CI has actually published it — §16.1's step order, and the reason the vX.Y.Z tag
-    # goes on THAT commit and not on this merge.
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.44.0
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.44.0@sha256:e9031387f26fce38e742efbc75df91921ba9495c5a03346ad18e7666ed2c7f8c
     restart: unless-stopped
     environment:
       PORT: "8080"
