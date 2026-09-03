@@ -98,7 +98,7 @@ export function App() {
     if (goToSetup) window.location.replace(withBase('/admin'));
   }, [goToSetup]);
 
-  // On-scene text colour follows the WALLPAPER, not the light/dark toggle. With no custom image
+  // On-scene text color follows the WALLPAPER, not the light/dark toggle. With no custom image
   // the scene is the theme's own gradient — light in light mode since v0.43.0 — and the CSS picks
   // the ink from the theme. A custom image overrides that in BOTH directions, which is why this
   // sets "dark" as well as "light": a DARK image under a LIGHT theme would otherwise get the

@@ -7,7 +7,7 @@
  * Two jobs, both required (see CLAUDE.md §13 "Security invariants — DO NOT REGRESS"):
  *  1. Standard CSV quoting — wrap a value in double quotes (and double any embedded quote)
  *     when it contains a comma, quote, CR or LF, so columns can't bleed into each other.
- *  2. Spreadsheet formula / DDE injection defence — donor name + email reach the export
+ *  2. Spreadsheet formula / DDE injection defense — donor name + email reach the export
  *     from the PUBLIC, UNAUTHENTICATED donation-intent endpoint, so a value like
  *     `=HYPERLINK(...)`, `+cmd|'/C calc'!A1` or `@SUM(...)` would EXECUTE when an admin
  *     opens the file in Excel / Google Sheets / LibreOffice. We prefix any value that

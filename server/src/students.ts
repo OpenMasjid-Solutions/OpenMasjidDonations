@@ -88,7 +88,7 @@ async function brokerCall(method: string, body: Record<string, unknown>, v: 1 | 
       if (e) {
         return { ok: false, unavailable: false, code: typeof e.code === 'string' ? e.code : 'error', message: typeof e.message === 'string' ? e.message : '' };
       }
-      return { ok: false, unavailable: true, code: `http_${res.status}` }; // unrecognised non-2xx → fail soft
+      return { ok: false, unavailable: true, code: `http_${res.status}` }; // unrecognized non-2xx → fail soft
     }
     if (!j || typeof j !== 'object') return { ok: false, unavailable: true, code: 'bad_response' };
     return { ok: true, data: j };
@@ -119,7 +119,7 @@ const intSigned = (v: unknown): number => {
  *  (§11.2: "yus-1234" is fine) — so the `identify` we confirm and the `lookup` that follows
  *  ask about the same code. Deliberately NOT a format check: the provider owns the format,
  *  and a client that validated it would reject codes the school later starts issuing. */
-export function normaliseStudentCode(raw: string): string {
+export function normalizeStudentCode(raw: string): string {
   return raw.replace(/[\s-]+/g, '').toUpperCase().slice(0, 64);
 }
 
@@ -130,6 +130,29 @@ export function normaliseStudentCode(raw: string): string {
  *  costs more in card fees than it collects. Minor units. Taken as a MINIMUM, never overridden
  *  downwards by what a provider advertises. */
 export const MIN_TUITION_CENTS = 100;
+
+/** One processing rate from §11.2 `info.fee` (Students 0.51.0, additive at v2).
+ *
+ *  `percentBps` is basis points **of the GROSS**, not of the tuition — that is how Stripe takes
+ *  its own cut, and it is the whole reason `grossUpTuition` divides rather than multiplies.
+ *  `capCents` (present on the bank rate) is a ceiling on the fee itself; 0 = uncapped. */
+export interface StudentsFeeRate {
+  percentBps: number;
+  fixedCents: number;
+  capCents: number;
+}
+
+/** Does the PAYER cover the processing fee, or the school? `enabled: false` — the default, and
+ *  what almost every install returns — means **change nothing**: charge the tuition, report the
+ *  tuition, and the masjid absorbs Stripe's cut exactly as it always has. */
+export interface StudentsFee {
+  enabled: boolean;
+  /** null when the feature is off. */
+  card: StudentsFeeRate | null;
+  /** null whenever the office is absorbing the (smaller, capped) bank fee — and a null means
+   *  DO NOT ADD ONE. Parsed for completeness; this app never applies it, see `cardFeeRate`. */
+  bank: StudentsFeeRate | null;
+}
 
 export interface StudentsInfo {
   enabled: boolean;
@@ -142,8 +165,108 @@ export interface StudentsInfo {
   allowAdvance: boolean;
   /** The floor to enforce on the amount field (minor units), never below MIN_TUITION_CENTS. */
   minAmountCents: number;
+  /** §11.2 `info.fee` (Students 0.51.0). Read every time rather than hard-coded: an office can
+   *  change the rate, and two apps disagreeing about what a parent owes is worse than either
+   *  being wrong on its own. */
+  fee: StudentsFee;
 }
 export type InfoResult = { available: true; info: StudentsInfo } | { available: false };
+
+/** One rate, or null when there is nothing usable to apply.
+ *
+ *  Refused rather than repaired, in both directions that matter: `percentBps >= 10000` is 100% or
+ *  more and would divide by zero or invert (a "fee" larger than any charge), and a rate of nothing
+ *  at all is not a fee. Either way the answer is "add nothing", which is the safe direction — the
+ *  school absorbs the cut, exactly as it does with the feature off. */
+function parseFeeRate(v: unknown): StudentsFeeRate | null {
+  if (!v || typeof v !== 'object') return null;
+  const d = v as Record<string, unknown>;
+  const percentBps = intNonNeg(d.percentBps);
+  const fixedCents = intNonNeg(d.fixedCents);
+  if (percentBps >= 10_000) return null;
+  if (percentBps === 0 && fixedCents === 0) return null;
+  return { percentBps, fixedCents, capCents: intNonNeg(d.capCents) };
+}
+
+/** `fee` from `info`. Absent (a pre-0.51.0 school) parses to disabled, which is the shape every
+ *  consumer written before this already behaves correctly for. Both rates are forced to null when
+ *  `enabled` is false, so a stale or malformed payload cannot add a charge the office switched off. */
+function parseFee(v: unknown): StudentsFee {
+  const d = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const enabled = d.enabled === true;
+  return {
+    enabled,
+    card: enabled ? parseFeeRate(d.card) : null,
+    bank: enabled ? parseFeeRate(d.bank) : null,
+  };
+}
+
+/**
+ * The rate to quote on THIS page, or null for "add nothing".
+ *
+ * Always the CARD rate, and never the bank one — a deliberate, documented choice. The fee has to
+ * be fixed when the PaymentIntent is created, which is before the payer has chosen anything: this
+ * page uses Stripe's Payment Element with `automatic_payment_methods`, so whether the money
+ * eventually arrives by card or by bank debit is not knowable at the moment we must decide the
+ * amount. Quoting the card rate and calling it a card fee is honest about the common case; quoting
+ * the bank rate would under-collect the moment somebody used a card, which leaves the school short
+ * — the exact failure the gross-up formula exists to prevent. A flow that KNOWS it is a bank debit
+ * (the school's own portal, a kiosk with an ACH button) is where `fee.bank` belongs.
+ */
+export function cardFeeRate(info: StudentsInfo | null | undefined): StudentsFeeRate | null {
+  if (!info || !info.fee.enabled) return null;
+  return info.fee.card;
+}
+
+/**
+ * Gross up a tuition amount so the PAYER covers the processing fee.
+ *
+ *   gross = ceil((tuition + fixedCents) / (1 - percentBps / 10000))
+ *   fee   = gross - tuition
+ *
+ * **Divide, don't multiply.** The percentage is a share of the gross, because that is what Stripe
+ * takes its cut of. The naive markup — a percentage of the tuition — gives $103.20 on a $100 bill
+ * instead of $103.30 and leaves the school a dime short every single time; a $100 invoice that
+ * settles at $99.91 then stays open for ever and shows a family as unpaid over ten cents.
+ *
+ * **Round the gross UP**, for the same reason, and do the arithmetic in integers: `10030 / 0.971`
+ * in binary floating point can land a hair either side of the true value, and `Math.ceil` of a hair
+ * too much is a whole extra cent charged for nothing. The loops below correct a division that came
+ * out high or low, so the result is the exact mathematical ceiling.
+ *
+ * A `capCents` (the bank rate carries one) is applied last: if the implied fee exceeds it the answer
+ * is simply `tuition + cap`, because a $2,000 payment must not have $16 added to cover a $5 charge.
+ */
+export interface TuitionCharge {
+  /** What the family owes — what goes in `record-payment.amountCents`, always. */
+  tuitionCents: number;
+  /** What was added on top. 0 = nothing was added, and no metadata key is written. */
+  feeCents: number;
+  /** What the card is actually charged. */
+  grossCents: number;
+}
+
+export function grossUpTuition(tuitionCents: number, rate: StudentsFeeRate | null): TuitionCharge {
+  const tuition = Math.max(0, Math.trunc(tuitionCents));
+  const none: TuitionCharge = { tuitionCents: tuition, feeCents: 0, grossCents: tuition };
+  if (!rate || tuition <= 0) return none;
+  const den = 10_000 - rate.percentBps;
+  if (den <= 0) return none; // parseFeeRate already refuses this; belt and braces
+  const num = (tuition + rate.fixedCents) * 10_000;
+  // Exact integer ceiling of num/den. Both products stay far below 2^53 (num ~1e12 at the
+  // MAX_TUITION_CENTS ceiling), so every comparison here is exact.
+  let f = Math.floor(num / den);
+  while (f * den > num) f -= 1;
+  while ((f + 1) * den <= num) f += 1;
+  let gross = f * den === num ? f : f + 1;
+  let fee = gross - tuition;
+  if (rate.capCents > 0 && fee > rate.capCents) {
+    fee = rate.capCents;
+    gross = tuition + fee;
+  }
+  if (fee <= 0) return none;
+  return { tuitionCents: tuition, feeCents: fee, grossCents: gross };
+}
 
 function parseInfo(d: Record<string, unknown>): StudentsInfo {
   return {
@@ -155,6 +278,7 @@ function parseInfo(d: Record<string, unknown>): StudentsInfo {
     // Take the STRICTER of the school's floor and ours: a provider that advertises nothing still
     // gets a floor, and one that advertises 50c can't drag us under a pound/dollar.
     minAmountCents: Math.max(MIN_TUITION_CENTS, intNonNeg(d.minAmountCents)),
+    fee: parseFee(d.fee),
   };
 }
 
@@ -182,7 +306,7 @@ export async function studentsInfo(force = false): Promise<InfoResult> {
 // invoices, no sibling list, not even the family id — which is what makes it safe to answer
 // before the parent has confirmed anything.
 export interface IdentifiedStudent {
-  /** The code as the provider echoes it back (normalised) — what we then `lookup` with. */
+  /** The code as the provider echoes it back (normalized) — what we then `lookup` with. */
   studentCode: string;
   firstName: string;
   /** '' for a child recorded under a single name (plenty don't split into two halves). */
@@ -197,7 +321,7 @@ export type IdentifyResult =
  *  withdrawn student, a locked code and "external payments switched off" all look identical,
  *  so we are not an enumeration oracle. Any broker/app error → `unavailable` (fail soft). */
 export async function studentsIdentify(studentCode: string): Promise<IdentifyResult> {
-  const code = normaliseStudentCode(studentCode);
+  const code = normalizeStudentCode(studentCode);
   if (!code) return { status: 'not-found' };
   const r = await brokerCall('identify', { studentCode: code }, 2);
   if (!r.ok) return { status: 'unavailable' };
@@ -220,7 +344,7 @@ export interface StudentInvoiceItem {
   id: string;
   label: string;
   /** `tuition` | `charge` | `credit` — an OPEN set: keep whatever arrives and render an
-   *  unrecognised kind as a plain line rather than dropping money off the screen. */
+   *  unrecognized kind as a plain line rather than dropping money off the screen. */
   kind: string;
   /** What the line was billed at. SIGNED — a credit line (bursary, correction) is negative. */
   amountCents: number;
@@ -235,7 +359,7 @@ export interface StudentInvoice {
   label: string;
   dueDate: string;
   balanceCents: number;
-  /** The lines this bill is made of (§11.0b). Empty = not itemised (an older Students, or a
+  /** The lines this bill is made of (§11.0b). Empty = not itemized (an older Students, or a
    *  payload we couldn't trust) → pay it as one thing, exactly as before. */
   items: StudentInvoiceItem[];
 }
@@ -303,9 +427,9 @@ function parseFamily(d: Record<string, unknown>): StudentFamily | null {
           amountCents: intSigned(it.amountCents), // a credit line is NEGATIVE — never clamp it
           balanceCents: intNonNeg(it.balanceCents),
         }));
-      // Only trust itemisation we can actually pay with: every line needs an id (a `lines[]`
+      // Only trust itemization we can actually pay with: every line needs an id (a `lines[]`
       // entry is an itemId), and the lines must add up to the bill as the contract guarantees.
-      // If either fails, drop to a single un-itemised bill rather than showing a parent a
+      // If either fails, drop to a single un-itemized bill rather than showing a parent a
       // breakdown that doesn't reconcile or offering a line we can't name.
       const usable = items.length > 0 && items.every((it) => it.id) && items.reduce((s, it) => s + it.balanceCents, 0) === balanceCents;
       return {
@@ -334,7 +458,7 @@ function parseFamily(d: Record<string, unknown>): StudentFamily | null {
  *  (§11.0). The code is sent in the body only and is NEVER logged. `not-found` is uniform
  *  (unknown / withdrawn / locked / payments-off all look identical — no enumeration oracle). */
 export async function studentsLookup(studentCode: string): Promise<LookupResult> {
-  const code = normaliseStudentCode(studentCode);
+  const code = normalizeStudentCode(studentCode);
   if (!code) return { status: 'not-found' };
   const r = await brokerCall('lookup', { studentCode: code }, 2);
   if (r.ok) {
@@ -372,6 +496,11 @@ export interface RecordPaymentInput {
    *  open bill of familyId, or Students returns 422 — strict on purpose, since we built these
    *  ids from the lookup in this same session. */
   lines?: { itemId: string; amountCents: number }[];
+  /** Stripe's cut, when the payer covered it (§11.2 `info.fee`). INFORMATIONAL — Students' ledger
+   *  holds tuition only. `amountCents` above is the tuition either way, and that is the invariant
+   *  that matters: a gross there credits Stripe's cut to the family as an overpayment, leaving a
+   *  credit that silently eats their next bill for as long as the setting is on. */
+  feeCents?: number;
 }
 export type RecordResult =
   | { status: 'recorded'; paymentId: string; duplicate: boolean }
@@ -389,6 +518,8 @@ export async function recordStudentPayment(input: RecordPaymentInput): Promise<R
     externalRef: input.externalRef,
   };
   if (input.studentId) body.studentId = input.studentId;
+  // Informational, and only when there is one. `amountCents` above is always the tuition.
+  if (input.feeCents && input.feeCents > 0) body.feeCents = Math.trunc(input.feeCents);
   // Students resolves exactly ONE breakdown, in the order lines → allocations → students →
   // derive-it-itself. So send exactly one and never a mixture: extra fields would be dead weight
   // at best, and a contradiction to debug at worst.
@@ -398,7 +529,7 @@ export async function recordStudentPayment(input: RecordPaymentInput): Promise<R
     // deliberately paid still reads settled on next month's statement.
     body.lines = input.lines;
   } else if (input.allocations && input.allocations.length) {
-    // Whole invoices. Honoured from Students 0.43.0 (before that it was parsed and silently
+    // Whole invoices. Honored from Students 0.43.0 (before that it was parsed and silently
     // ignored, which is why `students` below exists), and lenient by design: if the office took
     // cash against a bill between our lookup and this call, the remainder is recorded as ordinary
     // money on that child rather than rejected — the card is already captured by then.
@@ -463,10 +594,10 @@ export interface TuitionSession {
    *  `items` (§11.0b) what lets a parent pay ONE line of a bill — the ids and amounts are held
    *  here so a ticked line's value comes from the server's copy, never the browser's. */
   invoices: { id: string; studentId: string; balanceCents: number; items: { id: string; balanceCents: number }[] }[];
-  /** True when EVERY open bill arrived itemised. Decided per family, not per bill: the provider
+  /** True when EVERY open bill arrived itemized. Decided per family, not per bill: the provider
    *  chain is `lines` OR `allocations`, never both, so a selection mixing lines from one bill
    *  with a whole other bill couldn't be expressed in one call. All-or-nothing removes that. */
-  itemised: boolean;
+  itemized: boolean;
   /** The family's children, each with an opaque `ref` the browser uses to say WHICH child an
    *  advance is for. The internal studentId stays here — a browser never sees one, so a crafted
    *  request can only ever name a child of the family this session looked up. */
@@ -474,6 +605,15 @@ export interface TuitionSession {
   /** From `info` at lookup time (§11.0a), held server-side so a client can't relax either. */
   allowAdvance: boolean;
   minAmountCents: number;
+  /** The processing rate (§11.2 `info.fee`) as it stood when this family looked up their balance,
+   *  or null for "add nothing".
+   *
+   *  Captured here rather than re-read at intent, on purpose: **the payer must be charged what they
+   *  were shown.** `info` is cached for five minutes and a session lives fifteen, so re-reading it
+   *  could quote one total on the balance screen and charge another after the office changed the
+   *  rate mid-visit — and being surprised by a total is what generates a phone call to the office.
+   *  This is still "read it from `info`, never hard-code it"; it is read once per visit. */
+  fee: StudentsFeeRate | null;
   expires: number;
 }
 
@@ -524,7 +664,7 @@ export type AmountResult =
        *  `recordStudentPayment`). `null` = let Students derive it (correct for a full balance). */
       students: { studentId: string; amountCents: number }[] | null;
       /** The exact LINES the parent ticked (§11.0b). When present this is the ONLY breakdown we
-       *  send: it supersedes `students` (a line already says whose bill it is) and it's honoured
+       *  send: it supersedes `students` (a line already says whose bill it is) and it's honored
        *  stickily — the line stays settled when Students recomputes its allocations. */
       lines: { itemId: string; amountCents: number }[] | null;
       /** Which child this charge is FOR, when the parent said so (a per-child advance). Goes on
@@ -584,7 +724,7 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
     // amount is the sum of those lines' balances FROM THE SESSION, so a browser can name which
     // lines but never what they cost. `lines` alone goes on the wire: it supersedes `students`
     // (each line already resolves to a child) and is strict, since the ids came from us.
-    if (!session.itemised) return { error: 'not-itemised' };
+    if (!session.itemized) return { error: 'not-itemized' };
     const itemIds = [...new Set(selection.itemIds)];
     if (!itemIds.length) return { error: 'no-selection' };
     const lines: { itemId: string; amountCents: number }[] = [];
@@ -616,7 +756,7 @@ export function computeTuitionAmount(session: TuitionSession, selection: Tuition
   }
   if (sum <= 0) return { error: 'nothing-due' };
   // A split must cover the WHOLE charge to the penny or Students rejects it (422). If any
-  // picked invoice arrived without a child (a provider we don't recognise), send no split at
+  // picked invoice arrived without a child (a provider we don't recognize), send no split at
   // all and let Students derive one — degrading beats a rejected payment.
   const students = everyInvoiceHasAChild && byStudent.size ? [...byStudent].map(([studentId, amountCents]) => ({ studentId, amountCents })) : null;
   return checked({ amountCents: sum, allocations, students, lines: null, targetStudentId: null });

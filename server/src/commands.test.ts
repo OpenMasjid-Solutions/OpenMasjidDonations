@@ -30,8 +30,8 @@ type Commands = typeof import('./commands');
 let c: Commands;
 before(async () => { c = await import('./commands'); });
 
-/** £ from pence, so the assertions read like the message a masjid gets. */
-const money = (minor: number) => `£${(minor / 100).toFixed(2)}`;
+/** $ from pence, so the assertions read like the message a masjid gets. */
+const money = (minor: number) => `$${(minor / 100).toFixed(2)}`;
 const hdr = (secret: string, caller = 'omos:platform') => ({
   'x-openmasjid-app-secret': secret,
   'x-openmasjid-caller-app': caller,
@@ -131,7 +131,7 @@ test('choose: nothing sensible is a miss', () => {
 test('today: reads as a sentence, and says so plainly when nothing has come in', () => {
   assert.equal(
     c.replyToday({ todayMinor: 31200, todayCount: 9, monthMinor: 128050, monthCount: 41 }, money),
-    'Today: £312.00 from 9 donations.\nThis month: £1280.50 from 41 donations.',
+    'Today: $312.00 from 9 donations.\nThis month: $1280.50 from 41 donations.',
   );
   assert.match(c.replyToday({ todayMinor: 0, todayCount: 0, monthMinor: 5000, monthCount: 1 }, money), /^Nothing has come in today yet\./);
 });
@@ -144,9 +144,9 @@ test('month: compares against ALL of last month, and says that', () => {
   // A half-finished month against a finished one is not a like-for-like, so the wording has to
   // carry the qualifier or the comparison is alarming and wrong.
   const t = c.replyMonth({ monthMinor: 40000, monthCount: 12, lastMonthMinor: 100000, monthLabel: 'August', lastMonthLabel: 'July' }, money);
-  assert.match(t, /£600\.00 less than all of July/);
+  assert.match(t, /\$600\.00 less than all of July/);
   const up = c.replyMonth({ monthMinor: 150000, monthCount: 30, lastMonthMinor: 100000, monthLabel: 'August', lastMonthLabel: 'July' }, money);
-  assert.match(up, /£500\.00 more than all of July/);
+  assert.match(up, /\$500\.00 more than all of July/);
 });
 
 test('month: a first month has nothing to compare with, and does not pretend otherwise', () => {
@@ -164,16 +164,16 @@ test('totals: refunds are mentioned only when there are some — and explained',
   const none = c.replyTotals({ totalMinor: 500000, count: 100, averageMinor: 5000, refundedMinor: 0, liveAppeals: 3 }, money);
   assert.ok(!/refund/i.test(none), 'no refunds, no line about refunds');
   const some = c.replyTotals({ totalMinor: 500000, count: 100, averageMinor: 5000, refundedMinor: 2500, liveAppeals: 3 }, money);
-  assert.match(some, /£25\.00 has been refunded \(already taken off the total above\)/);
+  assert.match(some, /\$25\.00 has been refunded \(already taken off the total above\)/);
 });
 
 test('appeal: a goal becomes a percentage and a remainder', () => {
   const t = c.replyAppeal({ title: 'Ramadan Appeal', raisedMinor: 250000, count: 40, goalMinor: 1000000, active: true }, money);
-  assert.match(t, /^Ramadan Appeal: £2500\.00 from 40 donations\./);
-  assert.match(t, /25% of the £10000\.00 goal — £7500\.00 to go/);
+  assert.match(t, /^Ramadan Appeal: \$2500\.00 from 40 donations\./);
+  assert.match(t, /25% of the \$10000\.00 goal — \$7500\.00 to go/);
 });
 
-test('appeal: a met goal is celebrated, not reported as "-£12 to go"', () => {
+test('appeal: a met goal is celebrated, not reported as "-$12 to go"', () => {
   const t = c.replyAppeal({ title: 'Roof', raisedMinor: 1200000, count: 90, goalMinor: 1000000, active: true }, money);
   assert.match(t, /goal has been reached/);
   assert.ok(!/to go/.test(t));
@@ -188,11 +188,11 @@ test('appeal: a hidden appeal says so — otherwise a flat total looks like a bu
   assert.match(c.replyAppeal({ title: 'Old', raisedMinor: 100, count: 1, goalMinor: 0, active: false }, money), /hidden from the donation site/);
 });
 
-test('appeal menu: numbered, and the re-ask apologises rather than repeating itself', () => {
+test('appeal menu: numbered, and the re-ask apologizes rather than repeating itself', () => {
   const first = c.replyAppealMenu(APPEALS, false);
   assert.match(first, /^Which appeal\?\n1\. General Fund\n2\. Zakat\n3\. Ramadan Appeal 2026/);
   assert.match(first, /Reply with a number, or part of the name\./);
-  assert.match(c.replyAppealMenu(APPEALS, true), /didn’t recognise that one/);
+  assert.match(c.replyAppealMenu(APPEALS, true), /didn’t recognize that one/);
 });
 
 test('monthly: nobody yet is a sentence, not a row of zeroes', () => {
@@ -201,8 +201,8 @@ test('monthly: nobody yet is a sentence, not a row of zeroes', () => {
 
 test('monthly: says what they give and what has arrived this month', () => {
   const t = c.replyMonthly({ donors: 12, perMonthMinor: 24000, thisMonthMinor: 18000 }, money);
-  assert.match(t, /12 monthly donors, giving about £240\.00 a month\./);
-  assert.match(t, /£180\.00 of this month’s donations came from them\./);
+  assert.match(t, /12 monthly donors, giving about \$240\.00 a month\./);
+  assert.match(t, /\$180\.00 of this month’s donations came from them\./);
 });
 
 // ── 5. The promise that spans every reply ────────────────────────────────────
@@ -224,7 +224,7 @@ test('PRIVACY: no reply can name a donor, because no reply is given one', () => 
     assert.ok(t.length <= 1000, 'the platform caps a reply at 1000 characters');
     // No control characters: the platform strips them, and a reply must not try to look like
     // several messages.
-    assert.ok(!/[ --]/.test(t), 'no control characters');
+    assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(t), 'no control characters');
   }
 });
 
@@ -266,7 +266,7 @@ test('appeal menu: says how many did not fit, so none of them look lost', () => 
 
 test('monthly: a dormant plan is explained, not silently missing from the figure', () => {
   const t = c.replyMonthly({ donors: 4, perMonthMinor: 8000, thisMonthMinor: 8000, dormant: 6 }, money);
-  assert.match(t, /4 monthly donors, giving about £80\.00 a month\./);
+  assert.match(t, /4 monthly donors, giving about \$80\.00 a month\./);
   assert.match(t, /6 other plans/);
   assert.ok(!/10 monthly donors/.test(t), 'a stopped plan must never be counted as a current donor');
 });

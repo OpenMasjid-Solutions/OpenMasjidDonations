@@ -3,7 +3,7 @@
 
 /**
  * A tiny in-memory failed-attempt limiter for the login endpoint. Keyed by client
- * IP, with exponential backoff after a few failures. This is the real defence behind
+ * IP, with exponential backoff after a few failures. This is the real defense behind
  * the short admin password — without it, it is trivially brute-forced over the LAN.
  */
 interface Entry {

@@ -17,8 +17,10 @@ import fastifyMultipart from '@fastify/multipart';
 import { z } from 'zod';
 import { config, ssoConfigured } from './config';
 import { makeLog } from './logger';
-import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID } from './store';
-import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch } from './store';
+import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAccount, NOTIFY_EVENTS, NOTIFY_ALERT_ID, NEW_EMAIL_EVENTS, NOTIFY_EVENT_LABEL } from './store';
+import { DIALS, DEFAULT_DIAL, toE164 } from './phone';
+import { recoveryBreakdown } from './notify';
+import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch, WhatsAppEventOutcome } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
 import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
@@ -44,6 +46,10 @@ import {
   whatsappGroups,
   whatsappStatus,
   whatsappUnavailableMessage,
+  whatsappOutcome,
+  whatsappSuspect,
+  type WhatsAppGapCause,
+  makeSendBudget,
 } from './whatsapp';
 import {
   REFUND_REASONS,
@@ -57,6 +63,8 @@ import {
 import {
   billingConfigured,
   MIN_TUITION_CENTS,
+  cardFeeRate,
+  grossUpTuition,
   studentsInfo,
   studentsIdentify,
   studentsLookup,
@@ -122,7 +130,7 @@ const log = makeLog('main');
  *  monthly check can never then be found unsendable. */
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
-/** Friendly money string for a minor-unit amount, e.g. "£50.00". */
+/** Friendly money string for a minor-unit amount, e.g. "$50.00". */
 function formatMoney(minor: number, currency: string): string {
   try {
     return new Intl.NumberFormat('en', { style: 'currency', currency }).format(toMajor(minor, currency));
@@ -423,7 +431,7 @@ async function main(): Promise<void> {
   const LoginBody = z.object({ password: z.string().min(1).max(200) });
   app.post('/api/login', async (req, reply) => {
     // Key the brute-force limiter on the real, unspoofable TCP peer — never req.ip
-    // (which would honour a forged X-Forwarded-For). This is the defence behind the
+    // (which would honor a forged X-Forwarded-For). This is the defense behind the
     // short admin password, so it must not be bypassable by a request header.
     const peer = req.socket.remoteAddress ?? 'unknown';
     const wait = loginLimiter.retryAfterMs(peer);
@@ -472,28 +480,189 @@ async function main(): Promise<void> {
    * In-memory and bounded: a restart may re-notify, which is the right way round for something whose
    * entire purpose is to be noticed.
    */
-  const lastRaised = new Map<string, number>();
-  const throttled = (key: string, everyMs: number): boolean => {
+  const lastRaised = new Map<string, { at: number; skipped: number }>();
+  /**
+   * One notification per key per window — and a COUNT of what the window swallowed.
+   *
+   * The count is the point, and the reason this replaced a plain boolean throttle. An event that
+   * fires per EXTERNAL failure has no natural bound: a masjid whose Stripe keys expired on a Friday
+   * morning gets one attempt per person who tried to give, for the whole of jummah. Dropping the
+   * 2nd to the 200th silently tells the admin "a payment failed" once, and leaves them unable to
+   * tell one unlucky donor from everybody — which are very different Fridays. So the next message
+   * that does get through says how many it stands for.
+   */
+  const burst = (key: string, everyMs: number): { allow: boolean; skipped: number } => {
     const now = Date.now();
-    const at = lastRaised.get(key);
-    if (at !== undefined && now - at < everyMs) return true;
-    if (lastRaised.size > 500) lastRaised.clear();
-    lastRaised.set(key, now);
-    return false;
+    const w = lastRaised.get(key);
+    if (w && now - w.at < everyMs) {
+      w.skipped += 1;
+      return { allow: false, skipped: w.skipped };
+    }
+    const skipped = w?.skipped ?? 0;
+    if (lastRaised.size > 500) for (const [k, v] of lastRaised) if (now - v.at > everyMs * 4) lastRaised.delete(k);
+    lastRaised.set(key, { at: now, skipped: 0 });
+    return { allow: true, skipped };
   };
+  /** "This has happened 41 more times since the last message." — or '' when it hasn't. */
+  const alsoHeld = (skipped: number): string =>
+    skipped > 0 ? ` This has happened ${skipped} more time${skipped === 1 ? '' : 's'} since the last message.` : '';
   const HOUR = 3600_000;
+
+  /**
+   * OUR OWN cap on WhatsApp, per destination, per sliding hour.
+   *
+   * Platform 0.51.1 removed every limit it used to impose — quiet hours, the hourly and daily caps,
+   * the per-recipient cooldown, the 6–20s gap — so a message now leaves within seconds and nothing
+   * upstream says no. Ban risk still attaches to the masjid's PHONE NUMBER, that number is shared
+   * with every other app on the box, and a blocked one cannot be recovered.
+   *
+   * The event that needs this is "a donation was received": it fires once per transaction, so a
+   * Ramadan Friday is hundreds. The events that actually matter — a refund, a payment setup that
+   * broke — arrive a handful of times a year and will never come near the cap.
+   *
+   * 20/hour per destination, and what it holds back is COUNTED and shown on the settings screen: an
+   * admin told "12 messages were held back in the last hour" can act, where one whose phone simply
+   * went quiet cannot.
+   */
+  const waBudget = makeSendBudget(20);
+
+  /**
+   * AND A CEILING ACROSS ALL DESTINATIONS TOGETHER, which is new in v0.44.0 and is the price of
+   * letting a masjid list more than one number.
+   *
+   * The per-destination cap above bounds what any ONE person receives. It does not bound what the
+   * masjid's number SENDS, and that is the thing that gets banned: five numbers on the donation event
+   * is five messages per donation from one gateway, so the old cap would have quietly become 100/hour
+   * the moment this feature shipped. CLAUDE.md §13 said "one message per event, never a loop over
+   * recipients" precisely to avoid that, and a loop is exactly what a recipient list is — so the
+   * invariant now has to be carried by a number instead of by the shape of the code.
+   *
+   * 40/hour total: enough for two busy destinations, or for the handful of real events across many,
+   * and far below the volume that makes a gateway look like a broadcaster. Held-back sends are counted
+   * into the same figure the panel already shows, so this cannot make a phone go quiet unexplained.
+   */
+  const waTotalBudget = makeSendBudget(40);
+  const WA_ALL = 'all';
+
+  /** Remember what became of a WhatsApp message, so the panel can say so. Never throws.
+   *
+   *  Keyed by RECIPIENT and event since v0.44.0 — with several destinations on one event, an
+   *  event-only key meant the second recipient's refusal overwrote the first's and the panel showed
+   *  one row's problem against everybody. */
+  const waKey = (recipientId: string, event: NotifyEventId): string => `${recipientId}|${event}`;
+  const recordWaOutcome = (recipientId: string, event: NotifyEventId, state: WhatsAppEventOutcome['state'], reason = '', msgId = ''): void => {
+    try {
+      store.setWhatsAppOutcome(waKey(recipientId, event), { state, reason, at: new Date().toISOString(), ...(msgId ? { msgId } : {}) });
+    } catch {
+      /* a health indicator must never break the thing it reports on */
+    }
+  };
+
+  /** Ask the platform what happened to a message, shortly after queueing it (0.51.1+ only).
+   *
+   *  Once, after a short delay, and never in a loop. A message still `queued` when we look is left as
+   *  queued rather than reported as a problem — which is the safe reading and the reason this is not a
+   *  source of false alarms.
+   *
+   *  **HALF THE ORIGINAL REASONING IS NOW DEAD, and it is recorded rather than quietly dropped.** This
+   *  used to say that records were kept 24 hours, so asking soon was the only time an answer existed.
+   *  Since platform 0.51.1-dev.13 a STILL-QUEUED message keeps its record for as long as it waits, and
+   *  the queue now HOLDS messages through an outage until an admin releases them — so a message can be
+   *  queued for hours and then resolve. The consequence for this one-shot check is a reporting hole: a
+   *  message held for three hours and then failing after release is looked at once, at 45 seconds, when
+   *  the only truthful answer was `queued`, and never again. Nothing is misreported (the panel renders
+   *  only bad outcomes, so a permanently-`queued` row shows nothing and claims nothing) and nothing
+   *  depends on it, but such a failure is invisible here. Widening this is a real change to a §13
+   *  invariant — "we ask once, never in a loop" — so it is Hasan's call, not a tidy-up. Kiosk and
+   *  Display hit the same dead premise from the other side, as a hard-coded 24h give-up. */
+  const checkWaOutcome = (recipientId: string, event: NotifyEventId, id: string): void => {
+    if (!id) return;
+    setTimeout(() => {
+      void whatsappOutcome(id)
+        .then((o) => {
+          if (!o) return; // unknown / not ours / no endpoint — not evidence of anything
+          if (o.state === 'failed' || o.state === 'expired') {
+            recordWaOutcome(recipientId, event, o.state, o.reason, id);
+            // Worth a log line at warn: this is the case that used to be invisible.
+            log.warn(`WhatsApp ${event} ${o.state}${o.reason ? `: ${o.reason}` : ''}`);
+          } else if (o.state === 'sent') {
+            // `sent` is the state a suspect window is ABOUT — the platform reported these as sent and
+            // they may never have arrived — so the id matters most here of anywhere.
+            recordWaOutcome(recipientId, event, 'sent', '', id);
+          }
+        })
+        .catch(() => {});
+    }, 45_000).unref?.();
+  };
+
+  /**
+   * Send one WhatsApp message to one destination, recording whatever became of it.
+   *
+   * Split out of `raise()` when recipients became a list, so that the two budgets, the availability
+   * check and the outcome recording are written once and cannot drift apart per caller. Returns
+   * nothing: a notification channel never reports upward, because nothing may depend on it arriving.
+   */
+  const sendWaTo = async (
+    rec: { id: string; address: string },
+    event: NotifyEventId,
+    title: string,
+    text: string,
+    st: Awaited<ReturnType<typeof whatsappStatus>>,
+  ): Promise<void> => {
+    // The masjid's own number first: it bounds what any one person is sent.
+    if (!waBudget.take(rec.address)) {
+      recordWaOutcome(
+        rec.id,
+        event,
+        'refused',
+        'Held back to protect your WhatsApp number — too many messages to this destination in the last hour. Turning off “a donation was received” for it is usually the fix.',
+      );
+      log.warn(`WhatsApp ${event} held back by our own per-destination cap`);
+      return;
+    }
+    // Then the gateway as a whole. Checked SECOND so a single destination can never spend the shared
+    // ceiling without also spending its own — the two counts then tell the admin different things.
+    if (!waTotalBudget.take(WA_ALL)) {
+      recordWaOutcome(
+        rec.id,
+        event,
+        'refused',
+        'Held back to protect your WhatsApp number — too many messages from this masjid in the last hour, across every number on the list.',
+      );
+      log.warn(`WhatsApp ${event} held back by our own total hourly ceiling`);
+      return;
+    }
+    const target = looksLikeGroupId(rec.address) ? { group: rec.address } : { to: rec.address };
+    // Title and body together: a WhatsApp message has no subject line to carry the first half.
+    const r = await sendWhatsApp(target, `${title}\n${text}`);
+    if (r.queued) {
+      // The id is kept, not just used: the platform reports the ids that fell in a suspect window, and
+      // this is the only thing on our side that can turn one back into "the refund notice".
+      recordWaOutcome(rec.id, event, 'queued', '', r.id);
+      // Ask what became of it, once, if the platform can tell us (0.51.1+).
+      if (st.outcomes) checkWaOutcome(rec.id, event, r.id);
+    } else {
+      // A message the platform REFUSED — an unapproved group, the gateway's own number, a bad country
+      // code — must stay distinguishable from one that vanished. The platform's sentence is written
+      // for an admin, so keep it and show it on the settings screen.
+      recordWaOutcome(rec.id, event, 'refused', r.error);
+      log.warn(`WhatsApp ${event} ${r.refused ? 'refused' : 'not queued'}: ${r.error}`);
+    }
+    // Status and reason only. Never the body, which carries figures, and never the destination.
+  };
 
   const raise = (event: NotifyEventId, title: string, text: string, level: NotifyLevel = 'info'): void => {
     void (async () => {
-      const cfg = store.getNotify().events[event];
+      const cfg = store.getNotify();
+      const wants = (r: { events: NotifyEventId[] }): boolean => r.events.includes(event);
 
       // 1. The OpenMasjidOS alert → the admin's own email + webhook, per THEIR matrix. An AND with
-      //    that matrix, never an override: we ask the platform to deliver and it still honours the
+      //    that matrix, never an override: we ask the platform to deliver and it still honors the
       //    admin's per-alert channel choices, so `disabled_by_admin` is a normal answer here.
-      if (cfg.os) await fabricAlert(NOTIFY_ALERT_ID[event], title, text, level).catch(() => {});
+      if (cfg.events[event].os) await fabricAlert(NOTIFY_ALERT_ID[event], title, text, level).catch(() => {});
 
-      // 2. A specific address the admin typed in — the treasurer, the school office. Sent through
-      //    the platform's provider, so we never see their mail credentials.
+      // 2. Every address the admin listed for this event — the treasurer, the school office. Sent
+      //    through the platform's provider, so we never see their mail credentials.
       //
       //    TWO THINGS TO KEEP IN MIND BEFORE CHANGING `title`/`text` ANYWHERE ABOVE:
       //    • They are read by somebody OUTSIDE the masjid's admin account, whom the platform never
@@ -502,20 +671,32 @@ async function main(): Promise<void> {
       //      third party. Adding `${donorName}` to a title would be the leak.
       //    • This shares the app's per-app email rate budget with DONOR receipts and refund notices.
       //      A receipt has an outbox and survives being throttled; the refund notice deliberately
-      //      does not, so it is what gets lost. That is the other reason the per-donation event is
-      //      opt-in and carries a minimum.
-      if (cfg.email && ssoConfigured()) {
-        await fabricEmail({ to: cfg.email, subject: title, text }).catch(() => {});
+      //      does not, so it is what gets lost. A recipient LIST multiplies that, which is why a new
+      //      address does not start subscribed to the per-donation event (NEW_EMAIL_EVENTS) — and
+      //      why removing `minAmount` in v0.44.0 was a trade rather than a tidy-up.
+      //
+      //    Sequential rather than Promise.all, deliberately: these go through one rate-limited
+      //    provider, and firing five at once is how a masjid's whole allowance goes on one event.
+      if (ssoConfigured()) {
+        for (const r of cfg.emails) {
+          if (wants(r)) await fabricEmail({ to: r.address, subject: title, text }).catch(() => {});
+        }
       }
 
-      // 3. WhatsApp, if they opted this event in. Checked against the platform first rather than
-      //    assumed: the phone may have been unlinked, and queueing into that achieves nothing.
-      if (cfg.whatsappOn && cfg.whatsapp && ssoConfigured() && (await whatsappStatus()).available) {
-        const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };
-        // Title and body together: a WhatsApp message has no subject line to carry the first half.
-        const r = await sendWhatsApp(target, `${title}\n${text}`);
-        // Status only. Never the body, which carries figures, and never the destination.
-        if (!r.queued) log.warn(`WhatsApp ${event} not queued`);
+      // 3. WhatsApp, for every destination that opted THIS event in. Checked against the platform
+      //    once rather than per recipient: the phone may have been unlinked, and queueing into that
+      //    achieves nothing — and asking once per destination would be a probe per message.
+      const waWanted = cfg.whatsapps.filter(wants);
+      if (waWanted.length > 0 && ssoConfigured()) {
+        const st = await whatsappStatus();
+        if (!st.available) {
+          // A channel that cannot deliver is worth recording, not just skipping — otherwise the
+          // switch says on, the phone stays quiet, and nothing anywhere explains why.
+          const why = whatsappUnavailableMessage(st.reason);
+          for (const r of waWanted) recordWaOutcome(r.id, event, 'refused', why);
+        } else {
+          for (const r of waWanted) await sendWaTo(r, event, title, text, st);
+        }
       }
     })().catch(() => {
       /* fail soft — a notification channel must never break the thing it reports on */
@@ -535,7 +716,7 @@ async function main(): Promise<void> {
   // dashboard and shared with its other apps), some with keys on this device — and since v0.42.0
   // each appeal may name the one its money goes into, so a Zakat page can settle somewhere separate
   // from the general fund. An appeal that names none follows the site default, which is the
-  // pre-v0.42.0 behaviour: the globally-chosen vault account when it is fully configured, else the
+  // pre-v0.42.0 behavior: the globally-chosen vault account when it is fully configured, else the
   // account the campaign was created against.
   //
   // Vaulted secret/webhook keys live in memory ONLY (never our data volume), so they always track the
@@ -563,7 +744,7 @@ async function main(): Promise<void> {
    *
    * Three cases, and the first rule of the third is that it has not changed:
    *
-   *  • An explicit choice ('fabric:<id>' / 'local:<id>') is HONOURED OR REFUSED. It never falls back
+   *  • An explicit choice ('fabric:<id>' / 'local:<id>') is HONORED OR REFUSED. It never falls back
    *    to the site default, to another vault account, or to a local one. That is the whole point: an
    *    admin who sends a Zakat appeal to its own account has made a statement about where that money
    *    must go, and quietly settling it elsewhere would be worse than not taking it at all — the
@@ -624,7 +805,7 @@ async function main(): Promise<void> {
    * link, the tuition outbox, the sweep and the webhook.
    *
    * This must never be re-pointed by a campaign's current choice: a payment taken on account A is
-   * confirmed, refunded and cancelled on account A for ever, even after the appeal moves to B.
+   * confirmed, refunded and canceled on account A for ever, even after the appeal moves to B.
    *
    * BOUNDED BY A KNOWN-ID SET, and that is a security property rather than an optimisation. The
    * webhook route (/api/stripe/webhook/:accountId) is unauthenticated by necessity, so without this
@@ -942,22 +1123,45 @@ async function main(): Promise<void> {
   // WhatsApp message, and it is not where a masjid would think to look for "tell Yusuf about
   // refunds". So the platform keeps owning delivery, and this owns the choice.
   //
-  // The `os` channel is an AND with that matrix, and the UI says so — see NotifyChannels.
+  // The `os` channel is an AND with that matrix, and the UI says so — see NotifyEventConfig.
   const notifyView = async (force = false) => {
     const cfg = store.getNotify();
     const wa = await whatsappStatus(force);
     return {
-      ...cfg,
-      /** Minor → major, like every other amount crossing this API. */
-      minAmount: toMajorCur(cfg.minAmount),
-      /** So the form can label each row without hardcoding our internal ids. */
       events: cfg.events,
+      /** Who the masjid listed, and what each of them hears about. Addresses and numbers, never a
+       *  donor — see NotifySettings. */
+      emails: cfg.emails,
+      whatsapps: cfg.whatsapps,
+      /** The country dropdown, sent rather than duplicated in the bundle: the browser formats a
+       *  number and the SERVER decides whether it is one, so there is a single list and a single
+       *  validator. See server/src/phone.ts for why that split is the whole point. */
+      dials: DIALS,
+      /** What a brand-new email address starts subscribed to, so the panel can say so honestly
+       *  instead of hardcoding a list that could drift from the server's. */
+      newEmailEvents: NEW_EMAIL_EVENTS,
       embedded: ssoConfigured(),
       /** Whether the email channel can work at all, and whether WhatsApp is even set up. Asked
        *  before the switches are drawn, so a channel that cannot deliver is explained rather than
        *  offered. */
       emailStatus: emailStatus(),
-      whatsapp: { ...wa, groups: wa.available ? await whatsappGroups() : [] },
+      whatsapp: {
+        ...wa,
+        groups: wa.available ? await whatsappGroups() : [],
+        /** What became of the last WhatsApp message for each recipient + event (`<id>|<event>`) — so a
+         *  refusal or a failure is something the admin can SEE, against the row it happened to. */
+        lastOutcomes: Object.fromEntries(
+          // msgId stripped: the panel renders a state and a sentence, and an opaque platform id in the
+          // DOM is a question somebody will have to answer later for no benefit.
+          Object.entries(store.getWhatsAppOutcomes()).map(([k, o]) => [k, { state: o.state, reason: o.reason, at: o.at }]),
+        ),
+        /** How many sends our own caps have held back since boot, across every destination. */
+        heldBack: waBudget.totalSuppressed() + waTotalBudget.totalSuppressed(),
+        /** Periods the platform no longer trusts — messages reported sent that may never have
+         *  arrived. Shown on the screen as well as raised as an alert, because a gap is the one
+         *  WhatsApp fact an admin may need to look up days later. */
+        gaps: store.getWhatsAppGaps(),
+      },
     };
   };
   app.get('/api/admin/notifications', { preHandler: requireAdmin }, async (req) => ({
@@ -966,133 +1170,162 @@ async function main(): Promise<void> {
     data: await notifyView((req.query as { refresh?: string }).refresh === '1'),
   }));
 
-  const ChannelsBody = z.object({
-    os: z.boolean().optional(),
-    email: z.string().max(200).optional(),
-    whatsapp: z.string().max(64).optional(),
-    whatsappOn: z.boolean().optional(),
-  });
+  /** The per-event platform switch, and nothing else. Recipients have their own routes below —
+   *  see NotifyPatch for why they are never posted back as a whole list. */
   const NotifyBody = z.object({
-    defaultEmail: z.string().max(200).optional(),
-    defaultWhatsapp: z.string().max(64).optional(),
-    minAmount: z.number().nonnegative().optional(), // major units
-    events: z.record(z.string().max(40), ChannelsBody).optional(),
+    events: z.record(z.string().max(40), z.object({ os: z.boolean().optional() })).optional(),
   });
-
-  /** Normalise one recipient, or return the sentence to show the admin.
-   *
-   *  Both directions refuse rather than repair. An address that cannot be posted to, or a number
-   *  without a country code, would otherwise be accepted here and fail silently weeks later at the
-   *  moment it mattered — and for the number, "repairing" it by guessing a country code would send
-   *  the masjid's donation figures to whoever holds it there. */
-  const cleanEmail = (raw: string, where: string): { value: string } | { error: string } => {
-    const v = raw.trim();
-    if (!v) return { value: '' };
-    if (!EMAIL_RE.test(v)) return { error: `“${v.slice(0, 40)}” doesn’t look like an email address (${where}).` };
-    return { value: v };
-  };
-  const cleanWhatsApp = async (raw: string, where: string): Promise<{ value: string } | { error: string }> => {
-    const v = raw.trim();
-    if (!v) return { value: '' };
-    if (looksLikeGroupId(v)) {
-      // Verified against the APPROVED list, not merely shape-checked. The platform would refuse an
-      // unapproved id with a 403 anyway, but that arrives silently at send time — long after the
-      // admin left this screen believing it was set up.
-      const groups = await whatsappGroups();
-      if (!groups.some((g) => g.id === v)) return { error: `That group isn’t approved for this app any more (${where}). Please choose another.` };
-      return { value: v };
-    }
-    const digits = toWhatsAppDigits(v);
-    if (!digits) {
-      return { error: `“${v.slice(0, 24)}” doesn’t look like a full number (${where}). Include the country code — for example 447700900123, not 07700900123.` };
-    }
-    return { value: digits };
-  };
 
   app.put('/api/admin/notifications', { preHandler: requireAdmin }, async (req, reply) => {
     const parsed = NotifyBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
-    const p = parsed.data;
     const patch: NotifyPatch = {};
-
-    if (p.defaultEmail !== undefined) {
-      const r = cleanEmail(p.defaultEmail, 'the default address');
-      if ('error' in r) return reply.code(400).send({ error: r.error });
-      patch.defaultEmail = r.value;
-    }
-    if (p.defaultWhatsapp !== undefined) {
-      const r = await cleanWhatsApp(p.defaultWhatsapp, 'the default WhatsApp destination');
-      if ('error' in r) return reply.code(400).send({ error: r.error });
-      patch.defaultWhatsapp = r.value;
-    }
-    if (p.minAmount !== undefined) patch.minAmount = toMinorCur(p.minAmount);
-
-    if (p.events) {
+    if (parsed.data.events) {
       const events: NonNullable<NotifyPatch['events']> = {};
-      for (const [id, c] of Object.entries(p.events)) {
+      for (const [id, c] of Object.entries(parsed.data.events)) {
         // An id we do not know is refused rather than ignored: a form posting `refunds` instead of
         // `refund` would otherwise report success and change nothing at all.
         if (!(NOTIFY_EVENTS as readonly string[]).includes(id)) {
           return reply.code(400).send({ error: 'Please check the details and try again.' });
         }
-        const out: Partial<import('./store').NotifyChannels> = {};
-        if (c.os !== undefined) out.os = c.os;
-        if (c.email !== undefined) {
-          const r = cleanEmail(c.email, `the address for “${id}”`);
-          if ('error' in r) return reply.code(400).send({ error: r.error });
-          out.email = r.value;
-        }
-        if (c.whatsapp !== undefined) {
-          const r = await cleanWhatsApp(c.whatsapp, `the WhatsApp destination for “${id}”`);
-          if ('error' in r) return reply.code(400).send({ error: r.error });
-          out.whatsapp = r.value;
-          // Clearing the number turns the channel off too, so the panel can never show a tick
-          // beside an empty field and imply something is being sent.
-          if (!r.value) out.whatsappOn = false;
-        }
-        if (c.whatsappOn !== undefined) out.whatsappOn = c.whatsappOn;
-        events[id as NotifyEventId] = out;
+        if (c.os !== undefined) events[id as NotifyEventId] = { os: c.os };
       }
       patch.events = events;
     }
-
     const before = store.getNotify();
     const saved = store.setNotify(patch);
-    // Worth a line in the record — it changes who at the masjid is told about money, and the panel is
-    // shared. WHICH channels changed, never an address or a number.
-    const changed = NOTIFY_EVENTS.some((e) => {
-      const a = before.events[e];
-      const b = saved.events[e];
-      return a.os !== b.os || a.email !== b.email || a.whatsapp !== b.whatsapp;
-    });
+    const changed = NOTIFY_EVENTS.some((e) => before.events[e].os !== saved.events[e].os);
     if (changed) {
-      // Counts only. Never an address and never a number — not even a masked one: in a small
-      // community the last two digits of a phone number still name somebody.
       const on = NOTIFY_EVENTS.filter((e) => saved.events[e].os).length;
-      const byEmail = NOTIFY_EVENTS.filter((e) => saved.events[e].email).length;
-      const byWhatsApp = NOTIFY_EVENTS.filter((e) => saved.events[e].whatsappOn && saved.events[e].whatsapp).length;
-      audit(
-        req,
-        'notifications.settings',
-        '',
-        `changed notification settings (${on} of ${NOTIFY_EVENTS.length} to OpenMasjidOS, ${byEmail} by email, ${byWhatsApp} by WhatsApp)`,
-      );
+      audit(req, 'notifications.settings', '', `changed which alerts go to OpenMasjidOS (${on} of ${NOTIFY_EVENTS.length} on)`);
     }
     return { data: await notifyView() };
   });
 
-  /** Send one real notification down one channel, so the admin finds out now rather than when
-   *  something matters. Reports WhatsApp honestly as queued — the platform paces every message and
-   *  quiet hours can hold one for hours, so "sent" would be a lie and an admin watching a silent
-   *  phone would conclude it is broken. */
+  /**
+   * Add or edit one recipient.
+   *
+   * Both directions refuse rather than repair. An address that cannot be posted to, or a number whose
+   * country we would have to guess, would otherwise be accepted here and fail silently weeks later at
+   * the moment it mattered — and for a number, "repairing" it means guessing whose phone it is.
+   *
+   * A WhatsApp number arrives as a COUNTRY plus a national number, never as one string. That is the
+   * fix for the bug in server/src/phone.ts's header comment: a bare American ten-digit number has no
+   * leading zero, so the old single-field path accepted it and addressed it as a Dutch number.
+   */
+  const RecipientBody = z.object({
+    kind: z.enum(['email', 'whatsapp']),
+    /** Present when editing an existing row; absent when adding. */
+    id: z.string().max(40).optional(),
+    label: z.string().max(80).optional(),
+    events: z.array(z.string().max(40)).max(20).optional(),
+    /** An email address, or an approved WhatsApp group id. */
+    address: z.string().max(200).optional(),
+    /** A WhatsApp number, as two fields. */
+    dialId: z.string().max(12).optional(),
+    national: z.string().max(24).optional(),
+  });
+
+  app.post('/api/admin/notifications/recipients', { preHandler: requireAdmin }, async (req, reply) => {
+    const parsed = RecipientBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    const b = parsed.data;
+    for (const e of b.events ?? []) {
+      if (!(NOTIFY_EVENTS as readonly string[]).includes(e)) return reply.code(400).send({ error: 'Please check the details and try again.' });
+    }
+
+    const kindKey = b.kind === 'email' ? 'emails' : 'whatsapps';
+    const existing = b.id ? store.getNotify()[kindKey].find((r) => r.id === b.id) : undefined;
+
+    let address = '';
+    if (existing) {
+      // EDITING an existing row: ticks and label only, and the address is taken from STORAGE rather
+      // than from the body. Two reasons, and the first is a bug this had:
+      //
+      //  • The panel's tick handler posts the row back whole, so a WhatsApp NUMBER arrived here as
+      //    `address: "13135550142"` — which is not a group id, so the branch below refused it and
+      //    every checkbox on a phone-number row answered 400. Numbers could be added and then never
+      //    subscribed to anything.
+      //  • Re-deriving it would also reopen the hole the country dropdown closed: a body-supplied
+      //    number would reach `toWhatsAppDigits` without a country ever having been chosen, which is
+      //    exactly the bare-ten-digits case that reads as the wrong country (see phone.ts).
+      //
+      // The panel has no affordance for changing an address — you remove the row and add it again —
+      // so nothing is lost by refusing to take one here.
+      address = existing.address;
+    } else if (b.kind === 'email') {
+      const v = (b.address ?? '').trim();
+      if (!EMAIL_RE.test(v)) return reply.code(400).send({ error: `“${v.slice(0, 40)}” doesn’t look like an email address.` });
+      // Lowercased so "Office@…" and "office@…" cannot both subscribe and double every message.
+      address = v.toLowerCase();
+    } else if (b.address) {
+      const v = b.address.trim();
+      if (!looksLikeGroupId(v)) return reply.code(400).send({ error: 'Please choose a group from the list, or enter a phone number.' });
+      // Verified against the APPROVED list, not merely shape-checked. The platform would refuse an
+      // unapproved id with a 403 anyway, but that arrives silently at send time — long after the
+      // admin left this screen believing it was set up.
+      const groups = await whatsappGroups();
+      if (!groups.some((g) => g.id === v)) return reply.code(400).send({ error: 'That group isn’t approved for this app any more. Please choose another.' });
+      address = v;
+    } else {
+      const r = toE164(b.dialId ?? DEFAULT_DIAL, b.national ?? '');
+      if ('error' in r) return reply.code(400).send({ error: r.error });
+      // The final gate is still `toWhatsAppDigits` — pinned by §13, and the one function that decides
+      // what may be addressed. `toE164` composes; this refuses.
+      const digits = toWhatsAppDigits(r.digits);
+      if (!digits) return reply.code(400).send({ error: 'That doesn’t look like a full phone number. Please check the country and the number.' });
+      address = digits;
+    }
+
+    const kind = kindKey;
+    const before = store.getNotify()[kind];
+    // A new WHATSAPP row starts on NOTHING, whatever the form asked for — §13, and the one default in
+    // this app that is not a matter of taste. A new EMAIL row may start on the alerts that cost money.
+    // An EDIT that names no events keeps the ones it had: the defaults are for a row being created,
+    // and applying them to an existing row would silently re-subscribe somebody who had unticked.
+    const events = b.events ?? (existing ? existing.events : b.kind === 'email' ? [...NEW_EMAIL_EVENTS] : []);
+    const saved = store.upsertNotifyRecipient(kind, { id: b.id, address, label: b.label, events });
+    if (saved[kind].length === before.length && !b.id && !before.some((r) => r.address === address)) {
+      return reply.code(400).send({ error: `That’s as many as this app will send to. Remove one first, or use an address that forwards to several people.` });
+    }
+    // Counts only. Never an address and never a number — not even a masked one: in a small community
+    // the last two digits of a phone number still name somebody.
+    audit(
+      req,
+      'notifications.recipient',
+      '',
+      `${b.id ? 'changed' : 'added'} ${b.kind === 'email' ? 'an email recipient' : 'a WhatsApp recipient'} (${events.length} of ${NOTIFY_EVENTS.length} alerts; ${saved[kind].length} on the list)`,
+    );
+    return { data: await notifyView() };
+  });
+
+  app.delete<{ Params: { kind: string; id: string } }>('/api/admin/notifications/recipients/:kind/:id', { preHandler: requireAdmin }, async (req, reply) => {
+    const kind = req.params.kind === 'email' ? 'emails' : req.params.kind === 'whatsapp' ? 'whatsapps' : null;
+    if (!kind) return reply.code(404).send({ error: 'Not found.' });
+    const before = store.getNotify()[kind].length;
+    const saved = store.removeNotifyRecipient(kind, req.params.id);
+    if (saved[kind].length !== before) {
+      audit(req, 'notifications.recipient', '', `removed ${kind === 'emails' ? 'an email recipient' : 'a WhatsApp recipient'} (${saved[kind].length} left on the list)`);
+    }
+    return { data: await notifyView() };
+  });
+
+  /** Send one real notification to one recipient, so the admin finds out now rather than when
+   *  something matters. Reports WhatsApp honestly as queued — WhatsApp gives no delivery receipt, so
+   *  "sent" would be a lie and an admin watching a silent phone would conclude it is broken. */
   app.post('/api/admin/notifications/test', { preHandler: requireAdmin }, async (req, reply) => {
     const parsed = z
-      .object({ channel: z.enum(['os', 'email', 'whatsapp']), event: z.string().max(40).optional() })
+      .object({
+        channel: z.enum(['os', 'email', 'whatsapp']),
+        event: z.string().max(40).optional(),
+        /** Which listed recipient to send to. Required for email and WhatsApp. */
+        recipientId: z.string().max(40).optional(),
+      })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose what to test.' });
     const event = (parsed.data.event ?? 'donation') as NotifyEventId;
     if (!(NOTIFY_EVENTS as readonly string[]).includes(event)) return reply.code(400).send({ error: 'Unknown notification.' });
-    const cfg = store.getNotify().events[event];
+    const cfg = store.getNotify();
     const TITLE = 'Test from OpenMasjid Donations';
     const TEXT = 'If you can read this, your donation notifications will reach you here.';
 
@@ -1112,9 +1345,10 @@ async function main(): Promise<void> {
     }
 
     if (parsed.data.channel === 'email') {
-      if (!cfg.email) return reply.code(400).send({ error: 'Add an email address for this notification first.' });
-      const r = await fabricEmail({ to: cfg.email, subject: TITLE, text: TEXT });
-      if (r.sent) return { data: { ok: true, message: `Sent ✓ to ${cfg.email}.` } };
+      const rec = cfg.emails.find((r) => r.id === parsed.data.recipientId);
+      if (!rec) return reply.code(400).send({ error: 'Add an email address first.' });
+      const r = await fabricEmail({ to: rec.address, subject: TITLE, text: TEXT });
+      if (r.sent) return { data: { ok: true, message: `Sent ✓ to ${rec.address}.` } };
       return reply.code(r.reason === 'not_configured' ? 400 : 502).send({
         error:
           r.reason === 'not_configured'
@@ -1123,15 +1357,35 @@ async function main(): Promise<void> {
       });
     }
 
-    if (!cfg.whatsapp) return reply.code(400).send({ error: 'Add a WhatsApp number or group for this notification first.' });
-    // A test sends regardless of the switch — the admin pressed the button, and "it works but is
-    // currently off" is a useful thing to be able to find out.
+    const rec = cfg.whatsapps.find((r) => r.id === parsed.data.recipientId);
+    if (!rec) return reply.code(400).send({ error: 'Add a WhatsApp number or group first.' });
+    // A test sends regardless of the ticks — the admin pressed the button, and "it works but is
+    // currently off for this alert" is a useful thing to be able to find out.
     const st = await whatsappStatus(true); // forced: they may have just linked the phone
     if (!st.available) return reply.code(400).send({ error: whatsappUnavailableMessage(st.reason) });
-    const target = looksLikeGroupId(cfg.whatsapp) ? { group: cfg.whatsapp } : { to: cfg.whatsapp };
+    // Deliberately NOT counted against either hourly budget. A test is one message the admin asked
+    // for, at a moment they are watching; spending their allowance on it — or refusing it because a
+    // Friday already spent it — would make the button useless exactly when it is needed.
+    const target = looksLikeGroupId(rec.address) ? { group: rec.address } : { to: rec.address };
     const r = await sendWhatsApp(target, `${TITLE}\n${TEXT}`);
-    if (!r.queued) return reply.code(r.retry ? 502 : 400).send({ error: r.error });
-    return { data: { ok: true, message: 'Queued ✓ — OpenMasjidOS spaces messages out to keep your number safe, so it may take a few minutes to arrive.' } };
+    if (!r.queued) {
+      // A test that is refused tells the admin the same thing a real notification would have, so
+      // record it against the row: it then keeps saying so after they leave this screen.
+      recordWaOutcome(rec.id, event, 'refused', r.error);
+      return reply.code(r.retry ? 502 : 400).send({ error: r.error });
+    }
+    recordWaOutcome(rec.id, event, 'queued', '', r.id);
+    if (st.outcomes) checkWaOutcome(rec.id, event, r.id);
+    return {
+      data: {
+        ok: true,
+        // Since platform 0.51.1 there is no pacing left to explain — a message goes out in seconds.
+        // Still "queued", never "sent": WhatsApp gives no delivery receipt to report.
+        message: st.outcomes
+          ? 'Queued ✓ — it should arrive within seconds. If it doesn’t, this row will say why.'
+          : 'Queued ✓ — it should arrive within seconds. There’s no delivery receipt, so this is as much as we can promise.',
+      },
+    };
   });
 
   // ── Image upload (campaign cover/background) — saved to the data volume ──────
@@ -1327,11 +1581,11 @@ async function main(): Promise<void> {
     return null;
   };
 
-  /** Keep an accent only if it's a valid hex colour, else '' — so an unvalidated value can
+  /** Keep an accent only if it's a valid hex color, else '' — so an unvalidated value can
    *  never reach a style/markup consumer (the browser already checks, this is belt-and-braces). */
   const sanitizeAccent = (a?: string): string => (a && /^#[0-9a-fA-F]{3,8}$/.test(a.trim()) ? a.trim() : '');
 
-  /** Normalise a thank-you override from the request into a full (empty-filled) object. */
+  /** Normalize a thank-you override from the request into a full (empty-filled) object. */
   const thankYouOverride = (t: z.infer<typeof CampaignBody>['thankYou']): import('./store').ThankYou | undefined =>
     t === undefined ? undefined : { heading: t.heading ?? '', message: t.message ?? '', backgroundImage: t.backgroundImage ?? '', accent: sanitizeAccent(t.accent) };
   /** Convert the major-unit amount fields on a campaign body to minor units. */
@@ -1547,7 +1801,7 @@ async function main(): Promise<void> {
   //     would have told us — so we read the charge first, bring our row into line with it (which
   //     is also the repair path for exactly that case), and only then work out what can go back.
   //   • WHETHER THE REFUND HAPPENED is Stripe's answer, not our optimism. Nothing is written to
-  //     the ledger until Stripe confirms, and a refund it reports as failed or cancelled is
+  //     the ledger until Stripe confirms, and a refund it reports as failed or canceled is
   //     reported to the admin as a failure rather than quietly recorded.
   //
   // The idempotency key is derived from (payment, amount already refunded, amount now) rather
@@ -1597,7 +1851,7 @@ async function main(): Promise<void> {
       return reply.code(400).send({ error: 'Only a donation that went through can be refunded — nothing was taken for this one.' });
     }
     if (!don.paymentIntentId) return reply.code(400).send({ error: 'This donation has no payment reference, so it can’t be refunded here.' });
-    // Defence in depth (§13 route isolation): a tuition payment is written to `student_payments`
+    // Defense in depth (§13 route isolation): a tuition payment is written to `student_payments`
     // and never to `donations`, so there should be no such row here at all — but if one ever
     // appeared, refunding it from this side would leave the school's ledger claiming it was paid.
     const camp = store.getCampaign(don.campaignId);
@@ -1918,7 +2172,7 @@ async function main(): Promise<void> {
     const seeds = planSeeds(); // newest first
     // Which plans get a live refresh, in which order. Plans that have taken money go FIRST:
     // a recurring donation row is written at /intent, BEFORE the card is entered, so every
-    // abandoned monthly checkout leaves a £0 row behind — and a visitor on the masjid's own
+    // abandoned monthly checkout leaves a $0 row behind — and a visitor on the masjid's own
     // network can create them without logging in. Filled newest-first, a burst of those would
     // fill the cap entirely and silently stop renewal reconciliation for every real plan.
     const syncing = planSyncOrder(seeds).slice(0, PLAN_SYNC_CAP);
@@ -1931,12 +2185,12 @@ async function main(): Promise<void> {
     const fresh = new Map(planSeeds().map((s) => [s.subscriptionId, s]));
 
     // Only NOW may abandoned sign-ups be dropped — after the sync, never before it. A plan
-    // whose first payment succeeded but whose /confirm never round-tripped also shows £0
+    // whose first payment succeeded but whose /confirm never round-tripped also shows $0
     // locally, and the reconciliation above is what puts it right; filtering earlier would
     // hide precisely the row that needed healing (see isAbandonedSeed).
     // …and only for a plan this request actually SYNCED. A seed the cap left out (or that we
     // deliberately didn't reconcile, below) has not had its chance to heal, so hiding it would
-    // be acting on the very £0 we haven't checked — and once hidden the admin can't open it
+    // be acting on the very $0 we haven't checked — and once hidden the admin can't open it
     // either, which is the one route that would have reconciled it.
     const nowMs = Date.now();
     const shown: PlanSeed[] = [];
@@ -1957,7 +2211,7 @@ async function main(): Promise<void> {
     // Both headline totals wear ONE currency symbol, so only plans actually charged in that
     // currency may be folded in. A second Stripe account in another currency would otherwise
     // make the figure a sum of mixed units — worse with a zero-decimal currency, where
-    // ¥1,000 and £10.00 are the same number of minor units.
+    // ¥1,000 and $10.00 are the same number of minor units.
     const currency = cur();
     const inCurrency = (p: { currency: string }) => p.currency === currency;
     const mixedCurrency = plans.some((p) => !inCurrency(p));
@@ -2167,7 +2421,7 @@ async function main(): Promise<void> {
     const raisedBy = new Map(m.byCampaign.map((r) => [r.campaignId, r]));
 
     // One row per current campaign (sorted by money raised), so the admin sees every
-    // appeal — even those at £0 — and which is pulling its weight.
+    // appeal — even those at $0 — and which is pulling its weight.
     const byCampaign = campaigns
       .map((c) => {
         const r = raisedBy.get(c.id);
@@ -2471,7 +2725,7 @@ async function main(): Promise<void> {
     //    withhold that by leaving a receipts checkbox alone — and on a shared Fabric Stripe account
     //    a payer who cannot stop a mandate rings their bank instead, which costs everybody.
     //  • Not emailLikelyAvailable(), because that gate exists only to avoid suppressing Stripe's own
-    //    receipt in favour of one we cannot deliver — and on this branch there is nothing to
+    //    receipt in favor of one we cannot deliver — and on this branch there is nothing to
     //    suppress, since createSubscription never sets receipt_email. Trying costs a donor nothing
     //    even when we believe email is down, and the outbox keeps trying for three days, so a masjid
     //    that fixes their email provider that week still gets the letter out.
@@ -2509,8 +2763,27 @@ async function main(): Promise<void> {
       // Tell the admin donations are broken (bad/expired keys, Stripe down). Fail soft.
       // Once an hour: a Stripe outage fails every attempt, and the second identical message
       // helps nobody while costing a WhatsApp slot the refunds may need.
-      if (!throttled('paymentFailed:donation', HOUR))
-        raise('paymentFailed', 'A donation payment failed to start', 'Stripe rejected a payment setup — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error');
+      {
+        // Per EXTERNAL failure, not per human action: a Stripe outage or an expired key fails every
+        // attempt, so this is one of the events that must gate itself (see `burst`).
+        const g = burst('paymentFailed:donation', HOUR);
+        if (g.allow) {
+          raise(
+            'paymentFailed',
+            `A donation payment failed to start on “${c.title}”`,
+            // The appeal is named because "a payment failed" gives an admin nowhere to look. But the
+            // GATE IS GLOBAL (`paymentFailed:donation`, not per campaign), because the usual cause —
+            // expired keys, or Stripe itself — breaks every appeal at once, and one message an hour is
+            // the point of the gate. So the appeal named is where it was NOTICED, and the sentence has
+            // to say that: naming one appeal while silently suppressing the others would leave an
+            // admin fixing that one and believing they were done. The genuinely appeal-specific
+            // failure has its own per-campaign alert (`alertAccountRefusal`), which correctly says the
+            // others are unaffected.
+            `Stripe rejected a payment setup on “${c.title}” — donors can’t give until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments. That’s where it was noticed; if the cause is your keys or Stripe itself, every appeal is affected.${alsoHeld(g.skipped)}`,
+            'error',
+          );
+        }
+      }
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createDonation({
@@ -2544,7 +2817,7 @@ async function main(): Promise<void> {
     const { paymentIntentId, slug, token } = parsed.data;
     const c = resolvePublicCampaign(slug, token);
     // Tuition confirms go through /students/confirm; never confirm a tuition campaign here
-    // (defence in depth — the tuition intent route above is already blocked).
+    // (defense in depth — the tuition intent route above is already blocked).
     if (!c || c.type === 'tuition') return reply.code(404).send({ error: 'Unknown campaign.' });
     const don = store.getDonationByPaymentIntent(paymentIntentId);
     // Confirm against the SAME account the PaymentIntent was created on (recorded on the
@@ -2565,14 +2838,14 @@ async function main(): Promise<void> {
       cardLast4: pi.cardLast4,
     });
     if (succeeded && wasPending) {
-      // Gated on `minAmount`, and on EVERY channel rather than WhatsApp alone: a masjid that asked
-      // not to hear about £2 gifts meant it, and telling them by email instead would be a strange
-      // reading of that. Never carries the donor's name — all three channels forward easily.
-      if (pi.amount >= store.getNotify().minAmount) {
-        raise('donation', 'A donation was received', `${formatMoney(pi.amount, pi.currency)} was donated to “${c.title}”.`, 'success');
-      }
+      // UNGATED since v0.44.0. This used to be `if (pi.amount >= minAmount)` — a site-wide floor the
+      // admin set beside the donation row — and that field was removed on Hasan's instruction when
+      // recipients became a per-event matrix (see NOTIFY_DEFAULT for the trade). "Only the big ones"
+      // is no longer expressible; who hears about a donation at all is, per recipient.
+      // Never carries the donor's name — every channel here forwards easily.
+      raise('donation', 'A donation was received', `${formatMoney(pi.amount, pi.currency)} was donated to “${c.title}”.`, 'success');
       // Branded receipt — ONLY when we recorded 'pending' at intent (i.e. Stripe's receipt was
-      // suppressed in favour of ours), so there's never a double. Non-blocking; a transient
+      // suppressed in favor of ours), so there's never a double. Non-blocking; a transient
       // failure stays 'pending' for the outbox to retry, a permanent one is marked 'skipped'.
       if (don.receipt === 'pending') {
         // `updated` carries the donor name/email + card brand/last4 filled in by markDonation.
@@ -2615,10 +2888,10 @@ async function main(): Promise<void> {
   //     is SHARED with the platform's other apps, so a subscription id must be proved to be one WE
   //     created before we act on it. `getDonationBySubscription` is NOT good enough: it lacks the
   //     `recurring = 1 AND subscription_id <> ''` filter that makes the index trustworthy.
-  //  3. THE TOKEN TRAVELS IN THE BODY, and cancelling is a POST. A GET that mutates would be fired
+  //  3. THE TOKEN TRAVELS IN THE BODY, and canceling is a POST. A GET that mutates would be fired
   //     by every link-preview bot that touches the email; keeping the token out of the API URL also
   //     keeps it out of the masjid's Cloudflare access logs (the page URL itself is unavoidably in
-  //     them, which is why the token authorises so little).
+  //     them, which is why the token authorizes so little).
   //  4. EVERY FAILURE IS THE SAME 404 — unknown token, malformed token, no local row, a tuition
   //     campaign — so nothing here is an oracle, mirroring /w/:slug.
   //  5. THE AUDIT LINE IS WRITTEN WITH A FIXED ACTOR. `audit(req, …)` reads the admin session and
@@ -2629,7 +2902,7 @@ async function main(): Promise<void> {
   // ONE bucket shared by both routes, sized generously on purpose. Behind the platform's ingress or
   // the Cloudflare tunnel the peer is the PROXY, so every remote donor shares this bucket
   // (DONATIONS-009) — a tight cap would 429 honest donors trying to stop their own payments, which
-  // is the one thing this page must never do. The 128-bit token is the defence against guessing;
+  // is the one thing this page must never do. The 128-bit token is the defense against guessing;
   // this only stops a flood from becoming outbound Stripe calls.
   const planLinkRateOk = makeRateLimiter(120);
 
@@ -2642,7 +2915,7 @@ async function main(): Promise<void> {
     if (!subscriptionId) return null;
     const seed = findSeed(planSeeds(), subscriptionId);
     if (!seed) return null;
-    // Defence in depth: a tuition campaign has no donation rows at all (§13 route isolation), so it
+    // Defense in depth: a tuition campaign has no donation rows at all (§13 route isolation), so it
     // cannot reach this — but if one ever did, a parent must not be able to stop a school's billing
     // from a donation link.
     if (store.getCampaign(seed.campaignId)?.type === 'tuition') return null;
@@ -2769,7 +3042,7 @@ async function main(): Promise<void> {
 
   // A stricter per-peer limiter for the tuition lookup so we can't be the open relay that lets
   // an attacker grind Student IDs (Students also hard-locks a code after 6 failed probes per
-  // hour — defence in depth). `identify` and `lookup` deliberately SHARE this bucket, exactly
+  // hour — defense in depth). `identify` and `lookup` deliberately SHARE this bucket, exactly
   // as the provider shares one bucket per code, so switching endpoints can't launder attempts.
   // The cap is 40/min rather than 20 only because one honest flow is now two calls (identify →
   // lookup): the effective attempt rate is unchanged. Keyed on the real TCP peer (never a
@@ -2814,18 +3087,23 @@ async function main(): Promise<void> {
       const s = JSON.parse(sp.studentsSplit || 'null');
       if (Array.isArray(s) && s.length) studentsSplit = s;
     } catch { /* no split — Students derives it */ }
-    // The ticked bill lines (§11.0b). Present only for an itemised selection; when it is, it's
+    // The ticked bill lines (§11.0b). Present only for an itemized selection; when it is, it's
     // the ONLY breakdown that goes on the wire (recordStudentPayment enforces that).
     let lines: { itemId: string; amountCents: number }[] | undefined;
     try {
       const l = JSON.parse(sp.paymentLines || 'null');
       if (Array.isArray(l) && l.length) lines = l;
-    } catch { /* not an itemised payment */ }
+    } catch { /* not an itemized payment */ }
     const res = await recordStudentPayment({
       idempotencyKey: pi, // = the PaymentIntent id → Students dedups replays
       familyId: sp.familyId,
       studentId: sp.studentId || undefined,
+      // The TUITION. sp.amount is stored net for exactly this reason, so there is no arithmetic
+      // here to get wrong: a gross in `amountCents` credits Stripe's cut to the family as an
+      // overpayment and the ledger stays wrong until somebody notices by hand. When in doubt,
+      // send the tuition — and the way to never be in doubt is to store it.
       amountCents: sp.amount,
+      feeCents: sp.feeCents || undefined,
       currency: sp.currency,
       occurredAt: sp.occurredAt || new Date().toISOString(),
       externalRef: { stripePaymentIntentId: pi, stripeChargeId: retrieved.chargeId || undefined },
@@ -2840,7 +3118,24 @@ async function main(): Promise<void> {
       // safe (reconciliation picks it up) but the admin should verify. Alert carries no PII.
       // No Student ID and no child's name — §13 bans both from anything that leaves this app, and
       // all three of these channels forward easily.
-      raise('tuitionFailed', 'A tuition payment wasn’t recorded in Students', `A card payment succeeded (${pi}) but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.`, 'warning');
+      // ALSO per external failure, and it was ungated. One misconfigured Students rejects every
+      // tuition payment it is sent, so a busy evening at the school desk is one message per parent.
+      // Each rejection is still logged with its own PaymentIntent and every one is in the Donations
+      // log — what the gate drops is the repetition, never the record.
+      const g = burst('tuitionFailed', HOUR);
+      if (g.allow) {
+        // Which page it came in on. Still no Student ID and no child's name (§13 bans both from
+        // anything that leaves this app) — an appeal title names a page, never a family.
+        const failedOn = store.getCampaign(sp.campaignId)?.title ?? '';
+        raise(
+          'tuitionFailed',
+          'A tuition payment wasn’t recorded in Students',
+          `A card payment succeeded (${pi})${failedOn ? ` on “${failedOn}”` : ''} but OpenMasjid Students rejected recording it (${res.code}). The money is safe — Students’ daily reconciliation will pick it up — but please check.${alsoHeld(g.skipped)}`,
+          'warning',
+        );
+      } else {
+        log.warn(`tuition record rejected (${pi}) — notification held back, ${g.skipped} since the last one`);
+      }
     }
     // 'unavailable' → leave pending; the outbox retries.
   };
@@ -2900,10 +3195,15 @@ async function main(): Promise<void> {
     const inf = await studentsInfo();
     const allowAdvance = inf.available && inf.info.allowAdvance;
     const minAmountCents = inf.available ? inf.info.minAmountCents : MIN_TUITION_CENTS;
-    // Itemised (§11.0b) only when EVERY open bill came with usable lines — the provider honours
+    // Does the PAYER cover the processing fee (§11.2 `info.fee`)? Read from `info`, never
+    // hard-coded — an office can change the rate, and two apps disagreeing about what a parent
+    // owes is worse than either being wrong. Captured into the session below so the charge matches
+    // what this screen is about to quote; null = add nothing, which is almost every school.
+    const feeRate = inf.available ? cardFeeRate(inf.info) : null;
+    // Itemized (§11.0b) only when EVERY open bill came with usable lines — the provider honors
     // `lines` OR `allocations`, never both, so a selection mixing lines from one bill with a whole
     // other bill can't be expressed in one call. All-or-nothing avoids ever needing to.
-    const itemised = fam.openInvoices.length > 0 && fam.openInvoices.every((i) => i.items.length > 0);
+    const itemized = fam.openInvoices.length > 0 && fam.openInvoices.every((i) => i.items.length > 0);
     const session = createTuitionSession({
       campaignId: c.id,
       familyId: fam.id,
@@ -2923,9 +3223,10 @@ async function main(): Promise<void> {
       // Each child gets an opaque ref the browser uses to say which one an advance is for. The
       // internal studentId stays here, so a crafted request can only name a child of THIS family.
       students: fam.students.map((st, i) => ({ ref: `c${i}`, studentId: st.studentId, balanceCents: st.balanceCents })),
-      itemised,
+      itemized,
       allowAdvance,
       minAmountCents,
+      fee: feeRate,
     });
     // v2 bills are per child, so each open invoice names the child it belongs to. Resolve that
     // to a display name + the child's opaque ref HERE — the studentIds stay server-side, in the
@@ -2954,9 +3255,14 @@ async function main(): Promise<void> {
           })),
           balance: dec(fam.balanceCents),
           credit: dec(fam.creditCents),
-          // Whether every bill is itemised, so the donor page and this server agree on which
+          // Whether every bill is itemized, so the donor page and this server agree on which
           // selection the pay step will accept.
-          itemised,
+          itemized,
+          // The processing rate, so the page can show the parent an itemized total for whatever
+          // they tick BEFORE they commit — a total that first appears on Stripe's own form is what
+          // generates phone calls to the office. null = nothing is added (§11.2 `info.fee`), and
+          // the server recomputes the real figure at intent regardless.
+          fee: feeRate ? { percentBps: feeRate.percentBps, fixedCents: feeRate.fixedCents, capCents: feeRate.capCents } : null,
           openInvoices: fam.openInvoices.map((i) => ({
             id: i.id,
             label: i.label,
@@ -3036,12 +3342,16 @@ async function main(): Promise<void> {
                 ? 'This school isn’t taking payments in advance right now — you can pay up to the balance due.'
                 : amt.error === 'bad-amount'
                   ? 'Please enter a valid amount.'
-                  : amt.error === 'unknown-item' || amt.error === 'not-itemised' || amt.error === 'unknown-student'
+                  : amt.error === 'unknown-item' || amt.error === 'not-itemized' || amt.error === 'unknown-student'
                     ? 'Your balance changed — please look it up again.'
                     : 'Please choose what to pay.';
       return reply.code(400).send({ error: msg });
     }
-    const chargeMinor = amt.amountCents;
+    // What the family owes, and what the card is charged. They differ only when the office has
+    // asked the payer to cover Stripe's cut (§11.2 `info.fee`) — the rate comes from the session,
+    // so it is the one this parent was quoted on the balance screen.
+    const charge = grossUpTuition(amt.amountCents, session.fee);
+    const chargeMinor = charge.grossCents;
     // §11.3 metadata — the reconciliation discriminator + the family id (REQUIRED). NEVER the
     // Student ID or a child's name (§11.3 bans both from metadata/descriptions/URLs outright,
     // since metadata shows up in Stripe dashboards and exports). Description = family label.
@@ -3051,6 +3361,13 @@ async function main(): Promise<void> {
       students_family_id: session.familyId,
       campaignId: c.id,
     };
+    // REQUIRED whenever we grossed up (§11.3). Not bookkeeping: Students' reconciliation reads
+    // succeeded PaymentIntents a day later, on a job that never saw this request and may find the
+    // setting switched off or the rate changed — without this key it cannot tell a $103.30 charge
+    // covering $100 of tuition from a family who genuinely paid $103.30. An amount is not
+    // identifying, so this breaks none of §11.3's privacy rules; a Student ID or a child's name
+    // still never goes near metadata. Omitted entirely when nothing was added.
+    if (charge.feeCents > 0) metadata.students_fee_cents = String(charge.feeCents);
     // Whose payment this is: the child the parent named for a per-child advance, else the child
     // whose ID was typed. Drives §11.3 metadata AND where Students parks any surplus.
     const forStudentId = amt.targetStudentId || session.studentId;
@@ -3072,8 +3389,19 @@ async function main(): Promise<void> {
       paymentIntentId = intent.id;
     } catch (e) {
       log.warn('tuition payment setup failed: ' + (e instanceof Error ? e.message : String(e)));
-      if (!throttled('paymentFailed:tuition', HOUR))
-        raise('paymentFailed', 'A tuition payment failed to start', 'Stripe rejected a payment setup — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments.', 'error');
+      {
+        const g = burst('paymentFailed:tuition', HOUR);
+        if (g.allow) {
+          raise(
+            'paymentFailed',
+            `A tuition payment failed to start on “${c.title}”`,
+            // Named for the same reason as the donation path, and with the same caveat: the gate is
+            // global, so this is where it was noticed rather than necessarily the only page affected.
+            `Stripe rejected a payment setup on “${c.title}” — parents can’t pay tuition until it’s fixed. Check your Stripe keys/status in OpenMasjidOS → Settings → Payments. That’s where it was noticed; if the cause is your keys or Stripe itself, every page is affected.${alsoHeld(g.skipped)}`,
+            'error',
+          );
+        }
+      }
       return reply.code(502).send({ error: 'We couldn’t start the payment. Please try again.' });
     }
     store.createStudentPayment({
@@ -3083,7 +3411,10 @@ async function main(): Promise<void> {
       familyId: session.familyId,
       studentId: forStudentId,
       familyLabel: session.familyLabel,
-      amount: chargeMinor,
+      // The TUITION, never the gross — this is what record-payment sends as `amountCents`, and
+      // keeping the net here means the money path does no arithmetic (see StudentPayment.amount).
+      amount: charge.tuitionCents,
+      feeCents: charge.feeCents,
       currency,
       allocations: amt.allocations ? JSON.stringify(amt.allocations) : '',
       // Every breakdown is recomputed server-side from the session, then stored so the outbox
@@ -3091,7 +3422,19 @@ async function main(): Promise<void> {
       studentsSplit: amt.students ? JSON.stringify(amt.students) : '',
       paymentLines: amt.lines ? JSON.stringify(amt.lines) : '',
     });
-    return { data: { clientSecret, publishableKey: acct.publishableKey, amount: toMajor(chargeMinor, currency), currency } };
+    return {
+      data: {
+        clientSecret,
+        publishableKey: acct.publishableKey,
+        // `amount` stays what the card is charged (the gross), which is what the pay step's
+        // heading has always shown. `tuition` and `fee` break it down so that heading can be
+        // honest about which part is the school's — the authoritative figures, computed here.
+        amount: toMajor(chargeMinor, currency),
+        tuition: toMajor(charge.tuitionCents, currency),
+        fee: toMajor(charge.feeCents, currency),
+        currency,
+      },
+    };
   });
 
   // Confirm a tuition payment on return: RETRIEVE the intent from Stripe (never trust the
@@ -3119,6 +3462,11 @@ async function main(): Promise<void> {
         status: pi.status,
         succeeded,
         amount: toMajor(pi.amount, pi.currency),
+        // What the school is credited, and the processor's cut, from the stored row — so a parent
+        // looking at $103.30 on their statement can see which part was the tuition. 0 for almost
+        // every school, and the screen then says nothing extra.
+        tuition: toMajor(sp.amount, pi.currency),
+        fee: toMajor(sp.feeCents, pi.currency),
         currency: pi.currency,
         schoolName: info.available ? info.info.schoolName : '',
         familyLabel: sp.familyLabel,
@@ -3210,11 +3558,9 @@ async function main(): Promise<void> {
               subscriptionId: inv.subscription,
             });
             const camp = store.getCampaign(original.campaignId);
-            // The same event as any other donation, so the same channels and the same minimum — a
-            // masjid that asked not to hear about small gifts did not mean "except monthly ones".
-            if (amt >= store.getNotify().minAmount) {
-              raise('donation', 'A monthly donation was received', `${formatMoney(amt, ccy)} was donated to “${camp?.title ?? 'your masjid'}”.`, 'success');
-            }
+            // The same event as any other donation, so the same recipients — and, since v0.44.0, no
+            // amount floor on either path (see the sibling call in the confirm route).
+            raise('donation', 'A monthly donation was received', `${formatMoney(amt, ccy)} was donated to “${camp?.title ?? 'your masjid'}”.`, 'success');
           }
         }
       }
@@ -3226,7 +3572,7 @@ async function main(): Promise<void> {
 
   // ── Admin commands over WhatsApp (POST /fabric/commands/run) ────────────────
   //
-  // An authorised admin messages the masjid's number (`!donations`); the platform renders the menu,
+  // An authorized admin messages the masjid's number (`!donations`); the platform renders the menu,
   // decides who may run what, and POSTs the chosen command here. Everything we serve is READ-ONLY
   // and aggregate, and NO DONOR IS EVER NAMED — the reasoning is in commands.ts and manifest.yaml.
   //
@@ -3343,7 +3689,7 @@ async function main(): Promise<void> {
             const c = store.getCampaign(chosen.id);
             return c ? appealReply(c) : { ok: false, error: 'That appeal has gone.' };
           }
-          // Didn't recognise it. Ask ONCE more (a typo on a phone is ordinary), then give up —
+          // Didn't recognize it. Ask ONCE more (a typo on a phone is ordinary), then give up —
           // `ok:false` ends the exchange, which is the right way to release somebody who is stuck.
           const attempt = pickAttempt(req.followUpToken);
           if (attempt >= 2) return { ok: false, error: `I couldn’t find an appeal called “${asked.slice(0, 40)}”. Try again with !donations appeal.` };
@@ -3587,6 +3933,15 @@ async function main(): Promise<void> {
   const SWEEP_MAX_AGE_MS = 30 * 24 * 3600_000;
   const lostDonationSweep = async () => {
     try {
+      // Recoveries are COLLECTED and reported once per pass, not one notification each.
+      //
+      // This is the app's one genuine burst: the sweep is bounded to 25 rows, and the first pass
+      // after a masjid updates into the feature can legitimately find all 25 — so the old code
+      // sent 25 notifications on three channels, then up to 25 more ten minutes later. A gate that
+      // dropped the 2nd to the 25th would lose real money news; batching loses nothing, because
+      // "3 donations were found, $140 in total" is a better sentence than three of anything, and
+      // every recovered donation is in the ledger either way.
+      const found: { amountMinor: number; currency: string; campaign: string }[] = [];
       for (const don of store.listUnconfirmedDonations(SWEEP_MIN_AGE_MS, SWEEP_MAX_AGE_MS)) {
         const acct = await accountById(don.stripeAccountId);
         if (!acct?.secretKey) continue; // keys gone for this account — nothing we can do, keep the row
@@ -3603,13 +3958,8 @@ async function main(): Promise<void> {
         log.warn(`recovered a donation Stripe took but we never recorded (${don.paymentIntentId})`);
         // Deliberately NOT gated on `minAmount`: this is not "a donation arrived", it is "your
         // records were wrong and are now right", and a masjid reconciling accounts needs to know
-        // that however small the amount.
-        raise(
-          'donationRecovered',
-          'A donation was found and added',
-          `A donation of ${formatMoney(pi.amount, pi.currency)} to “${camp?.title ?? 'your masjid'}” had been paid but never recorded — it is now in your donations, dated when the money arrived.`,
-          'success',
-        );
+        // that however small the amount. Collected here; raised once below.
+        found.push({ amountMinor: pi.amount, currency: pi.currency, campaign: camp?.title ?? 'your masjid' });
         if (don.receipt === 'pending') {
           void sendDonationReceipt(updated ?? don)
             .then((r) => {
@@ -3618,6 +3968,34 @@ async function main(): Promise<void> {
             })
             .catch(() => {});
         }
+      }
+      // One notification for the pass. A single recovery reads exactly as it always did; several
+      // read as the reconciliation news they actually are.
+      if (found.length === 1) {
+        const f = found[0];
+        raise(
+          'donationRecovered',
+          'A donation was found and added',
+          `A donation of ${formatMoney(f.amountMinor, f.currency)} to “${f.campaign}” had been paid but never recorded — it is now in your donations, dated when the money arrived.`,
+          'success',
+        );
+      } else if (found.length > 1) {
+        // Summed per currency, because a masjid with two appeals on two accounts can have two.
+        const totals = new Map<string, number>();
+        for (const f of found) totals.set(f.currency, (totals.get(f.currency) ?? 0) + f.amountMinor);
+        const money = [...totals].map(([ccy, minor]) => formatMoney(minor, ccy)).join(' + ');
+        // AND A BREAKDOWN BY APPEAL. The batch used to report only a count and a total, which
+        // answers "how much" and not "which fund went up" — and the second question is the one a
+        // treasurer reconciling a Zakat account actually has. The single-recovery branch above has
+        // always named its appeal; this is the one that dropped it. The grouping is a pure function in
+        // notify.ts so the sentence a masjid reads can be tested.
+        const breakdown = recoveryBreakdown(found, formatMoney);
+        raise(
+          'donationRecovered',
+          `${found.length} donations were found and added`,
+          `${found.length} donations totalling ${money} had been paid but never recorded — they are now in your donations, each dated when its money arrived. Your totals will go up by that much.${breakdown}`,
+          'success',
+        );
       }
     } catch { /* fail soft — a sweep must never crash the app */ }
   };
@@ -3644,6 +4022,115 @@ async function main(): Promise<void> {
       } catch { /* fail soft — never let the receipt outbox crash the app */ }
     };
     const iv = setInterval(nonOverlapping(receiptOutbox), 60_000);
+    iv.unref?.();
+  }
+
+  /**
+   * WHATSAPP GAP WATCH (platform 0.52.0).
+   *
+   * The platform can now tell us about periods when a masjid's WhatsApp link had silently expired:
+   * messages were accepted, reported `sent`, and never delivered. It cannot resend them — it deletes
+   * a message's contents the moment it hands them over, on purpose — so only the app that still has
+   * the source data can do anything, and the platform asks each app to decide what.
+   *
+   * THIS APP DOES NOT RESEND, AND THAT IS A DOMAIN ANSWER RATHER THAN LAZINESS.
+   *
+   * Every WhatsApp message this app sends is an ADMIN NOTIFICATION about something already recorded.
+   * No donor is ever messaged — the app collects no donor phone number at all — so nobody outside the
+   * masjid is waiting on one of these, and §13's "nothing depends on the message arriving" holds
+   * exactly. Taking the six events one at a time:
+   *
+   *  • `donation` / `donationRecovered` — the money is in the ledger, the totals and the charts. This
+   *    is also by far the highest-volume event (one per transaction), so re-sending a day of them to a
+   *    freshly re-linked number is precisely the volume risk the platform warns about, in exchange for
+   *    no information the admin cannot already see.
+   *  • `refund` — in the ledger and in the audit log, with who did it.
+   *  • `planStopped` — the plan is stopped at Stripe and shown in the Monthly tab.
+   *  • `paymentFailed` — self-healing, and re-sending it is actively misleading. It is `burst()`-gated
+   *    to one an hour, so if donations are STILL broken the next attempt raises it again; if they have
+   *    been fixed, a re-send is an alarm about a solved problem.
+   *  • `tuitionFailed` — the thing that actually matters is already retried by the record-payment
+   *    outbox for three days. A stale copy of the warning adds nothing to that.
+   *
+   * So a re-send would mean re-delivering old copies of news that is either visible in the panel or
+   * already being retried by better machinery. What an admin genuinely needs is to know that a gap
+   * happened, when, and that their records are unaffected — so we raise exactly ONE notification per
+   * window, whatever its count, and keep it on the settings screen afterwards.
+   *
+   * Hourly, plus one pass shortly after startup (the boot pass is what catches a gap that happened
+   * while the box was off). Cheap: the platform puts this on the read budget, not the send budget, and
+   * the normal answer is an empty array.
+   */
+  {
+    const GAP_POLL_MS = 3600_000;
+
+    /**
+     * The platform's `cause` in a masjid's words, plus what they can actually do about it.
+     *
+     * Written from the platform's own value rather than guessed — the earlier version of this said
+     * "your connection had stopped working" for every window, which was true for the outage that
+     * prompted the feature and would have been wrong for `key-rejected` (nothing about the phone, and
+     * re-linking it would have achieved nothing). An unrecognized value has already been flattened to
+     * `unknown` by `whatsappSuspect`, so this map cannot be missing an arm.
+     */
+    const CAUSE_TEXT: Record<WhatsAppGapCause, { what: string; fix: string }> = {
+      'session-expired': {
+        what: 'Your masjid’s WhatsApp connection had signed itself out — the way being signed out of WhatsApp on a computer does.',
+        fix: 'It has been reconnected, or can be, by linking the phone again in OpenMasjidOS → Settings → WhatsApp.',
+      },
+      'needs-relink': {
+        what: 'Your masjid’s WhatsApp phone needed linking again, and until it was, messages were accepted but not delivered.',
+        fix: 'Link the phone again in OpenMasjidOS → Settings → WhatsApp and messages will start arriving.',
+      },
+      'key-rejected': {
+        what: 'The WhatsApp gateway on this server rejected OpenMasjidOS’s credentials, so messages were accepted but never sent on.',
+        fix: 'This one is not about your phone — whoever set up the WhatsApp gateway needs to check it in OpenMasjidOS.',
+      },
+      unknown: {
+        what: 'Your masjid’s WhatsApp connection had stopped working without OpenMasjidOS noticing.',
+        fix: 'If messages are still not arriving, re-linking the phone in OpenMasjidOS → Settings → WhatsApp is the usual fix.',
+      },
+    };
+
+    const gapWatch = async (): Promise<void> => {
+      if (!ssoConfigured()) return;
+      const windows = await whatsappSuspect();
+      for (const w of windows) {
+        // Reconcile the reported ids to our own notifications BEFORE recording, so the stored row
+        // carries the labels the panel will need. Partial by construction — we keep the newest outcome
+        // per recipient+event, not a message log — so everything below says "at least".
+        const events = store.eventsForMessageIds(w.ids);
+        // The platform re-reports a window on every poll for seven days after the outage ends, so the
+        // store decides whether this is news. Check-and-write in one call, before the notification, so
+        // a slow send cannot let the next poll raise the same window twice.
+        if (!store.addWhatsAppGap({ from: w.from, to: w.to, count: w.count, cause: w.cause, truncated: w.truncated, events })) continue;
+
+        const c = CAUSE_TEXT[w.cause];
+        const when = `${new Date(w.from).toLocaleString()} and ${new Date(w.to).toLocaleString()}`;
+        const n = w.count === 1 ? 'One message' : `${w.count} messages`;
+        const labels = events.map((e) => NOTIFY_EVENT_LABEL[e]);
+        const which = labels.length === 0
+          ? ''
+          : `\n\nAt least ${labels.length === 1 ? 'one of them was' : 'some of them were'} about: ${labels.join('; ')}. ` +
+            'There may have been others of the same kind — this is what we could match exactly.';
+        log.warn(`WhatsApp gap reported by the platform: ${w.count} message(s), cause ${w.cause}, ${w.from}–${w.to}${w.truncated ? ' (ids truncated)' : ''}`);
+        raise(
+          'whatsappGap',
+          'Some WhatsApp messages may not have arrived',
+          `${c.what}\n\n${n} sent between ${when} ${w.count === 1 ? 'was' : 'were'} reported as sent, but ${w.count === 1 ? 'it' : 'they'} may never have arrived. ${c.fix}${which}\n\n` +
+            'Nothing was lost. Every donation, refund and monthly change from that period is in your records exactly as normal — it was only the messages that went missing, so there is nothing to put right. ' +
+            'The Donations tab and the Overview cover that period as usual if you want to see what you missed.\n\n' +
+            'We have deliberately not re-sent them: they were all notices about things already in your records, and re-sending a day of them to a phone that has only just been re-linked is the quickest way to get that number blocked.',
+          'warning',
+        );
+      }
+    };
+    // A short delay rather than immediately: at boot the Fabric config watcher may not have settled,
+    // and an unconfigured platform would just answer nothing. The boot pass is what catches a gap that
+    // happened while the box was off — and since platform 0.51.1-dev.13 retains a window for seven days
+    // after the outage ends, that pass now reliably finds one instead of racing the admin's re-link.
+    setTimeout(() => void gapWatch().catch(() => {}), 90_000).unref?.();
+    const iv = setInterval(nonOverlapping(gapWatch), GAP_POLL_MS);
     iv.unref?.();
   }
 }

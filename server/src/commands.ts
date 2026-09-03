@@ -4,7 +4,7 @@
 /**
  * Admin commands over WhatsApp (manifest `commands:`, platform v0.51.0+).
  *
- * An authorised admin messages the masjid's number — `!donations` — and the platform renders a
+ * An authorized admin messages the masjid's number — `!donations` — and the platform renders a
  * numbered menu, checks who may run what, and POSTs the chosen one to `/fabric/commands/run` on our
  * own web port. We are asked only to execute it and answer in plain text.
  *
@@ -14,7 +14,7 @@
  *    informal should be a wrong number on a screen, not a closed appeal or a refunded donation.
  *  • **No donor is ever named.** Not a name, not an email, not a reference. A WhatsApp message is
  *    forwardable and screenshottable, and the donor never agreed to appear in one — so a command
- *    answers "£312 from 9 donations", never "£50 from Yusuf". The panel is where donor records live,
+ *    answers "$312 from 9 donations", never "$50 from Yusuf". The panel is where donor records live,
  *    behind a login.
  *  • **Local data only.** There is a 10-second timeout and someone is holding a phone, so every
  *    figure comes from SQLite. Nothing here calls Stripe: a live plan sync can take seconds per
@@ -230,7 +230,7 @@ export function replyAppeal(s: AppealStats, fmt: Money): string {
 export function replyAppealMenu(appeals: AppealChoice[], again: boolean, hidden = 0): string {
   const list = appeals.map((a, i) => `${i + 1}. ${a.title}`).join('\n');
   const more = hidden > 0 ? `\n…and ${hidden} more — type part of the name for one of those.` : '';
-  return `${again ? 'Sorry — I didn’t recognise that one. Which appeal?' : 'Which appeal?'}\n${list}${more}\n\nReply with a number, or part of the name.`;
+  return `${again ? 'Sorry — I didn’t recognize that one. Which appeal?' : 'Which appeal?'}\n${list}${more}\n\nReply with a number, or part of the name.`;
 }
 
 export interface MonthlyStats {

@@ -58,11 +58,17 @@ soft — the donation site works regardless, which is the property to preserve.
 | Variable | What it does |
 |---|---|
 | `PORT` | Listen port (default 8080) |
+| `HOST` | Listen address (default `0.0.0.0`) |
 | `DATA_DIR` | Where the SQLite file and uploaded images live (default `/data` in the image) |
 | `PUBLIC_DIR` | The built web app to serve (default the image's own copy) |
 | `LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
 | `OPENMASJID_BASE_URL` + `OPENMASJID_APP_SECRET` | Injected by the platform. Both present = "embedded": SSO, the Stripe vault, email, alerts, WhatsApp and the tuition broker switch on |
+| `OPENMASJID_APP_ID` | Our own id on the platform (default `donations`). Injected; only worth setting if you are running two copies against one OpenMasjidOS |
 | `STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `CURRENCY` | **First-run seeds only**, for running the container by hand. Nothing injects them, and a value saved in the app always wins |
+| `STRIPE_ACCOUNT` | Which vaulted account to ask the platform for, when embedded. Read every start rather than stored, so the vault stays the source of truth |
+| `MASJID_NAME`, `MASJID_ADDRESS`, `MASJID_EMAIL`, `MASJID_PHONE`, `MASJID_WEBSITE`, `MASJID_LOGO`, `MASJID_CURRENCY` | Optional first-run seeds for the masjid's own details. **Nothing hard-fails without them** — the platform injects no profile today, and anything an admin saves in-app wins |
+| `COOKIE_SECURE` | Force `Secure` on the admin session cookie (`1`/`true`). Normally unnecessary: the flag is added automatically when the request arrived over TLS. Set it when a proxy terminates TLS in a way the app cannot see |
+| `CLOUDFLARED_BIN` | Path to the `cloudflared` binary for the standalone public-access tunnel (default `cloudflared`) |
 
 ### The platform-only features, without a platform
 
@@ -111,7 +117,7 @@ All three must be clean. If you add a `*.test.ts` file, **add it to the `test` s
   new files; never strip an existing one.
 - **Conventional-commit messages**, small commits, and comment the *why* rather than the what.
 - Match the surrounding style; the UI follows the OpenMasjidOS design language
-  (dark default, WCAG AA, RTL-ready, honors `prefers-reduced-motion`). Colours and spacing
+  (dark default, WCAG AA, RTL-ready, honors `prefers-reduced-motion`). Colors and spacing
   come from the design tokens — never a hardcoded hex in a component.
 - **Never** put a Stripe secret key in the browser or a log, and never handle raw card data:
   entry happens inside Stripe's own Payment Element (PCI SAQ-A).

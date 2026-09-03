@@ -17,6 +17,7 @@ import {
   identifyStudent,
   lookupStudent,
   money,
+  tuitionFeeFor,
   type ConfirmResponse,
   type IntentResponse,
   type PublicCampaign,
@@ -96,11 +97,11 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
   // Load the campaign on mount / slug change (needed for both the donation flow and the
   // thank-you screen's custom message/accent/background on a redirect return).
   useEffect(() => {
-    let cancelled = false;
+    let canceled = false;
     getPublicCampaign(slug, token)
-      .then((c) => { if (!cancelled) setCampaign(c); })
-      .catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : 'This donation page isn’t available.'); });
-    return () => { cancelled = true; };
+      .then((c) => { if (!canceled) setCampaign(c); })
+      .catch((e) => { if (!canceled) setLoadError(e instanceof Error ? e.message : 'This donation page isn’t available.'); });
+    return () => { canceled = true; };
   }, [slug, token]);
 
   // If Stripe redirected back here (some payment methods do), it appends ?payment_intent=…
@@ -251,7 +252,7 @@ function AmountStep({ campaign, onIntent }: { campaign: PublicCampaign; onIntent
         </div>
       )}
 
-      {/* This page can't take a card. Until now `ready: false` only greyed the button out, so a
+      {/* This page can't take a card. Until now `ready: false` only grayed the button out, so a
           supporter met a dead page with nothing said and no idea whether it was them. One sentence,
           and never a word about Stripe, accounts or configuration — none of that is theirs to fix.
           `unreachable` is genuinely temporary, so it says so; the others are not, so they don't. */}
@@ -535,13 +536,13 @@ const childName = (st: { firstName: string; lastInitial: string }): string =>
 type PayMode = 'full' | 'pick';
 
 /** One bill, with its lines beneath it. Under "pay the balance" it's a statement; once the parent
- *  chooses what to pay, each payable line (or the bill itself, when it isn't itemised) gets a
+ *  chooses what to pay, each payable line (or the bill itself, when it isn't itemized) gets a
  *  checkbox. Settled and credit lines are always shown and never payable. */
 function TuitionBill({
-  inv, itemised, choosing, showStudent, checked, onToggle, fmt,
+  inv, itemized, choosing, showStudent, checked, onToggle, fmt,
 }: {
   inv: StudentInvoiceView;
-  itemised: boolean;
+  itemized: boolean;
   choosing: boolean;
   showStudent: boolean;
   checked: Record<string, boolean>;
@@ -551,8 +552,8 @@ function TuitionBill({
   const sub = [showStudent ? inv.student : '', inv.dueDate ? `Due ${inv.dueDate}` : ''].filter(Boolean).join(' · ');
   // A bill of one line needs no breakdown: the bill row IS the line. More than one and the bill
   // becomes a heading with its lines under it, so "$200 tuition + $50 book fee" can be paid apart.
-  const lines = itemised && inv.items.length > 1 ? inv.items : [];
-  const soleKey = itemised ? (inv.items.find((i) => i.payable)?.id ?? inv.id) : inv.id;
+  const lines = itemized && inv.items.length > 1 ? inv.items : [];
+  const soleKey = itemized ? (inv.items.find((i) => i.payable)?.id ?? inv.id) : inv.id;
   // A row with a checkbox is a <label>, so the whole row is the tap target — a tick box alone is
   // a small thing to hit, and this list is read on phones propped at a masjid door.
   const tickable = choosing && lines.length === 0;
@@ -602,12 +603,12 @@ function TuitionBill({
   );
 }
 
-/** The tickable rows on the "choose what to pay" list. When a family's bills are itemised
+/** The tickable rows on the "choose what to pay" list. When a family's bills are itemized
  *  (§11.0b) a row is one LINE of a bill — "Book fee", $50 — so a parent can pay the book fee
  *  without the month's tuition. Otherwise a row is a whole bill, exactly as before. Settled and
  *  credit lines are never rows: they're shown for information and can't be charged. */
 const payableRowKeys = (f: NonNullable<StudentLookupResult['family']>): string[] =>
-  f.itemised
+  f.itemized
     ? f.openInvoices.flatMap((inv) => inv.items.filter((it) => it.payable).map((it) => it.id))
     : f.openInvoices.map((inv) => inv.id);
 
@@ -652,7 +653,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   // own copy of the session, so a tampered figure here buys nothing.
   const payRows: { key: string; amount: number }[] = !fam
     ? []
-    : fam.itemised
+    : fam.itemized
       ? fam.openInvoices.flatMap((inv) => inv.items.filter((it) => it.payable).map((it) => ({ key: it.id, amount: it.amount })))
       : fam.openInvoices.map((inv) => ({ key: inv.id, amount: inv.amount }));
   const pickedKeys = payRows.filter((r) => checked[r.key]).map((r) => r.key);
@@ -665,6 +666,11 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
       : mode === 'full'
         ? fam.balance
         : payRows.filter((r) => checked[r.key]).reduce((s, r) => s + r.amount, 0);
+  // What the card will actually be charged, when the school has asked the payer to cover the
+  // processing fee. Computed with the same integer formula the server uses, from the rate the
+  // server sent, so the figure quoted here is the figure charged. `fee` is 0 for almost every
+  // school and every line below then renders as it always has.
+  const charge = tuitionFeeFor(selectionAmount, fam?.fee ?? null, ccy);
 
   // Step 1 — who does this Student ID belong to? No balance is revealed yet.
   const runIdentify = async (e: React.FormEvent) => {
@@ -728,9 +734,9 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
         { kind: 'amount', amount: typedAmount, student: advanceFor }
       : mode === 'full'
         ? { kind: 'full' }
-        : // Itemised bills pay by LINE (the ticked line is the one Students settles, and stays
+        : // Itemized bills pay by LINE (the ticked line is the one Students settles, and stays
           // settled); otherwise by whole bill, as before.
-          fam.itemised
+          fam.itemized
           ? { kind: 'items', itemIds: pickedKeys }
           : { kind: 'invoices', invoiceIds: pickedKeys };
     setBusy(true); setError('');
@@ -798,9 +804,10 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
               : `It sits on ${advanceKid.firstName || 'this child'}’s account as credit and comes off their next bill. Smallest payment ${money(minAmount, ccy)}.`}
           </p>
         </div>
+        <TuitionFeeLines tuition={charge.tuition} fee={charge.fee} total={charge.total} ccy={ccy} />
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
-          {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}
+          {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(charge.total)}
         </button>
         <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={closeAdvance}>Back</button>
       </section>
@@ -814,7 +821,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
     const kids = fam.students;
     const perChild = kids.length > 1;
     // Bills whose child we can't place (a provider that sent no studentId) must still be payable,
-    // so they get their own unlabelled group rather than disappearing off the screen.
+    // so they get their own unlabeled group rather than disappearing off the screen.
     const orphans = fam.openInvoices.filter((i) => !kids.some((k) => k.ref === i.studentRef));
     const canPick = fam.openInvoices.length > 0;
     return (
@@ -866,7 +873,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
                     <TuitionBill
                       key={inv.id}
                       inv={inv}
-                      itemised={fam.itemised}
+                      itemized={fam.itemized}
                       choosing={mode === 'pick'}
                       showStudent={!perChild}
                       checked={checked}
@@ -891,7 +898,7 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
                 <TuitionBill
                   key={inv.id}
                   inv={inv}
-                  itemised={fam.itemised}
+                  itemized={fam.itemized}
                   choosing={mode === 'pick'}
                   showStudent
                   checked={checked}
@@ -910,9 +917,12 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
         {fam.balance <= 0 && !canAdvance ? (
           <p className="hint">This school isn’t taking payments in advance right now — there’s nothing to pay today.</p>
         ) : fam.balance > 0 ? (
-          <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
-            {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(selectionAmount)}
-          </button>
+          <>
+            <TuitionFeeLines tuition={charge.tuition} fee={charge.fee} total={charge.total} ccy={ccy} />
+            <button className="btn btn--primary btn--block donate-cta glow-accent" type="button" disabled={busy || !campaign.ready || selectionAmount <= 0} onClick={startPayment}>
+              {busy ? <span className="spinner" /> : <Lock size={16} />} Pay {fmt(charge.total)}
+            </button>
+          </>
         ) : null}
         <button className="btn btn--ghost btn--sm donate-back" type="button" onClick={startOver}>Look up a different student</button>
       </section>
@@ -971,6 +981,36 @@ function TuitionShell({ campaign }: { campaign: PublicCampaign }) {
   );
 }
 
+/**
+ * The processing fee, itemized, before the payer commits.
+ *
+ * This is a REQUIREMENT of the students/billing contract (§11.2 `info.fee`), not a nicety, and it
+ * is the part most likely to be skipped. Two things have to be true:
+ *
+ *  • **The total appears here, not first on Stripe's form.** A charge the payer did not expect is
+ *    what generates a phone call to the office.
+ *  • **The payer is told whose money it is.** The extra is not the masjid's and not the school's:
+ *    it is what the card networks charge to accept a card, and it goes to the payment processor.
+ *    Saying so is the difference between a fee and a mystery.
+ *
+ * Renders nothing at all when there is no fee, which is almost every school.
+ */
+function TuitionFeeLines({ tuition, fee, total, ccy }: { tuition: number; fee: number; total: number; ccy: string }) {
+  if (fee <= 0) return null;
+  return (
+    <div className="fee-breakdown">
+      <div className="fee-row"><span>Tuition</span><span>{money(tuition, ccy)}</span></div>
+      <div className="fee-row"><span>Card processing fee</span><span>{money(fee, ccy)}</span></div>
+      <div className="fee-row fee-row--total"><span>Total charged</span><span>{money(total, ccy)}</span></div>
+      <p className="hint fee-note">
+        The processing fee is not the masjid’s — it is what Visa, Mastercard and American Express charge
+        to accept a card, and it goes straight to the payment processor. Paying by cash or check at the
+        office avoids it.
+      </p>
+    </div>
+  );
+}
+
 function TuitionPayStep({ campaign, intent, label, onBack, onDone }: {
   campaign: PublicCampaign; intent: TuitionIntentResponse; label: string; onBack: () => void; onDone: (r: TuitionConfirmResponse) => void;
 }) {
@@ -982,6 +1022,9 @@ function TuitionPayStep({ campaign, intent, label, onBack, onDone }: {
       <div className="donate-emblem" aria-hidden="true"><GraduationCap size={30} /></div>
       <h1 className="donate-title">Pay {money(intent.amount, intent.currency)}</h1>
       {label ? <p className="donate-sub muted">{label}</p> : null}
+      {/* The server's own figures, so the last screen before the card form states the split
+          authoritatively rather than re-deriving it. */}
+      <TuitionFeeLines tuition={intent.tuition} fee={intent.fee} total={intent.amount} ccy={intent.currency} />
       <Elements stripe={stripePromise} options={{ clientSecret: intent.clientSecret, appearance: { theme } }}>
         <TuitionPayForm campaign={campaign} intent={intent} onDone={onDone} />
       </Elements>
@@ -1031,9 +1074,19 @@ function TuitionThanks({ result }: { result: TuitionConfirmResponse }) {
       <div className={`donate-emblem${ok ? ' is-success' : ''}`} aria-hidden="true"><GraduationCap size={34} /></div>
       <h1 className="donate-title">{ok ? 'Payment received' : 'Payment not completed'}</h1>
       {ok ? (
-        <p className="donate-desc">
-          Your payment of {money(result.amount, result.currency)}{result.schoolName ? ` to ${result.schoolName}` : ''} has been recorded. JazākAllāhu khayran.
-        </p>
+        <>
+          <p className="donate-desc">
+            Your payment of {money(result.amount, result.currency)}{result.schoolName ? ` to ${result.schoolName}` : ''} has been recorded. JazākAllāhu khayran.
+          </p>
+          {/* Where the money went, when a fee was added — so a parent reading their statement
+              weeks later can tell which part reached the school. */}
+          {result.fee > 0 && (
+            <p className="hint">
+              {money(result.tuition, result.currency)} went to the school’s fees and{' '}
+              {money(result.fee, result.currency)} was the card processing fee.
+            </p>
+          )}
+        </>
       ) : result.status === 'processing' ? (
         <p className="donate-desc">Your payment is processing. You’ll receive confirmation shortly, in shā’ Allah.</p>
       ) : (

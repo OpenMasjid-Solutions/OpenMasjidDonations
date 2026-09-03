@@ -18,7 +18,6 @@ import assert from 'node:assert/strict';
 import {
   MIN_REFUND_MINOR,
   REFUND_REASONS,
-  isRefundReason,
   refundFailureMessage,
   refundState,
   refundableMinor,
@@ -75,7 +74,7 @@ test('zero, negative and non-finite amounts are refused', () => {
   }
 });
 
-// ── 2. The three-decimal rule (DONATIONS-001's neighbourhood) ─────────────────
+// ── 2. The three-decimal rule (DONATIONS-001's neighborhood) ─────────────────
 
 test('a part refund in a three-decimal currency is snapped to a multiple of ten', () => {
   // 10.123 KWD typed → 10123 minor by the caller; Stripe only accepts multiples of 10.
@@ -130,11 +129,21 @@ test('refundFailureMessage takes the first sentence only, and finishes it', () =
 
 // ── Reasons + display state ───────────────────────────────────────────────────
 
-test('only Stripe’s three reasons are accepted', () => {
-  for (const r of REFUND_REASONS) assert.ok(isRefundReason(r));
-  for (const bad of ['other', 'REQUESTED_BY_CUSTOMER', '', 1, null, undefined, {}]) {
-    assert.equal(isRefundReason(bad), false, `${String(bad)} must be rejected`);
+test('only Stripe’s three reasons exist, spelled exactly as Stripe spells them', () => {
+  // This list IS the validator: the route boundary uses `z.enum(REFUND_REASONS)`, so there is no
+  // second implementation to keep in step. There used to be — an `isRefundReason` type guard, removed
+  // in v0.44.0 because nothing in production ever called it and only its own test did, which made the
+  // suite look as though it covered the check that actually guards a refund. It covered a copy.
+  //
+  // Stripe rejects an unknown `reason` outright and is case-sensitive, so a typo here would turn every
+  // refund carrying a reason into a failed API call — and the money would stay with the masjid while
+  // the panel said it had gone back.
+  assert.deepEqual([...REFUND_REASONS], ['requested_by_customer', 'duplicate', 'fraudulent']);
+  for (const r of REFUND_REASONS) {
+    assert.equal(r, r.toLowerCase(), `${r} must be lower-case — Stripe is case-sensitive here`);
+    assert.ok(!/\s/.test(r), `${r} must not carry whitespace`);
   }
+  assert.equal(new Set(REFUND_REASONS).size, REFUND_REASONS.length, 'no duplicate reason');
 });
 
 test('refundState reads none / partial / full', () => {

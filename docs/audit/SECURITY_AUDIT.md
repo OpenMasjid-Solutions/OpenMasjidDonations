@@ -128,7 +128,7 @@ token; the OpenMasjidOS per-app secret; the admin password hash.
    Wants: a backdoored image on every masjid box. This is the highest-leverage path and the one
    the repo defends least consistently.
 4. **A curious or careless insider** — a second volunteer with panel access. Wants nothing;
-   causes harm by exporting donor data or cancelling plans, with no record that it happened.
+   causes harm by exporting donor data or canceling plans, with no record that it happened.
 5. **Not in the model:** a nation-state, physical theft of the Pi (assume game over), and the
    masjid admin themselves as an attacker (they own the box).
 
@@ -205,7 +205,7 @@ say that plainly than inflate the top of the table. Machine-readable copy in
 | Claimed | Verdict |
 |---|---|
 | `@fastify/static` path traversal / route-guard bypass is exploitable here (claimed High, twice) | **REFUTED.** Both registrations set `index: false` and never `list: true`, and both roots (`/app/public`, `/data/uploads`) contain only assets already public. There is no static-served route guard to bypass — every protected route is a Fastify route with a `preHandler`. Downgraded to Low: worth the major bump on its own schedule, not urgent. |
-| Every release tag's `docker-compose.yml` pins the previous release's digest, so masjids run one version behind (claimed High) | **REFUTED.** The catalog pins the **commit** (`6fc4ca27`, the digest-pin commit *after* the tag), not the tag, so installs resolve the correct digest. The tag-vs-pin ordering is a runbook artefact, not a version skew. |
+| Every release tag's `docker-compose.yml` pins the previous release's digest, so masjids run one version behind (claimed High) | **REFUTED.** The catalog pins the **commit** (`6fc4ca27`, the digest-pin commit *after* the tag), not the tag, so installs resolve the correct digest. The tag-vs-pin ordering is a runbook artifact, not a version skew. |
 
 ---
 
@@ -304,7 +304,7 @@ a request that carries no session cookie.
 `https://give.masjid.org/api/admin/donations.csv` → an unauthenticated attacker requests the same
 URL and receives the cached donor list without ever authenticating. Marked *Confirmed* for the
 missing headers and the PII content; the edge-caching step depends on the masjid's Cloudflare
-configuration, which is why the fix is defence that does not rely on knowing it.
+configuration, which is why the fix is defense that does not rely on knowing it.
 
 **Fixed** by sending `cache-control: no-store, private`, `pragma: no-cache` and `vary: cookie` on
 both the CSV and the JSON donations route.
@@ -342,7 +342,7 @@ The obvious hardenings each break something real:
 
 **My recommendation:** keep the escape hatch, and make abuse loud rather than silent — fire a
 Fabric alert on every anonymous `/api/setup` claim, and surface "a local password was set on
-`<date>` from `<peer>`" permanently in the panel. That is a change to auth behaviour, so it is
+`<date>` from `<peer>`" permanently in the panel. That is a change to auth behavior, so it is
 your call. See `ACTION_REQUIRED.md`.
 
 ### DONATIONS-009
@@ -373,7 +373,7 @@ yours. See `ACTION_REQUIRED.md` → Cross-repo.
 **No audit log for any admin financial or donor-data action.** Med · Confirmed · Tier 2 · **Fixed**
 
 Before this run, nothing recorded that a donor-PII export happened, that a monthly plan was
-cancelled, that a Stripe key was rotated, or that a campaign (and its attribution) was deleted.
+canceled, that a Stripe key was rotated, or that a campaign (and its attribution) was deleted.
 For an app whose own `CLAUDE.md` §8 promises a financial record, and where a second volunteer with
 panel access is in the threat model, there was no answer to "who did this, and when".
 
@@ -461,7 +461,7 @@ lockfile; the whole git history for secrets; the web bundle for client-side leak
    sanitises `X-Forwarded-*` (which DONATIONS-009's fix depends on), that `/api/fabric/email`
    sanitises the subject before building SMTP headers (DONATIONS-023's real fix), or what
    `probePlatform` will accept as a valid identity (DONATIONS-051).
-4. **Cloudflare's cache behaviour** for the masjid's actual zone (DONATIONS-003) — the fix is
+4. **Cloudflare's cache behavior** for the masjid's actual zone (DONATIONS-003) — the fix is
    written so it does not depend on the answer.
 5. **Whether any masjid is live in a three-decimal currency** (DONATIONS-001) or has already lost
    one-time donations to a failed `/confirm` (DONATIONS-002). Both need a look at real Stripe data

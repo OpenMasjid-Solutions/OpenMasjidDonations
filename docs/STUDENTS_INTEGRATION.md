@@ -46,7 +46,7 @@ square, paid ahead, or "you can't pay here" — and a consumer had no way to tel
 - **Never hide the campaign or disable the field because the balance is zero.** A family paying a term
   up front, or clearing the year at the start of Ramadan, is normal — tuition is not a donation appeal.
 - **The floor is the stricter of the school's and ours** (`MIN_TUITION_CENTS`, $1): a provider
-  advertising 25¢ can't drag us under a pound/dollar, and one advertising $5 is honoured. It applies to
+  advertising 25¢ can't drag us under a pound/dollar, and one advertising $5 is honored. It applies to
   **every** path — full balance, picked months, typed amount — because it is "the smallest card payment
   a parent may start, wherever they start it", the same constant the school's own portal enforces.
 - **Paying part of a real balance is not an advance** and needs no `allowAdvance`: only money *above*
@@ -58,7 +58,7 @@ square, paid ahead, or "you can't pay here" — and a consumer had no way to tel
 - `allowAdvance` is **advertised, never assumed** — it stays `false` against a Students that predates
   0.41.0, so an old school doesn't silently start taking prepayments.
 
-## 0c. Additive since v2 — Students 0.43.0: ITEMISED BILLS (§11.0b)
+## 0c. Additive since v2 — Students 0.43.0: ITEMIZED BILLS (§11.0b)
 
 A bill was one label and one number, so the only offer we could make was "pay the whole $250". In
 practice a February bill is **$200 monthly tuition + a $50 book fee**, and parents routinely want to
@@ -75,17 +75,17 @@ pay just the book fee.
   special case. A **credit** line (bursary, correction) reports `balanceCents: 0` because its value is
   already deducted from the lines above: shown as information, never payable.
 - **Settled** lines are still listed at `balanceCents: 0` — shown as "already paid" on a part-paid bill.
-  Only lines with a balance are offered. A **single-line bill gets no itemised UI**, exactly as before.
+  Only lines with a balance are offered. A **single-line bill gets no itemized UI**, exactly as before.
 - **`lines` is sent alone.** Students resolves exactly one breakdown, in the order
   `lines → allocations → students → derive-it-itself`, so sending more than one is dead weight at best
   and a contradiction to debug at worst. `lines` supersedes `students[]` (a line already resolves to its
-  child) and it is *honoured stickily*: the line the parent chose stays settled when Students later
+  child) and it is *honored stickily*: the line the parent chose stays settled when Students later
   recomputes its allocations.
-- **Itemisation is decided per FAMILY, not per bill** (`itemised` in our lookup response): the provider
-  honours lines OR whole invoices, never a mixture, so a selection mixing a line from one bill with a
-  whole other bill couldn't be expressed in one call. Every bill itemised, or none.
-- We **distrust itemisation we can't charge from**: if any line lacks an `id`, or the lines don't add up
-  to the bill, that invoice falls back to a single un-itemised row. Better to pay it as one thing than
+- **Itemization is decided per FAMILY, not per bill** (`itemized` in our lookup response): the provider
+  honors lines OR whole invoices, never a mixture, so a selection mixing a line from one bill with a
+  whole other bill couldn't be expressed in one call. Every bill itemized, or none.
+- We **distrust itemization we can't charge from**: if any line lacks an `id`, or the lines don't add up
+  to the bill, that invoice falls back to a single un-itemized row. Better to pay it as one thing than
   show a parent a breakdown that doesn't reconcile.
 - **`allocations[]` works from 0.43.0.** It was in the contract from v1 and silently ignored until now
   (which is why we also send `students[]` on that path — see §11.0b and the v0.34.0 note below). It's a
@@ -93,6 +93,79 @@ pay just the book fee.
   took cash between our lookup and our record-payment — the remainder is recorded as ordinary money on
   that child rather than rejected, because the card is already captured by then. `lines` is strict by
   contrast, since we build it from ids Students just gave us.
+
+## 0d. Additive since v2 — Students 0.51.0: the PAYER can cover the fee (§11.2 `info.fee`)
+
+One new object on `info`, no version bump. A madrasah may decide the payer covers Stripe's cut rather
+than the school. **`fee.enabled: false` is what almost every install returns, and it means change
+nothing** — charge the tuition, report the tuition, exactly as before.
+
+```jsonc
+"fee": { "enabled": true,
+         "card": { "percentBps": 290, "fixedCents": 30 },
+         "bank": { "percentBps": 80, "fixedCents": 0, "capCents": 500 } }
+```
+
+**The arithmetic is a division, and it rounds up.** The fee is a percentage **of the gross**, because
+that is what Stripe takes its cut of:
+
+```
+gross = ceil((tuitionCents + fixedCents) / (1 - percentBps / 10000))
+fee   = gross - tuitionCents
+```
+
+A naive markup — a percentage of the *tuition* — quotes $103.20 on a $100 bill where the right answer
+is $103.30. That is not rounding noise: Stripe then takes $3.29 and the school banks $99.91, so a $100
+invoice never settles, stays open for ever, and shows a family as unpaid over ten cents. `grossUpTuition`
+in `server/src/students.ts` does it in **integers** for the same reason — `10030 / 0.971` in binary
+floating point can land a hair either side of the true value, and `Math.ceil` of a hair too much charges
+a whole extra cent. `capCents` (the bank rate carries one) is applied last: over the cap the answer is
+simply `tuition + cap`, so a $2,000 payment does not get $16 added to cover a $5 charge.
+
+The contract's worked examples are asserted verbatim in `server/src/tuitionFee.test.ts`:
+
+| Tuition | Gross | Fee |
+| --- | --- | --- |
+| $100.00 | $103.30 | $3.30 |
+| $250.00 | $257.78 | $7.78 |
+| $2,000.00 by bank (80 / 0, cap 500) | $2,005.00 | $5.00 |
+
+**Three things we do when it is on.**
+
+1. **Show the payer the breakdown before they commit** — tuition, fee, total, as three lines, plus the
+   sentence saying whose money it is. Required, not a nicety: see §5.
+2. **Write `students_fee_cents` on the PaymentIntent.** Not bookkeeping. Students' reconciliation reads
+   succeeded PaymentIntents a day later, on a job that never saw our request and may find the setting
+   switched off or the rate changed — without this key it cannot tell a $103.30 charge covering $100 of
+   tuition from a family who genuinely paid $103.30. An amount is not identifying, so this breaks none
+   of §11.3's privacy rules, and the ban on a Student ID or a child's name still stands absolutely.
+3. **Report the NET in `record-payment`** — `amountCents` is the tuition, `feeCents` is informational.
+
+> **The failure directions are lopsided, so the storage is shaped to suit.** Forget the metadata key
+> and reconciliation credits one family a little too much. Put a **gross** in `amountCents` and Stripe's
+> cut is credited to the family as an overpayment, leaving a credit that silently eats into their next
+> bill and compounds for as long as the setting is on — wrong until a human notices. So
+> `student_payments.amount` holds **the tuition** and the fee lives in its own column: the money path
+> does no arithmetic at all, and no bug in the fee code can reach the ledger. "When in doubt, send the
+> tuition" — and the way never to be in doubt is to store the tuition.
+
+**We quote the CARD rate and never the bank one — a deliberate, documented choice.** The fee has to be
+fixed when the PaymentIntent is created, which is *before* the payer has chosen anything; this page uses
+Stripe's Payment Element with `automatic_payment_methods`, so whether the money arrives by card or by
+bank debit is not knowable at the moment we must decide the amount. Quoting the card rate and calling it
+a *card processing fee* is honest about the common case. Quoting the bank rate would under-collect the
+instant somebody used a card, which leaves the school short — the exact failure the gross-up prevents.
+`fee.bank` belongs to a flow that **knows** it is a bank debit (the school's own portal, or a kiosk with
+an ACH button). We parse it, and never apply it.
+
+**The rate is captured once per visit, into the server-side session.** Read from `info` every time —
+never hard-coded, since an office can change it — but read at **lookup**, not again at intent, because
+the payer must be charged what they were shown. `info` is cached ~5 minutes and a session lives 15, so
+re-reading could quote one total on the balance screen and charge another after the office changed the
+rate mid-visit.
+
+**The floor applies to the tuition, not to the total.** 99¢ is refused even though the grossed-up charge
+would clear $1 — otherwise a fee would quietly lift a too-small payment over the line.
 
 ## 0. What the parent sees (the required flow)
 
@@ -119,7 +192,7 @@ A `tuition` campaign renders **exactly this**, nothing more:
    - **Pay the balance** (the whole household `balanceCents`) — bills below read as a *statement*,
      with no tick boxes until the parent asks to choose, or
    - **Choose what to pay** — tick what you're paying, with the running total on the button.
-     On itemised bills (§11.0b) the bill label becomes a heading and each **line** is tickable, so the
+     On itemized bills (§11.0b) the bill label becomes a heading and each **line** is tickable, so the
      book fee can be paid without the month's tuition; a single-line bill is one row as before.
      Everything starts ticked, so "pay the lot" stays one tap, or
    - **Add money for &lt;child&gt;** — its own step: type any figure ≥ `minAmountCents` (a part payment,
@@ -193,7 +266,7 @@ turned off) → **hide the tuition campaign**. Use `schoolName` / `tagline` for 
 
 ### `identify` — whose Student ID is this? (step 2→3) **call this first**
 ```jsonc
-// the ID is normalised on the provider side (case, spaces, hyphens), so "yus-1234" is fine
+// the ID is normalized on the provider side (case, spaces, hyphens), so "yus-1234" is fine
 { "v": 2, "studentCode": "YUS1234" }
 // found — a first name + last initial and NOTHING else:
 → { "v": 2, "found": true, "student": { "studentCode": "YUS1234", "firstName": "Yusuf", "lastInitial": "I" } }
@@ -225,7 +298,7 @@ locks a code after **6 failed probes per hour** (shared bucket across `identify`
 ```
 Render the household total from `family.balanceCents` (that’s what “pay the full balance” charges) and
 the per-child `students[].balanceCents` behind it; render one selectable row per `openInvoices[]`
-(that’s the “pay specific months” list), labelled with the child from its `studentId`. **Never display
+(that’s the “pay specific months” list), labeled with the child from its `studentId`. **Never display
 more than the contract returns** — no full last names, DOB, or contact info. Keep `family.id` +
 `matchedStudent.id` server-side for the pay step; we do **not** forward a sibling's `studentCode` to
 the browser (we don't offer a sibling switch, so it has no business leaving the server).
@@ -238,7 +311,12 @@ purpose             = students-billing        (REQUIRED — the reconciliation d
 omos_app            = donations
 students_family_id  = fam_x1                   (REQUIRED, from lookup)
 students_student_id = stu_1                     (optional, matchedStudent.id)
+students_fee_cents  = 330                      (REQUIRED whenever we grossed up — §0d)
 ```
+`students_fee_cents` is omitted entirely when nothing was added, which is the shape a school with the
+setting off has always seen. Note what it is *not*: an internal `stu_1` is an opaque id, while the
+**typed** Student ID (`YUS1234`) and any child's name are banned outright — the fee key is an amount,
+and an amount identifies nobody.
 Description: `School balance — <family label>`. **Never** put a Student ID or a child's name in
 metadata, a description, or the URL (§11.3 — metadata is visible in Stripe dashboards and exports).
 Confirm with Elements exactly like a normal donation (confirm-on-return).
@@ -274,7 +352,7 @@ Unchanged at v2 and still sent as `"v": 1`. After the PaymentIntent succeeds, ca
   the same ticked invoices, and **omit it for "pay the full balance"**, where the derived split is
   identical (every open invoice gets covered) and is what reconciliation would reproduce anyway.
   Keep sending `allocations` too — it's harmless, contract-documented, and correct if the provider
-  ever honours it.
+  ever honors it.
 - The split **must sum to `amountCents` to the penny** and every child must belong to `familyId`, or
   Students answers `422 invalid_allocation`. If any picked invoice arrives without a `studentId`, send
   **no** split and let Students derive one — degrading beats a rejected payment.
@@ -324,6 +402,25 @@ reconciliation, which scans that account for `purpose=students-billing` PIs).
 
 ---
 
+### Whose money the fee is (§11.2 — required wording)
+
+When a processing fee is passed on, the payer is told **plainly that it is not the masjid's**. Shown as
+its own line with the total, before they commit — a total that first appears on Stripe's own form is
+what generates a phone call to the office. Our wording, matching the parent portal's in substance:
+
+> **Tuition** $100.00
+> **Card processing fee** $3.30
+> **Total charged** $103.30
+>
+> The processing fee is not the masjid's — it is what Visa, Mastercard and American Express charge to
+> accept a card, and it goes straight to the payment processor. Paying by cash or check at the office
+> avoids it.
+
+`TuitionFeeLines` in `web/src/donate.tsx` renders it, and renders **nothing at all** when the fee is
+zero. It appears on all three screens a payer can commit from: the balance step, the "add money for a
+child" step, and the pay step — the last using the server's own authoritative figures from the intent
+response rather than re-deriving them.
+
 ## 6. Security (§14)
 
 - **Rate-limit `identify` + `lookup` per peer** on our side, in **one shared bucket** (40/min — an
@@ -332,7 +429,7 @@ reconciliation, which scans that account for `purpose=students-billing` PIs).
   returns a uniform `found:false` — but we must not be the open relay that lets an attacker grind
   codes. Key the bucket on the real TCP peer, never a spoofable `X-Forwarded-For`.
 - A Student ID is **not a secret** (its letters come from the child's first name and it's printed on
-  statements) — it is nonetheless the whole credential, because all it authorises is *seeing a balance
+  statements) — it is nonetheless the whole credential, because all it authorizes is *seeing a balance
   and paying it*. Treat it as **inert input**: send it in the JSON body only — **never** in a URL, a log
   line, Stripe metadata, a description, or an email. Store nothing about the lookup.
 - **Never call `lookup` before the parent confirmed the name from `identify`** — that confirmation is
@@ -358,3 +455,8 @@ reconciliation, which scans that account for `purpose=students-billing` PIs).
 - Everything **fails soft** when Students is unreachable / `enabled:false` / a `fabric_error` arrives.
 - `identify` + `lookup` share one per-peer rate limit; the Student ID never appears in
   logs/URLs/metadata.
+- With `info.fee.enabled: false` (almost every school) **nothing** about the flow differs from before
+  it existed: no gross-up, no `students_fee_cents`, no `feeCents` on the wire.
+- With it on: the payer sees tuition / fee / total **and the sentence** before committing, the
+  PaymentIntent carries `students_fee_cents`, and the balance in Students goes down by the **tuition**.
+  Then the daily reconciliation runs over the same payment and the balance does **not** move again.

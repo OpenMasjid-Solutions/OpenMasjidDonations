@@ -127,7 +127,7 @@ export interface ThankYou {
   message: string;
   /** Background image URL (or /uploads/…) for the thank-you screen; empty = the page's. */
   backgroundImage: string;
-  /** Accent colour (hex) for the thank-you screen highlight; empty = the theme accent. */
+  /** Accent color (hex) for the thank-you screen highlight; empty = the theme accent. */
   accent: string;
 }
 
@@ -180,7 +180,7 @@ export const EMAIL_RECEIPT_DEFAULT: EmailReceipt = {
  * Each maps to a declared alert id in `manifest.yaml` (kebab-case there, camelCase here); the
  * platform 400s an alert id it was not told about, so the two lists must stay in step.
  */
-export const NOTIFY_EVENTS = ['donation', 'donationRecovered', 'refund', 'planStopped', 'paymentFailed', 'tuitionFailed'] as const;
+export const NOTIFY_EVENTS = ['donation', 'donationRecovered', 'refund', 'planStopped', 'paymentFailed', 'tuitionFailed', 'whatsappGap'] as const;
 export type NotifyEventId = (typeof NOTIFY_EVENTS)[number];
 
 /**
@@ -202,76 +202,184 @@ export const NOTIFY_ALERT_ID: Record<NotifyEventId, string> = {
   planStopped: 'plan-stopped',
   paymentFailed: 'payment-failed',
   tuitionFailed: 'tuition-record-failed',
+  whatsappGap: 'whatsapp-gap',
 };
 
 /**
- * The three ways one event can reach a person, chosen independently.
+ * Each event in a masjid's words, for the rare places the SERVER has to name one.
  *
- * Independent, not a priority list: a masjid may well want the treasurer messaged on WhatsApp AND
- * the record kept in the admin inbox. A channel that is off or unavailable never suppresses another.
+ * The panel has its own copy with column headings and tooltips, which is the right place for UI text
+ * — this exists because the WhatsApp gap notification has to say which notifications were caught in an
+ * outage, and that sentence is composed server-side and sent by email. Kept beside the event list so a
+ * new event cannot be added without a label to print.
  */
-export interface NotifyChannels {
-  /**
-   * Raise the OpenMasjidOS **alert** for this event, which reaches the admin's own email and webhook.
-   *
-   * ON by default for every event — this is the channel a masjid already has, and the one that needs
-   * no setup. Note it is an **AND** with the admin's own matrix in OpenMasjidOS → Settings → Alerts:
-   * we ask the platform to deliver, the platform still honours the admin's per-alert channel
-   * choices, and `disabled_by_admin` is a normal answer. Turning this on here therefore means "we
-   * will raise it", never "it will definitely arrive" — and the panel says so, because an admin who
-   * reads it as a guarantee would stop looking for the real switch.
-   */
+export const NOTIFY_EVENT_LABEL: Record<NotifyEventId, string> = {
+  donation: 'a donation was received',
+  donationRecovered: 'a donation was found and added',
+  refund: 'a donation was refunded',
+  planStopped: 'a monthly donation was stopped',
+  paymentFailed: 'a payment couldn’t be started',
+  tuitionFailed: 'a tuition payment wasn’t recorded',
+  whatsappGap: 'WhatsApp messages going missing',
+};
+
+/**
+ * Whether an event is raised as an OpenMasjidOS **alert**, which reaches the admin's own email and
+ * webhook.
+ *
+ * One switch per event, because the platform is ONE destination. The addresses and numbers a masjid
+ * types in are LISTS, and they live in `emails`/`whatsapps` below — that asymmetry is the whole shape
+ * of this model, and the reason the panel draws the platform as a single row above the rest.
+ *
+ * ON by default for every event — this is the channel a masjid already has, and the one that needs no
+ * setup. Note it is an **AND** with the admin's own matrix in OpenMasjidOS → Settings → Alerts: we
+ * ask the platform to deliver, the platform still honors the admin's per-alert channel choices, and
+ * `disabled_by_admin` is a normal answer. Turning this on here therefore means “we will raise it”,
+ * never “it will definitely arrive” — and the panel says so, because an admin who read it as a
+ * guarantee would stop looking for the real switch.
+ */
+export interface NotifyEventConfig {
   os: boolean;
+}
+
+/** The last thing that happened to a WhatsApp message for one recipient + event.
+ *
+ *  `refused` is ours (the platform said no, with a reason); `failed`/`expired` come from the
+ *  platform's status endpoint; `queued` means accepted and not yet resolved. `sent` is deliberately
+ *  NOT “delivered” — WhatsApp gives no receipt, and the platform only knows it handed it over. */
+export interface WhatsAppEventOutcome {
+  state: 'queued' | 'sent' | 'failed' | 'expired' | 'refused';
+  /** The platform's own sentence, when there is one. Never a recipient, never the message. */
+  reason: string;
+  /** ISO timestamp of when WE recorded this. */
+  at: string;
   /**
-   * A specific email address, sent through the platform's email provider. '' = off, and off by
-   * default: the OS alert already reaches the admin, so this is for somebody who is NOT them — the
-   * treasurer, the school office — and we cannot guess who that is.
-   */
-  email: string;
-  /**
-   * A specific WhatsApp destination: digits with a country code, or an approved group id.
+   * The platform's message id from the `202`, when we have one.
    *
-   * `whatsappOn` is a SEPARATE switch rather than "non-empty means on", so an admin can turn the
-   * channel off for a month without losing the number they typed — and so the tick box in the panel
-   * means what a tick box normally means. Both must be true to send.
+   * Kept only so a suspect WINDOW can be reconciled exactly: the platform reports the ids of our
+   * messages that fell in a gap, and without this there is nothing on our side to match them
+   * against — the count alone cannot say whether the lost message was a $5 donation notice or the
+   * refund alert somebody needed. Opaque, not a secret, and useless without our app secret; it is
+   * stripped from the settings view all the same, because the panel has no use for it.
    *
-   * Off by default for every event, deliberately: WhatsApp is an unofficial client whose number can
-   * be banned, and the platform paces every message under a daily cap shared with every other app —
-   * so it is something a masjid opts into per event, never something an update switches on for them.
+   * Absent on a record written before v0.44.0, and on one recorded from a refusal (there was no
+   * message, so there is no id).
    */
-  whatsapp: string;
-  whatsappOn: boolean;
+  msgId?: string;
+}
+
+/**
+ * ONE PERSON TO TELL, AND WHAT THEY HEAR ABOUT (v0.44.0).
+ *
+ * A row is an ADDRESS, NOT AN ACCOUNT — the same call OpenMasjidStudents made, for the same reason:
+ * the person who must know that a monthly donor stopped is often not the person who logs in (the
+ * treasurer, the imam, a trustee who never opens the app). Adding one grants no access to anything.
+ *
+ * Nothing here is ever a DONOR. Every address and number on these lists is somebody the masjid typed
+ * in themselves, and this app deliberately collects no donor phone number at all — so there is
+ * nothing on the donor side that could end up here even by mistake.
+ *
+ * `events` is a plain list of ids rather than a join table, which is the right trade for a handful of
+ * rows that are always read whole, always written whole, and never queried BY event. It is
+ * **filtered against `NOTIFY_EVENTS` on read**, so a row left behind by a downgrade can never widen
+ * what it receives.
+ *
+ * `id` is what the panel edits against, never the address: re-typing a label must not move the ticks
+ * onto a new row, and an address whose case changed must not become a second subscriber to
+ * everything.
+ */
+export interface NotifyRecipient {
+  id: string;
+  /** An email address (stored lowercased), or WhatsApp digits with a country code / an approved group id. */
+  address: string;
+  /** What to call them on screen (“Office”, “Br. Osman”). Optional — the address is the identity. */
+  label: string;
+  events: NotifyEventId[];
+}
+
+/** A period the platform no longer trusts: our messages were reported `sent` and may never have
+ *  arrived. `cause` is the platform's own word for what broke (see WhatsAppGapCause), kept as a plain
+ *  string here so an unrecognized future value survives a round-trip through storage rather than being
+ *  flattened on the way in. `events` is what we could reconcile from the reported message ids, and is
+ *  deliberately incomplete — see `eventsForMessageIds`. */
+export interface WhatsAppGap {
+  from: number;
+  to: number;
+  count: number;
+  cause: string;
+  truncated: boolean;
+  events: NotifyEventId[];
+  /** ISO timestamp of when WE first saw it. */
+  at: string;
 }
 
 export interface NotifySettings {
-  /** Prefill for the form only. NEVER consulted when sending: an event with an empty `email` is off,
-   *  full stop. A default that silently became the recipient would be how a masjid discovers they
-   *  have been emailing the wrong person for a month. */
-  defaultEmail: string;
-  defaultWhatsapp: string;
-  /** Don't raise `donation` below this, in MINOR units. 0 = every donation.
+  events: Record<NotifyEventId, NotifyEventConfig>;
+  /**
+   * Addresses emailed through the platform's provider, so we never see the masjid's mail credentials.
+   * Empty by default: the OS alert already reaches the admin, so this list is for somebody who is NOT
+   * them, and we cannot guess who that is.
    *
-   *  Matters most for WhatsApp, where the platform spaces messages 6–20s apart under hourly and
-   *  daily caps shared with every other app on the box: a busy Friday of £2 gifts would spend the
-   *  whole allowance on good news and push the refunds and failures behind it. Applied to all three
-   *  channels so the three never disagree about what happened. */
-  minAmount: number;
-  events: Record<NotifyEventId, NotifyChannels>;
+   * BEWARE THE SHARED EMAIL BUDGET. This app's per-app email allowance is shared with DONOR receipts
+   * and the refund notice. A receipt has an outbox and survives being throttled; the refund notice
+   * deliberately does not, so it is what gets lost. Every address added here multiplies the traffic on
+   * the `donation` event, which fires on every single transaction — which is why a new address does
+   * not start on that event, and why the note in NOTIFY_DEFAULT about `minAmount`'s removal matters.
+   */
+  emails: NotifyRecipient[];
+  /**
+   * WhatsApp destinations: digits with a country code, or an approved group id.
+   *
+   * EVERY EVENT ON A NEW ROW STARTS UNTICKED, and that one is not a matter of taste (CLAUDE.md §13).
+   * WhatsApp is an unofficial client whose number can be restricted or banned at any moment, the
+   * number belongs to the MASJID and is shared with every other app on the box, and a banned number is
+   * not recoverable. So an update must never begin sending from it on their behalf. That is the whole
+   * reason a new email row may start on the alerts that cost money and a new WhatsApp row may not
+   * start on anything at all.
+   */
+  whatsapps: NotifyRecipient[];
 }
 
-/** A partial update — `events` and each channel set within it are themselves partial, so a form can
- *  send one toggle without restating everything (and a new event can be added without an older
- *  client wiping it). */
-export type NotifyPatch = Partial<Omit<NotifySettings, 'events'>> & {
-  events?: Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+/** A partial update to the per-event PLATFORM switches, and nothing else.
+ *
+ *  Recipients are added, edited and removed one at a time (`upsertRecipient`/`removeRecipient`)
+ *  rather than posted back as a whole list. A full-list PUT from a panel that had been open a while
+ *  would silently drop a row somebody else added in the meantime — and the row it dropped would be a
+ *  person who then stops being told about money, with nothing on screen to show it happened. */
+export type NotifyPatch = {
+  events?: Partial<Record<NotifyEventId, Partial<NotifyEventConfig>>>;
 };
 
-/** OS alert on, the other two off — "the channel you already have, and nothing switched on for you". */
-const CHANNELS_DEFAULT: NotifyChannels = { os: true, email: '', whatsapp: '', whatsappOn: false };
+/** The platform channel on — “the channel you already have, and nothing switched on for you”. */
+const EVENT_DEFAULT: NotifyEventConfig = { os: true };
+
+/** How many addresses (and how many numbers) one masjid may list.
+ *
+ *  Not a storage concern — this whole thing is a handful of rows in one JSON value. It is a blast-radius
+ *  bound: every row on the WhatsApp list is another message leaving the masjid's own number for the same
+ *  event, and every row on the email list is another slice of an email budget shared with donor
+ *  receipts. A masjid needing more than this wants a forwarding address or an approved group, which is
+ *  one destination however many people read it. */
+const MAX_RECIPIENTS = 25;
 
 /**
- * The OS channel is ON for every event, `donation` included — Hasan's call, made after the risk
- * below was put to him.
+ * What a brand-new EMAIL address starts subscribed to: the events that cost money or hide a problem,
+ * not everything. Mirrors OpenMasjidStudents, whose panel says exactly this — “New addresses start on
+ * the alerts that cost money or hide a problem. Tick the rest yourself.”
+ *
+ * `donation` is deliberately NOT in this list. It fires on every transaction, so a new address that
+ * started on it would bury a treasurer who only wanted to hear about refunds, and would spend the
+ * shared email budget on good news while the refund notice — the one with no outbox — is what gets
+ * dropped. Ticking it is one click, and it should be a decision.
+ *
+ * A new WHATSAPP row starts on NOTHING. See NotifySettings.whatsapps for why that is a different rule
+ * rather than an inconsistency.
+ */
+export const NEW_EMAIL_EVENTS: readonly NotifyEventId[] = ['refund', 'planStopped', 'paymentFailed', 'tuitionFailed', 'whatsappGap'];
+
+/**
+ * The OS channel is ON for every event, `donation` included — Hasan's call, made after the risk below
+ * was put to him.
  *
  * The risk, recorded so nobody has to rediscover it: `donation` fires on every transaction, and the
  * platform defaults a newly-declared alert id to email+webhook ON while persisting only non-defaults
@@ -280,16 +388,19 @@ const CHANNELS_DEFAULT: NotifyChannels = { os: true, email: '', whatsapp: '', wh
  * platform's own alerts and with this app's, so a flood of good news can push `payment-failed` — the
  * one that means nobody can give at all — behind it.
  *
- * `minAmount` is what keeps that in hand, and it is why the donation row carries the "only tell me
- * about donations of at least…" field right beside its switches rather than somewhere in a
- * sub-menu. If a masjid ever reports being buried, that field (or turning this one row off) is the
- * answer — not a change of default, which was considered and decided against.
+ * `minAmount` USED TO BE WHAT KEPT THAT IN HAND, AND IT WAS REMOVED IN v0.44.0 ON HASAN'S EXPLICIT
+ * INSTRUCTION, with the trade put to him first. It was a per-event “only tell me about donations of at
+ * least X” field beside the donation row, and CLAUDE.md §13 described it as the other half of the
+ * WhatsApp pacing bound. What replaces it is per-recipient and explicit: `donation` is one tick in a
+ * matrix, a new email address does not start on it (NEW_EMAIL_EVENTS), and a new WhatsApp row starts
+ * on nothing. What is genuinely lost is the ability to say “tell me, but only about the big ones” —
+ * the answer is now all of them or none. If a masjid reports being buried, that is the conversation,
+ * and re-adding a single site-wide floor here is a smaller change than reinstating the old field.
  */
 export const NOTIFY_DEFAULT: NotifySettings = {
-  defaultEmail: '',
-  defaultWhatsapp: '',
-  minAmount: 0,
-  events: Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, { ...CHANNELS_DEFAULT }])) as Record<NotifyEventId, NotifyChannels>,
+  events: Object.fromEntries(NOTIFY_EVENTS.map((e) => [e, { ...EVENT_DEFAULT }])) as Record<NotifyEventId, NotifyEventConfig>,
+  emails: [],
+  whatsapps: [],
 };
 
 export interface Donation {
@@ -350,8 +461,21 @@ export interface StudentPayment {
   familyId: string;
   studentId: string;
   familyLabel: string;
-  /** Amount charged, in MINOR units of the SCHOOL's currency (from the Students lookup). */
+  /** **The TUITION** — what the family owed, in MINOR units of the school's currency.
+   *
+   *  NOT what the card was charged, when a processing fee was passed on (§11.2 `info.fee`): the
+   *  charge is `amount + feeCents`. This column keeps its original meaning on purpose, because it
+   *  is what `record-payment` sends as `amountCents`, and the contract's failure directions are
+   *  lopsided — a gross in `amountCents` credits Stripe's cut to the family as an overpayment and
+   *  the ledger is wrong until somebody notices by hand. Leaving the net here means the money path
+   *  needs no arithmetic at all, so no bug in the fee code can reach the ledger. */
   amount: number;
+  /** Stripe's cut, when the PAYER covered it (§11.2 `info.fee`); 0 when the school absorbed it,
+   *  which is every row written before Students 0.51.0 and almost every one after.
+   *
+   *  Stored rather than recomputed so an outbox retry — hours later, possibly after the office
+   *  switched the setting off or changed the rate — reports exactly what was charged. */
+  feeCents: number;
   currency: string;
   allocations: string;
   /** JSON `[{studentId, amountCents}]` — the per-child split; '' = let Students derive it. */
@@ -407,7 +531,7 @@ export function campaignToken(): string {
  *
  *  Hex, not base64url, and deliberately: this string is retyped, forwarded and line-wrapped by mail
  *  clients, and `-`/`_`/mixed case are exactly what those mangle. It is the ONLY thing standing
- *  between a stranger and stopping somebody's donation, so the entropy is the defence (a rate limit
+ *  between a stranger and stopping somebody's donation, so the entropy is the defense (a rate limit
  *  cannot be, because behind the platform's ingress every remote visitor shares one bucket —
  *  DONATIONS-009). 2^128 makes guessing hopeless. */
 export function planLinkToken(): string {
@@ -434,7 +558,7 @@ export function slugify(s: string): string {
  * A campaign's `paymentAccount` is a namespaced reference, so that "which bank account receives
  * this donation" can never be ambiguous:
  *
- *   ''              — no choice: follow the site default (exactly the pre-v0.42.0 behaviour).
+ *   ''              — no choice: follow the site default (exactly the pre-v0.42.0 behavior).
  *   'fabric:<id>'   — a named account in the OpenMasjidOS vault, by its ID (a slugified label:
  *                     lowercase, [a-z0-9-], never an underscore). IDs, never labels — the platform
  *                     matches either, but a label changes when the admin renames the account while
@@ -578,7 +702,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_student_payments_outbox ON student_payments(pay_status, record_status);
 
       -- Append-only record of every admin action that touches money or donor data (DONATIONS-011).
-      -- This app handles donations, so "who exported the donor list, who cancelled that plan, who
+      -- This app handles donations, so "who exported the donor list, who canceled that plan, who
       -- rotated the Stripe key, and when" must be answerable — CLAUDE.md §8 promises the masjid a
       -- financial record, and a second volunteer with panel access is in the threat model.
       -- Deliberately NOT a general request log: no donor rows, no amounts, no PII beyond the actor
@@ -647,7 +771,7 @@ export class Store {
     this.ensureColumn('campaigns', 'force_cover_fees', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('campaigns', 'widget_enabled', 'INTEGER NOT NULL DEFAULT 0');
     // Which Stripe account an appeal pays into. Legacy rows default to '' = "the site default",
-    // which is precisely the behaviour they had before this column existed — there is deliberately
+    // which is precisely the behavior they had before this column existed — there is deliberately
     // NO backfill from stripe_account_id, because inferring a choice nobody made is how an existing
     // appeal would start charging a different bank account after an unattended overnight update.
     this.ensureColumn('campaigns', 'payment_account', "TEXT NOT NULL DEFAULT ''");
@@ -666,8 +790,13 @@ export class Store {
     // = "no split", which is exactly how they were pushed to Students before this existed.
     this.ensureColumn('student_payments', 'students_split', "TEXT NOT NULL DEFAULT ''");
     // The ticked bill lines of a tuition charge (students/billing §11.0b). Legacy rows default to
-    // '' = "no lines", exactly how they were pushed to Students before itemised bills existed.
+    // '' = "no lines", exactly how they were pushed to Students before itemized bills existed.
     this.ensureColumn('student_payments', 'payment_lines', "TEXT NOT NULL DEFAULT ''");
+    // The processing fee the PAYER covered (students/billing §11.2 `info.fee`, Students 0.51.0).
+    // Legacy rows default to 0 = "the school absorbed it", which is true of every tuition payment
+    // taken before the feature existed — and 0 also means no `students_fee_cents` and no `feeCents`
+    // on a retry, which is exactly how those rows were pushed the first time.
+    this.ensureColumn('student_payments', 'fee_cents', 'INTEGER NOT NULL DEFAULT 0');
     this.migrateLegacyStripe();
     // Slugs are now the public link (/<slug>) and must be unique. Older data could
     // have duplicate or reserved slugs, so reconcile BEFORE enforcing the unique index.
@@ -802,6 +931,162 @@ export class Store {
    *  email provider works — which is what decides whether a donor's receipt may be a branded one of
    *  ours (Stripe's own suppressed) or must be left to Stripe. Not a secret, not a setting: a cached
    *  observation, and the live value in memory always wins. See fabric.ts `emailLikelyAvailable`. */
+  /** What became of the last WhatsApp message we sent, per RECIPIENT and event.
+   *
+   *  Persisted rather than kept in memory because the whole point is to answer a question the admin
+   *  asks LATER — "did the treasurer get told about that refund?" — and a dev-channel box restarts
+   *  often. Deliberately holds no message text and no recipient ADDRESS: the key carries the
+   *  recipient's internal id, so nothing here is a phone number even if the file is read directly.
+   *
+   *  Keyed `<recipientId>|<event>` since v0.44.0. It used to be the event alone, which was right while
+   *  one event had exactly one destination — with several, the second recipient's refusal would
+   *  overwrite the first's and the panel would show one row's problem against everybody. That also
+   *  means the map is no longer bounded by the event list, so it is pruned on write. */
+  getWhatsAppOutcomes(): Record<string, WhatsAppEventOutcome> {
+    const raw = this.getJson<Record<string, unknown>>('whatsapp_outcomes');
+    const out: Record<string, WhatsAppEventOutcome> = {};
+    for (const [key, v] of Object.entries(raw ?? {})) {
+      if (!v || typeof v !== 'object') continue;
+      const o = v as Record<string, unknown>;
+      const state = String(o.state ?? '');
+      if (!state) continue;
+      out[key] = {
+        state: state as WhatsAppEventOutcome['state'],
+        reason: String(o.reason ?? '').slice(0, 200),
+        at: String(o.at ?? ''),
+        ...(typeof o.msgId === 'string' && o.msgId ? { msgId: o.msgId.slice(0, 120) } : {}),
+      };
+    }
+    return out;
+  }
+
+  /** Record one outcome. `key` is `<recipientId>|<event>` — never an address and never a number.
+   *
+   *  PRUNED before the write, unlike the old per-event map: recipients come and go, and a number the
+   *  admin removed would otherwise leave its last refusal in the file for ever. Rows whose recipient
+   *  is no longer configured are dropped, as are event-keyed rows from before v0.44.0 (the panel can
+   *  no longer render them). The row being written is set AFTER the prune, so it always survives. */
+  setWhatsAppOutcome(key: string, outcome: WhatsAppEventOutcome): void {
+    const all = this.getWhatsAppOutcomes();
+    const live = new Set(this.getNotify().whatsapps.map((r) => r.id));
+    for (const k of Object.keys(all)) {
+      const owner = k.includes('|') ? k.slice(0, k.indexOf('|')) : '';
+      if (!owner || !live.has(owner)) delete all[k];
+    }
+    all[key] = {
+      state: outcome.state,
+      reason: (outcome.reason || '').slice(0, 200),
+      at: outcome.at,
+      ...(outcome.msgId ? { msgId: outcome.msgId.slice(0, 120) } : {}),
+    };
+    this.setRaw('whatsapp_outcomes', JSON.stringify(all));
+  }
+
+  /**
+   * Periods the platform told us it no longer trusts, and which we have already reported (0.44.0).
+   *
+   * The platform returns its suspect windows on EVERY poll while they are still within its retention,
+   * so this is what stops an hourly job raising the same alarm every hour for a day. Keyed on the
+   * window bounds rather than a count, because the count can grow as more of our messages land inside
+   * a window that is still open — and re-alarming because a number went from 9 to 11 would be noise
+   * about something the admin has already been told.
+   *
+   * Kept so the panel can go on showing it after the notification has scrolled away: a gap is the one
+   * WhatsApp fact an admin may need to act on days later ("did I miss a refund last Tuesday?").
+   */
+  getWhatsAppGaps(): WhatsAppGap[] {
+    const raw = this.getJson<unknown>('whatsapp_gaps');
+    if (!Array.isArray(raw)) return [];
+    const out: WhatsAppGap[] = [];
+    for (const v of raw.slice(0, 20)) {
+      if (!v || typeof v !== 'object') continue;
+      const o = v as Record<string, unknown>;
+      const from = typeof o.from === 'number' ? o.from : 0;
+      const to = typeof o.to === 'number' ? o.to : 0;
+      if (from <= 0 || to < from) continue;
+      const events = Array.isArray(o.events) ? (o.events as unknown[]) : [];
+      out.push({
+        from,
+        to,
+        count: typeof o.count === 'number' ? Math.max(0, Math.round(o.count)) : 0,
+        cause: typeof o.cause === 'string' ? o.cause.slice(0, 40) : 'unknown',
+        truncated: o.truncated === true,
+        // Filtered against the live event list, like a recipient's: a stale id from another build
+        // must not become a label nobody can explain.
+        events: NOTIFY_EVENTS.filter((e) => events.includes(e)),
+        at: typeof o.at === 'string' ? o.at : '',
+      });
+    }
+    return out;
+  }
+
+  /** Record a window as reported. Returns false if it already was, which is the caller's "don't
+   *  raise this again" — the check and the write are one call so a slow notification cannot let a
+   *  second poll slip past it. Newest first, bounded to 20.
+   *
+   *  Keyed on the BOUNDS, and since platform 0.51.1-dev.13 a window is retained for seven days after
+   *  the outage ends — so an hourly poll re-reports the same one about 168 times and every one of those
+   *  must be silent.
+   *
+   *  **A WINDOW IS IMMUTABLE, corrected 2026-08-23.** This used to say the count grows while the window
+   *  is open, and re-alarming because 9 became 11 would be noise. That was wrong: the platform
+   *  snapshots everything — bounds, cause, counts, ids — at detection and never revises it, because the
+   *  queue pauses at that moment and nothing else writes outcome records. So the dedupe is not
+   *  protecting against a rising count; it is simply identifying the incident, which is what the bounds
+   *  are. Leaving the count OUT of the key stays deliberate all the same: it costs nothing and means a
+   *  future platform that did revise a figure could never turn that into a second alarm. */
+  addWhatsAppGap(w: { from: number; to: number; count: number; cause?: string; truncated?: boolean; events?: readonly string[] }): boolean {
+    const all = this.getWhatsAppGaps();
+    if (all.some((g) => g.from === w.from && g.to === w.to)) return false;
+    all.unshift({
+      from: w.from,
+      to: w.to,
+      count: w.count,
+      cause: (w.cause ?? 'unknown').slice(0, 40),
+      truncated: w.truncated === true,
+      events: NOTIFY_EVENTS.filter((e) => (w.events ?? []).includes(e)),
+      at: new Date().toISOString(),
+    });
+    this.setRaw('whatsapp_gaps', JSON.stringify(all.slice(0, 20)));
+    return true;
+  }
+
+  /**
+   * Which of our notifications the platform's message ids belong to.
+   *
+   * The platform reports the ids of our messages that fell in a gap; this turns them back into event
+   * names, so an admin is told "including the refund notice" rather than only "9 messages". Never
+   * returns a recipient or a number — the affected EVENT is the actionable part, and in a small
+   * community naming who was written to adds nothing an admin needs.
+   *
+   * PARTIAL BY CONSTRUCTION, and the caller must word it as "at least": we keep only the newest
+   * outcome per recipient+event (a health indicator, not an audit trail), so a three-hour window
+   * holding forty donation notices leaves us one id to match. That is why the platform's `count`
+   * remains the number we quote, and this only ever adds detail to it.
+   *
+   * **IDS ONLY, AND DELIBERATELY NO TIMESTAMP FALLBACK.** The obvious way to enrich this when a
+   * window carries no ids — an older platform, or `truncated` — is to match our outcome records by
+   * time against `[from, to]`. We do not, because that test has a false positive the platform's own
+   * holding behaviour created: a message queued DURING an outage and delivered perfectly well after the
+   * re-link still falls inside the window. (The platform recommended interval-overlap on 2026-08-22 and
+   * withdrew it on 2026-08-23, after Display found exactly that.) A complete id list is authoritative
+   * in both directions — a message not named is a message not lost, whatever the timing looks like —
+   * and where there are no ids we say only the count, which is always true. This detail line is garnish
+   * on an authoritative figure; naming a notification that actually arrived would be worse than naming
+   * none.
+   */
+  eventsForMessageIds(ids: readonly string[]): NotifyEventId[] {
+    if (ids.length === 0) return [];
+    const want = new Set(ids);
+    const hit = new Set<NotifyEventId>();
+    for (const [key, o] of Object.entries(this.getWhatsAppOutcomes())) {
+      if (!o.msgId || !want.has(o.msgId)) continue;
+      const event = key.slice(key.indexOf('|') + 1);
+      if ((NOTIFY_EVENTS as readonly string[]).includes(event)) hit.add(event as NotifyEventId);
+    }
+    return NOTIFY_EVENTS.filter((e) => hit.has(e));
+  }
+
   getEmailStatus(): string {
     return this.getRaw('email_status') ?? '';
   }
@@ -813,64 +1098,134 @@ export class Store {
    * Who gets told what. Never holds a donor's address or number — every recipient here is somebody
    * the admin typed in themselves (see NotifySettings).
    *
-   * Reads from `notify`, and MIGRATES the old `whatsapp` key on first read if `notify` is absent.
-   * That migration matters even though the old shape only ever shipped on 0.43.0-dev.2/3: a masjid
-   * on the development channel configured real recipients, and losing them silently would mean the
-   * refund notification they set up simply stops arriving with nothing to see.
+   * Reads from `notify`, and MIGRATES on first read, through two generations: the v0.43.0 per-event
+   * shape (one address and one number *per event*) into the v0.44.0 recipient LISTS, and before that
+   * the 0.43.0-dev `whatsapp` key. Both matter for the same reason — a masjid that configured real
+   * recipients must not have them silently vanish, because what vanishes is the refund notification
+   * they set up, with nothing on screen to explain why it stopped arriving.
    */
   getNotify(): NotifySettings {
     // `getJson` answers {} for a value that will not parse, so "present" is not enough: a truncated
-    // write would otherwise drop a dev.3 masjid onto all-defaults AND skip the migration, losing the
-    // recipients they configured with nothing to show why.
-    const stored = this.getRaw('notify') ? this.getJson<NotifySettings>('notify') : {};
-    const s: NotifyPatch = Object.keys(stored).length > 0 ? stored : this.migrateWhatsAppSettings();
-    const events = {} as Record<NotifyEventId, NotifyChannels>;
-    const given = (s.events ?? {}) as Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+    // write would otherwise drop a configured masjid onto all-defaults AND skip the migration, losing
+    // the recipients they set up with nothing to show why. DO NOT "simplify" this to a `??` — reading
+    // a corrupt value as "run the migration" is the deliberate choice, and there is a test for it.
+    const stored = this.getRaw('notify') ? this.getJson<Record<string, unknown>>('notify') : {};
+    const s: Record<string, unknown> = Object.keys(stored).length > 0 ? stored : this.migrateWhatsAppSettings();
+    const events = {} as Record<NotifyEventId, NotifyEventConfig>;
+    const given = (s.events ?? {}) as Partial<Record<NotifyEventId, Record<string, unknown>>>;
     for (const id of NOTIFY_EVENTS) {
       const c = given[id] ?? {};
       events[id] = {
-        // An event the stored settings say nothing about — a fresh install, or one added by an
-        // update — takes the same default as a new install would, so there is exactly one answer to
-        // "is this on?" and `donation` cannot become a flood by the back door.
+        // An event the stored settings say nothing about — a fresh install, or one added by an update
+        // — takes the same default as a new install would, so there is exactly one answer to "is this
+        // on?" and `donation` cannot become a flood by the back door.
         os: typeof c.os === 'boolean' ? c.os : NOTIFY_DEFAULT.events[id].os,
-        email: typeof c.email === 'string' ? c.email.trim().slice(0, 200) : '',
-        whatsapp: typeof c.whatsapp === 'string' ? c.whatsapp.trim().slice(0, 64) : '',
-        // Absent on a row written before the switch existed: a stored number meant "on" then, and
-        // must keep meaning it now, or an upgrade silently stops a masjid's WhatsApp messages.
-        whatsappOn: typeof c.whatsappOn === 'boolean' ? c.whatsappOn : !!(typeof c.whatsapp === 'string' && c.whatsapp.trim()),
       };
     }
+    // A v0.43.0 blob carries `email`/`whatsapp` strings INSIDE `events` and no lists at all. Detected
+    // by the absence of both lists rather than by a version number, because the version number is the
+    // thing a hand-edited or half-written file is most likely to be missing. Converting on READ —
+    // rather than only when something writes — is what makes the upgrade safe for a masjid who never
+    // opens this screen.
+    const legacy = !Array.isArray(s.emails) && !Array.isArray(s.whatsapps) ? this.recipientsFromPerEvent(given) : null;
     return {
-      defaultEmail: typeof s.defaultEmail === 'string' ? s.defaultEmail.trim().slice(0, 200) : '',
-      defaultWhatsapp: typeof s.defaultWhatsapp === 'string' ? s.defaultWhatsapp.trim().slice(0, 64) : '',
-      minAmount: Math.max(0, Math.round(s.minAmount ?? 0)),
       events,
+      emails: legacy ? legacy.emails : this.readRecipients(s.emails, 200),
+      whatsapps: legacy ? legacy.whatsapps : this.readRecipients(s.whatsapps, 64),
     };
   }
 
-  /**
-   * Carry a 0.43.0-dev WhatsApp configuration into the per-event model. Read-only — the result is
-   * persisted by the next `setNotify`, so a masjid that never opens the screen keeps being migrated
-   * consistently on every boot rather than depending on a write having happened.
+  /** Read a stored recipient list defensively.
    *
-   * The old shape had ONE list of numbers plus an optional group, and per-event booleans. A single
-   * destination per event is the new shape, so we take the first number if there was one and fall
-   * back to the group — and only for events that were actually switched on, and only if the whole
-   * feature was enabled. `os` comes out true throughout, which is the new default and matches what
-   * those masjids were already getting from the alerts matrix.
+   *  Every field is clamped and every event id is checked against `NOTIFY_EVENTS`, so a row left
+   *  behind by a downgrade — or hand-edited into the file — can never widen what it receives. Rows
+   *  with no id or no address are dropped rather than repaired: something we cannot address is not a
+   *  recipient, and inventing an address would mean guessing whose it is. */
+  private readRecipients(raw: unknown, maxAddr: number): NotifyRecipient[] {
+    if (!Array.isArray(raw)) return [];
+    const out: NotifyRecipient[] = [];
+    const seen = new Set<string>();
+    for (const v of raw.slice(0, MAX_RECIPIENTS)) {
+      if (!v || typeof v !== 'object') continue;
+      const o = v as Record<string, unknown>;
+      const id = typeof o.id === 'string' ? o.id.trim().slice(0, 40) : '';
+      const address = typeof o.address === 'string' ? o.address.trim().slice(0, maxAddr) : '';
+      if (!id || !address || seen.has(id)) continue;
+      seen.add(id);
+      const events = Array.isArray(o.events) ? (o.events as unknown[]) : [];
+      out.push({
+        id,
+        address,
+        label: typeof o.label === 'string' ? o.label.trim().slice(0, 80) : '',
+        // Unknown ids filtered out, duplicates collapsed, and the order fixed to NOTIFY_EVENTS — so
+        // the panel's columns and a stored row can never disagree about which tick means what.
+        events: NOTIFY_EVENTS.filter((e) => events.includes(e)),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Carry a v0.43.0 per-event configuration into the recipient lists.
+   *
+   * The old shape held one address and one number PER EVENT, so the same treasurer typed against three
+   * events becomes ONE row subscribed to those three. That deduplication is the whole point of the new
+   * model — three identical rows would each be sent the same message, tripling what a masjid gets from
+   * an upgrade they did not ask for.
+   *
+   * A number is carried over only where `whatsappOn` was true. One stored with the switch OFF is
+   * deliberately dropped rather than added unticked: it would otherwise reappear as a configured
+   * destination the admin does not remember, attached to the masjid's own phone number. Read-only —
+   * the result is persisted by the next write.
    */
-  private migrateWhatsAppSettings(): NotifyPatch {
+  private recipientsFromPerEvent(
+    given: Partial<Record<NotifyEventId, Record<string, unknown>>>,
+  ): { emails: NotifyRecipient[]; whatsapps: NotifyRecipient[] } {
+    const emails = new Map<string, NotifyRecipient>();
+    const whatsapps = new Map<string, NotifyRecipient>();
+    for (const id of NOTIFY_EVENTS) {
+      const c = given[id] ?? {};
+      const email = typeof c.email === 'string' ? c.email.trim().toLowerCase().slice(0, 200) : '';
+      if (email) {
+        const row = emails.get(email) ?? { id: `em_mig${emails.size + 1}`, address: email, label: '', events: [] };
+        row.events.push(id);
+        emails.set(email, row);
+      }
+      const dest = typeof c.whatsapp === 'string' ? c.whatsapp.trim().slice(0, 64) : '';
+      if (dest && c.whatsappOn === true) {
+        const row = whatsapps.get(dest) ?? { id: `wa_mig${whatsapps.size + 1}`, address: dest, label: '', events: [] };
+        row.events.push(id);
+        whatsapps.set(dest, row);
+      }
+    }
+    return { emails: [...emails.values()], whatsapps: [...whatsapps.values()] };
+  }
+
+  /**
+   * Carry a 0.43.0-dev WhatsApp configuration into the per-event shape, which `getNotify` then
+   * converts onward into recipient lists. Read-only — the result is persisted by the next write, so a
+   * masjid that never opens the screen keeps being migrated consistently on every boot rather than
+   * depending on a write having happened.
+   *
+   * Deliberately still emits the OLD per-event shape rather than the new lists: there is then exactly
+   * ONE place that turns a per-event configuration into recipients (`recipientsFromPerEvent`), and a
+   * two-generation upgrade takes the same path as a one-generation one.
+   *
+   * The old-old shape had ONE list of numbers plus an optional group, and per-event booleans. We take
+   * the first number if there was one and fall back to the group, and only for events that were
+   * actually switched on, and only if the whole feature was enabled.
+   */
+  private migrateWhatsAppSettings(): Record<string, unknown> {
     const old = this.getJson<{
       enabled?: boolean;
       numbers?: unknown;
       groupId?: string;
       events?: Partial<Record<string, boolean>>;
-      minAmount?: number;
     }>('whatsapp');
     if (!old || Object.keys(old).length === 0) return {};
     const numbers = (Array.isArray(old.numbers) ? old.numbers : []).filter((n): n is string => typeof n === 'string' && !!n.trim());
     const target = old.enabled ? (numbers[0] ?? (old.groupId || '')) : '';
-    const events: Partial<Record<NotifyEventId, Partial<NotifyChannels>>> = {};
+    const events: Record<string, Record<string, unknown>> = {};
     for (const id of NOTIFY_EVENTS) {
       // `donationRecovered` is new and had no old toggle; it follows the `donation` choice, which is
       // the same kind of news about the same money.
@@ -882,7 +1237,7 @@ export class Store {
     // Deliberately silent. `raise()` reads these settings on EVERY notification, and this runs until
     // something writes `notify` — so a line here would print once per donation, for ever, on a box
     // whose admin never opens the screen.
-    return { minAmount: Math.max(0, Math.round(old.minAmount ?? 0)), defaultWhatsapp: target, events };
+    return { events };
   }
 
   setNotify(patch: NotifyPatch): NotifySettings {
@@ -892,10 +1247,50 @@ export class Store {
       if (!(NOTIFY_EVENTS as readonly string[]).includes(id)) continue; // ignore an unknown event id
       events[id as NotifyEventId] = { ...events[id as NotifyEventId], ...clean(c ?? {}) };
     }
-    const merged: NotifySettings = { ...cur, ...clean({ ...patch, events: undefined }), events };
-    merged.minAmount = Math.max(0, Math.round(merged.minAmount));
-    this.setRaw('notify', JSON.stringify(merged));
-    return merged;
+    return this.writeNotify({ ...cur, events });
+  }
+
+  /**
+   * Add a recipient, or replace one by id.
+   *
+   * Matched on `id` when one is given and on the ADDRESS otherwise, so pressing Add twice with the
+   * same address edits that row rather than creating a duplicate — two rows with one address would be
+   * sent every message twice, and nothing on the screen would look wrong.
+   *
+   * The caller has already normalized and validated the address (index.ts owns the sentence an admin
+   * reads, and the country-code refusal); this owns the list.
+   */
+  upsertNotifyRecipient(
+    kind: 'emails' | 'whatsapps',
+    rec: { id?: string; address: string; label?: string; events?: readonly string[] },
+  ): NotifySettings {
+    const cur = this.getNotify();
+    const list = [...cur[kind]];
+    const events = NOTIFY_EVENTS.filter((e) => (rec.events ?? []).includes(e));
+    const label = (rec.label ?? '').trim().slice(0, 80);
+    const at = rec.id ? list.findIndex((r) => r.id === rec.id) : list.findIndex((r) => r.address === rec.address);
+    if (at >= 0) list[at] = { ...list[at], address: rec.address, label, events };
+    else if (list.length < MAX_RECIPIENTS) list.push({ id: rid(kind === 'emails' ? 'em' : 'wa'), address: rec.address, label, events });
+    return this.writeNotify({ ...cur, [kind]: list });
+  }
+
+  removeNotifyRecipient(kind: 'emails' | 'whatsapps', id: string): NotifySettings {
+    const cur = this.getNotify();
+    const next = this.writeNotify({ ...cur, [kind]: cur[kind].filter((r) => r.id !== id) });
+    // Take the removed row's health lines with it, so a number that is gone cannot leave its last
+    // refusal sitting on the screen attached to nothing.
+    if (kind === 'whatsapps') {
+      const all = this.getWhatsAppOutcomes();
+      let touched = false;
+      for (const k of Object.keys(all)) if (k.startsWith(`${id}|`)) { delete all[k]; touched = true; }
+      if (touched) this.setRaw('whatsapp_outcomes', JSON.stringify(all));
+    }
+    return next;
+  }
+
+  private writeNotify(s: NotifySettings): NotifySettings {
+    this.setRaw('notify', JSON.stringify(s));
+    return s;
   }
 
   /** Cached Stripe Product id per account + mode (test/live), for recurring prices. */
@@ -1047,7 +1442,7 @@ export class Store {
   }
 
   /** How many donations / tuition payments were TAKEN on this account. Money already taken is the
-   *  stronger claim: confirming, refunding, and cancelling a monthly plan all re-resolve the account
+   *  stronger claim: confirming, refunding, and canceling a monthly plan all re-resolve the account
    *  from the row, so deleting it would strand those records for ever — including leaving a card
    *  mandate that neither the admin nor the donor could stop. */
   paymentsForAccount(id: string): number {
@@ -1664,13 +2059,13 @@ export class Store {
    *  not a one-line SUM. Nothing local records that a plan ENDED — a cancellation happens at
    *  Stripe, and a masjid on a LAN may never see the webhook — so a plan stopped two years ago
    *  still has its succeeded rows sitting in this table. Counting those, a masjid three years in
-   *  would be told it had fifty monthly donors giving about £2,000 a month when the truth was ten
-   *  and £400: confidently wrong, about money, in the flattering direction.
+   *  would be told it had fifty monthly donors giving about $2,000 a month when the truth was ten
+   *  and $400: confidently wrong, about money, in the flattering direction.
    *
    *  A live monthly plan is charged every month, so "nothing since `activeSince`" is the one local
    *  signal that a plan is no longer running. Those are returned separately as `dormant` rather
    *  than dropped, so a caller can explain the smaller figure instead of just presenting it. Pass
-   *  nothing to count every plan ever, which is the old behaviour. */
+   *  nothing to count every plan ever, which is the old behavior. */
   monthlyGiving(monthPrefix: string, activeSince = ''): { donors: number; perMonth: number; thisMonth: number; dormant: number } {
     const rows = this.db
       .prepare(
@@ -1755,6 +2150,7 @@ export class Store {
       studentId: String(r.student_id ?? ''),
       familyLabel: String(r.family_label ?? ''),
       amount: Number(r.amount),
+      feeCents: Number(r.fee_cents ?? 0),
       currency: String(r.currency),
       allocations: String(r.allocations ?? ''),
       studentsSplit: String(r.students_split ?? ''),
@@ -1768,7 +2164,12 @@ export class Store {
   }
 
   createStudentPayment(
-    input: Omit<StudentPayment, 'id' | 'createdAt' | 'payStatus' | 'recordStatus' | 'studentsPaymentId' | 'occurredAt'>,
+    input: Omit<StudentPayment, 'id' | 'createdAt' | 'payStatus' | 'recordStatus' | 'studentsPaymentId' | 'occurredAt' | 'feeCents'> & {
+      /** Omitted = 0 = "the school absorbed Stripe's cut", which is the answer for every school
+       *  that has not switched the payer-pays setting on (§11.2 `info.fee`). Optional rather than
+       *  required so a caller that knows nothing about fees cannot accidentally write a NULL. */
+      feeCents?: number;
+    },
   ): StudentPayment {
     const p: StudentPayment = {
       id: rid('spy'),
@@ -1778,15 +2179,16 @@ export class Store {
       occurredAt: '',
       createdAt: new Date().toISOString(),
       ...input,
+      feeCents: Math.max(0, Math.trunc(input.feeCents ?? 0)),
     };
     this.db
       .prepare(
         `INSERT INTO student_payments
           (id, campaign_id, stripe_account_id, payment_intent_id, family_id, student_id, family_label,
-           amount, currency, allocations, students_split, payment_lines, pay_status, record_status, students_payment_id, created_at, occurred_at)
+           amount, fee_cents, currency, allocations, students_split, payment_lines, pay_status, record_status, students_payment_id, created_at, occurred_at)
          VALUES
           (@id, @campaignId, @stripeAccountId, @paymentIntentId, @familyId, @studentId, @familyLabel,
-           @amount, @currency, @allocations, @studentsSplit, @paymentLines, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
+           @amount, @feeCents, @currency, @allocations, @studentsSplit, @paymentLines, @payStatus, @recordStatus, @studentsPaymentId, @createdAt, @occurredAt)`,
       )
       .run(p);
     return p;

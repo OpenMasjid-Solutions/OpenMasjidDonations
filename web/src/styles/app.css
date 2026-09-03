@@ -535,7 +535,7 @@ select.input { appearance: auto; }
 .tl--red { background: #ff5f57; cursor: pointer; }
 .tl--amber { background: #febc2e; }
 .tl--red:active { transform: scale(0.9); }
-/* The close glyph appears only when hovering the lights (macOS behaviour). */
+/* The close glyph appears only when hovering the lights (macOS behavior). */
 .tl--red svg { color: rgba(60, 0, 0, 0.7); opacity: 0; transition: opacity var(--dur-micro) ease; }
 .tl-bar:hover .tl--red svg, .tl--red:focus-visible svg { opacity: 1; }
 
@@ -618,7 +618,7 @@ select.input { appearance: auto; }
    faint = finished or unknown. */
 /* A plan or invoice label is a phrase ("Payment failed", "Not collected", "Not known"), and the
    table's uppercase treatment shouts several words in a way it never does with one. Same size,
-   weight and colour — sentence case only. */
+   weight and color — sentence case only. */
 .don-status--phrase { text-transform: none; letter-spacing: 0; }
 .don-status--active, .don-status--trialing, .don-status--paid { color: var(--color-success); }
 .don-status--paused, .don-status--incomplete, .don-status--open, .don-status--draft { color: var(--color-warning); }
@@ -643,22 +643,54 @@ select.input { appearance: auto; }
 .plan-save { margin-block-start: 0.55rem; }
 .plan-ok { color: var(--color-success); }
 
-/* Stopping a plan can't be undone: colour the words rather than invent a new button shape. */
+/* Stopping a plan can't be undone: color the words rather than invent a new button shape. */
 .btn--danger { background: transparent; color: var(--color-danger); box-shadow: inset 0 0 0 1px var(--color-danger); }
 .btn--danger:hover { background: var(--color-surface-hover); }
 
-/* ── Notification settings: one inset block per alert ─────────────────────────
-   A block per alert rather than a grid with column headers: on a phone, a row of tick
-   boxes read against a header three rows up is the difference between "I can see what
-   happens when a donation is refunded" and a table nobody trusts. Each line wraps as a
-   unit, so the label and its field never separate. */
-.notify-block {
-  background: var(--glass-bg-inset);
-  box-shadow: inset 0 0 0 1px var(--color-border);
-  border-radius: var(--radius-card);
-  padding: 0.85rem 0.95rem;
-  margin-block-start: 0.75rem;
+/* ── Notification settings ─────────────────────────────────────────────────────
+   A MATRIX since v0.44.0: recipients down the side, alerts across the top, a tick box at
+   each crossing — the shape OpenMasjidStudents uses, and what a masjid asked for.
+
+   This replaced a block per alert, and the old reasoning is worth keeping because it was
+   not wrong: on a phone, a row of tick boxes read against a header three rows up is hard
+   to trust. What changed is that a masjid can now list SEVERAL addresses and numbers, and
+   a block per alert would have meant six copies of the same list. The answer to the phone
+   problem is `overflow-x` plus a real `aria-label` on every box (which names the person and
+   the alert), rather than a layout that cannot express the data. */
+.notify-matrix-scroll { overflow-x: auto; margin-block-start: 0.5rem; }
+.notify-matrix th.notify-matrix__col {
+  /* Headings wrap to two or three lines instead of forcing the table wider than the screen. */
+  white-space: normal; min-width: 5.5rem; max-width: 6.5rem;
+  font-size: 0.72rem; line-height: 1.2; text-align: center; vertical-align: bottom;
 }
+.notify-matrix__cell { text-align: center; }
+.notify-matrix__cell input { cursor: pointer; }
+/* The address column is the one thing that must stay readable, so it is allowed to wrap and
+   is given room; everything else is a tick box and can be narrow. */
+.notify-matrix td.notify-matrix__who { white-space: normal; min-width: 11rem; max-width: 18rem; }
+.notify-matrix__addr { overflow-wrap: anywhere; }
+.notify-empty { font-size: 0.88rem; margin-block: 0.5rem 0; }
+
+/* The platform's own switches: one destination, so a plain list rather than a table. */
+.notify-oslist {
+  display: grid; gap: 0.3rem 1.1rem; margin-block: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+
+/* The add-a-recipient form, inset so it reads as "and one more" rather than as part of the
+   table above it. */
+.notify-add {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.6rem 0.7rem;
+  background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border);
+  border-radius: var(--radius-card); padding: 0.75rem 0.85rem; margin-block-start: 0.6rem;
+}
+.notify-add .field { flex: 1 1 9rem; margin: 0; }
+.notify-add__wide { flex: 2 1 14rem !important; }
+.notify-add__phone .notify-line { margin-block-start: 0; }
+@media (max-width: 640px) {
+  .notify-add .field, .notify-add__wide { flex-basis: 100% !important; }
+}
+
 .notify-title { font-size: 0.98rem; font-weight: 650; color: var(--color-ink); margin: 0; }
 .notify-hint { font-size: 0.82rem; color: var(--color-ink-muted); margin: 0.15rem 0 0.6rem; }
 .notify-line {
@@ -668,12 +700,29 @@ select.input { appearance: auto; }
 .notify-check { display: flex; align-items: center; gap: 0.45rem; cursor: pointer; white-space: nowrap; }
 .notify-check span { display: inline-flex; align-items: center; gap: 0.35rem; }
 .notify-check input { flex: none; }
-.notify-label { font-size: 0.82rem; color: var(--color-ink-muted); white-space: nowrap; margin-inline-start: auto; }
-.notify-label--wide { margin-inline-start: 0; }
 /* The field takes the remaining width but never collapses below something typable. */
 .notify-input { flex: 1 1 14rem; min-width: 11rem; }
 .notify-select { flex: 0 1 10rem; min-width: 8rem; }
 @media (max-width: 640px) {
-  .notify-label { margin-inline-start: 0; }
   .notify-input, .notify-select { flex-basis: 100%; }
 }
+
+/* ── Tuition processing fee, itemized before the payer commits ──────────────────
+   A required part of the students/billing contract: the total must appear here rather
+   than first on Stripe's own form, and the payer must be told the extra is not the
+   masjid's. Inset so it reads as a receipt rather than as more form. */
+.fee-breakdown {
+  margin-block: 0.85rem 0.2rem; padding: 0.7rem 0.85rem;
+  border-radius: var(--radius-button);
+  background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.fee-row { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.9rem; padding-block: 0.14rem; }
+.fee-row--total {
+  margin-block-start: 0.34rem; padding-block-start: 0.4rem;
+  border-block-start: 1px solid var(--color-border); font-weight: 700;
+}
+.fee-note { margin-block-start: 0.5rem; }
+
+/* A refused or failed WhatsApp message, said where the switch is. Tighter than a form error
+   because it is a status line rather than something the admin did wrong. */
+.notify-outcome { display: flex; align-items: center; gap: 0.3rem; margin-block: 0.15rem 0; font-size: 0.82rem; }

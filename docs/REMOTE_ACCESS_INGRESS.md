@@ -58,6 +58,6 @@ that's the OS plain-HTTP front door. **HTTPS** there makes cloudflared do TLS ag
 ## To pick it up
 
 Admin: update OpenMasjidOS to **v0.37.0**; **Settings → Remote access** shows the one route to add +
-each app's address. Remove any old per-app Cloudflare routes in favour of the single route.
+each app's address. Remove any old per-app Cloudflare routes in favor of the single route.
 
 See also `docs/USING_THE_FABRIC.md` (Stripe vault + `/api/fabric/site`).

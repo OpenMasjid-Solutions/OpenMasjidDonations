@@ -332,6 +332,20 @@ export interface WhatsAppGroup {
   label: string;
 }
 
+/** What became of the last WhatsApp message for one event.
+ *
+ *  `refused` is the platform saying no *with a reason* — an unapproved group, the gateway's own
+ *  number, a number with no country code — or our own hourly cap holding one back. `failed` and
+ *  `expired` come from the platform's status endpoint (0.51.1+). `sent` means handed to WhatsApp,
+ *  never "delivered": there is no receipt to report. */
+export interface WhatsAppEventOutcome {
+  state: 'queued' | 'sent' | 'failed' | 'expired' | 'refused';
+  /** The platform's own sentence, written for an admin. Never a recipient, never the message. */
+  reason: string;
+  /** ISO timestamp of when the app recorded it. */
+  at: string;
+}
+
 export interface WhatsAppAvailability {
   available: boolean;
   reason: WhatsAppReason;
@@ -339,42 +353,80 @@ export interface WhatsAppAvailability {
   maxMediaBytes: number;
   /** Only the groups the OpenMasjidOS admin approved for this app. Empty = hide the picker. */
   groups: WhatsAppGroup[];
+  /** Does the platform have the message-status endpoint (0.51.1+)? Absent means no. */
+  outcomes?: boolean;
+  /** Per event id, what became of the last message — only events with something to report. */
+  lastOutcomes?: Record<string, WhatsAppEventOutcome>;
+  /** How many messages the app's OWN hourly caps have held back since it started. The platform
+   *  stopped limiting anything in 0.51.1, so this bound is ours, and worth admitting to. */
+  heldBack?: number;
+  /** Periods when the masjid's WhatsApp link had expired without OpenMasjidOS noticing, so
+   *  messages were reported sent and never delivered (platform 0.52.0). Newest first.
+   *
+   *  `cause` is the platform's word for what broke — treat an unfamiliar value as unknown, since more
+   *  may be added. `events` is which of our notifications we could match to the reported message ids,
+   *  and is deliberately INCOMPLETE: `count` is the real total, and `truncated` says when even the
+   *  platform's id list was capped. So the UI must never present `events` as the full story. */
+  gaps?: {
+    from: number;
+    to: number;
+    count: number;
+    cause: string;
+    truncated: boolean;
+    events: NotifyEventId[];
+    at: string;
+  }[];
 }
 
 /** Every notification this app can raise. The ids are the app's own; the labels live in the UI. */
-export type NotifyEventId = 'donation' | 'donationRecovered' | 'refund' | 'planStopped' | 'paymentFailed' | 'tuitionFailed';
+export type NotifyEventId = 'donation' | 'donationRecovered' | 'refund' | 'planStopped' | 'paymentFailed' | 'tuitionFailed' | 'whatsappGap';
 
-export interface NotifyChannels {
-  /** Raise the OpenMasjidOS alert → the admin's own email + webhook. On by default. An AND with
-   *  their matrix in OpenMasjidOS → Settings → Alerts, which the UI must say out loud. */
+/** Whether an event is raised as an OpenMasjidOS alert → the admin's own email + webhook. On by
+ *  default. An AND with their matrix in OpenMasjidOS → Settings → Alerts, which the UI must say out
+ *  loud: on here means "we will raise it", never "it will arrive". */
+export interface NotifyEventConfig {
   os: boolean;
-  /** A specific address, via the platform's email provider. '' = off. */
-  email: string;
-  /** Digits with a country code, or an approved group id. */
-  whatsapp: string;
-  /** A separate switch, not "non-empty means on" — so turning the channel off for a month doesn't
-   *  lose the number, and the tick box means what a tick box normally means. Both must be true to
-   *  send. Off by default for every event. */
-  whatsappOn: boolean;
+}
+
+/** One address, or one WhatsApp destination, and what it hears about.
+ *
+ *  A row is an ADDRESS, NOT AN ACCOUNT — adding one grants no access to the app. `id` is what edits
+ *  and deletes are keyed on, never the address. */
+export interface NotifyRecipient {
+  id: string;
+  /** An email address, or WhatsApp digits with a country code / an approved group id. */
+  address: string;
+  label: string;
+  events: NotifyEventId[];
+}
+
+/** One entry in the country dropdown. Sent by the server so the list and the validator that refuses
+ *  a bad number are the same one — see web/src/phone.ts. */
+export interface NotifyDial {
+  id: string;
+  label: string;
+  dial: string;
+  lengths: number[];
 }
 
 export interface NotifySettings {
-  defaultEmail: string;
-  defaultWhatsapp: string;
-  /** MAJOR units across the API. 0 = tell me about every donation. */
-  minAmount: number;
-  events: Record<NotifyEventId, NotifyChannels>;
+  events: Record<NotifyEventId, NotifyEventConfig>;
+  emails: NotifyRecipient[];
+  whatsapps: NotifyRecipient[];
+  dials: NotifyDial[];
+  /** What a brand-new email address starts subscribed to, so the panel's hint cannot drift from what
+   *  the server actually does. A new WhatsApp row starts on nothing at all. */
+  newEmailEvents: NotifyEventId[];
   embedded: boolean;
   /** The last real outcome of a send through the platform's email provider. */
   emailStatus: string;
   whatsapp: WhatsAppAvailability;
 }
 
+/** The per-event platform switch, and nothing else — recipients have their own calls, so a stale
+ *  panel can never post a whole list back and silently drop somebody. */
 export type NotifyPatch = {
-  defaultEmail?: string;
-  defaultWhatsapp?: string;
-  minAmount?: number;
-  events?: Partial<Record<NotifyEventId, Partial<NotifyChannels>>>;
+  events?: Partial<Record<NotifyEventId, Partial<NotifyEventConfig>>>;
 };
 
 /** `refresh` re-probes WhatsApp instead of using the 60-second cache — what the admin presses after
@@ -383,11 +435,30 @@ export const getNotifications = (refresh = false) =>
   request<NotifySettings>(`/api/admin/notifications${refresh ? '?refresh=1' : ''}`);
 export const saveNotifications = (patch: NotifyPatch) =>
   request<NotifySettings>('/api/admin/notifications', { method: 'PUT', body: JSON.stringify(patch) });
-/** Sends one real notification down one channel. WhatsApp resolves on QUEUED, never delivered. */
-export const testNotification = (channel: 'os' | 'email' | 'whatsapp', event: NotifyEventId) =>
+
+/** Add a recipient, or edit one by `id`.
+ *
+ *  A WhatsApp number goes as `dialId` + `national`, never as one string: the country is something the
+ *  admin picked from a list, so the server never has to infer it from digits. A group goes as
+ *  `address`. */
+export const saveRecipient = (body: {
+  kind: 'email' | 'whatsapp';
+  id?: string;
+  label?: string;
+  events?: NotifyEventId[];
+  address?: string;
+  dialId?: string;
+  national?: string;
+}) => request<NotifySettings>('/api/admin/notifications/recipients', { method: 'POST', body: JSON.stringify(body) });
+
+export const removeRecipient = (kind: 'email' | 'whatsapp', id: string) =>
+  request<NotifySettings>(`/api/admin/notifications/recipients/${kind}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+/** Sends one real notification to one recipient. WhatsApp resolves on QUEUED, never delivered. */
+export const testNotification = (channel: 'os' | 'email' | 'whatsapp', event: NotifyEventId, recipientId?: string) =>
   request<{ ok: true; message: string }>('/api/admin/notifications/test', {
     method: 'POST',
-    body: JSON.stringify({ channel, event }),
+    body: JSON.stringify({ channel, event, recipientId }),
   });
 /** Fire the `test` alert — the platform delivers it to the admin's own email/webhook (the app
  *  never learns the admin address). Confirms OpenMasjidOS can reach you. */
@@ -622,7 +693,7 @@ export const confirmDonation = (body: { paymentIntentId: string; slug: string; t
 
 // ── A monthly donor's own "stop these payments" page (/stop/<token>) ─────────
 // The donor is emailed this link when their gift is set up; the token is the only credential, so
-// it authorises exactly two things — read this description, and stop the payments. Both are POSTs
+// it authorizes exactly two things — read this description, and stop the payments. Both are POSTs
 // with the token in the BODY: no GET may mutate (link-preview bots follow GET links), and it keeps
 // the token out of URL logs.
 
@@ -695,7 +766,7 @@ export interface StudentInvoiceView {
 /** Who a Student ID belongs to: a first name + last initial and nothing else — no balance, no
  *  family, no ids. This confirmation step is what replaced the PIN (contract §11.0). */
 export interface StudentIdentity {
-  /** The code as the server normalised it — pass this straight to `lookupStudent`. */
+  /** The code as the server normalized it — pass this straight to `lookupStudent`. */
   studentCode: string;
   firstName: string;
   /** '' for a child recorded under a single name — render just the given name. */
@@ -723,23 +794,76 @@ export interface StudentLookupResult {
      *  whether a family is square or ahead, and once an advance settles its invoice this is
      *  the only signal left (openInvoices is empty by then). */
     credit: number;
-    /** True when EVERY open bill arrived itemised, so the pay step accepts a line selection.
-     *  Decided for the whole family: the provider honours ticked lines OR whole invoices, never
+    /** True when EVERY open bill arrived itemized, so the pay step accepts a line selection.
+     *  Decided for the whole family: the provider honors ticked lines OR whole invoices, never
      *  a mixture, so the choice can't be made per bill. */
-    itemised: boolean;
+    itemized: boolean;
     openInvoices: StudentInvoiceView[];
+    /** The processing rate, when the school has asked the PAYER to cover Stripe's cut — null for
+     *  almost every school, and null means add nothing. Present so this page can show an itemized
+     *  total for whatever the parent ticks BEFORE they commit; the server recomputes the real
+     *  figure when it creates the payment, and that one is authoritative. */
+    fee: TuitionFeeRate | null;
   };
+}
+
+/** A processing rate (basis points **of the gross**, plus a flat part, optionally capped). */
+export interface TuitionFeeRate {
+  percentBps: number;
+  fixedCents: number;
+  /** 0 = uncapped. */
+  capCents: number;
+}
+
+/**
+ * What the payer will actually be charged, and how much of it is the processing fee.
+ *
+ * Mirrors the server's `grossUpTuition` deliberately — the fee is a share of the GROSS, so this
+ * divides rather than marking up, and rounds the total UP. A markup would quote $103.20 on a $100
+ * bill where the charge will be $103.30, and a parent seeing one number here and another on the
+ * card form is exactly what generates a phone call to the office.
+ *
+ * Works in MAJOR units (what this page displays) by going through minor units and back, so the
+ * arithmetic is the integer one and never accumulates a fraction of a cent.
+ */
+export function tuitionFeeFor(tuitionMajor: number, rate: TuitionFeeRate | null, currency = 'USD'): { tuition: number; fee: number; total: number } {
+  const unit = Math.pow(10, currencyDecimals(currency));
+  const tuition = Math.max(0, Math.round(tuitionMajor * unit));
+  const none = { tuition: tuition / unit, fee: 0, total: tuition / unit };
+  if (!rate || tuition <= 0) return none;
+  const den = 10_000 - rate.percentBps;
+  if (den <= 0) return none;
+  const num = (tuition + rate.fixedCents) * 10_000;
+  let f = Math.floor(num / den);
+  while (f * den > num) f -= 1;
+  while ((f + 1) * den <= num) f += 1;
+  let gross = f * den === num ? f : f + 1;
+  let fee = gross - tuition;
+  if (rate.capCents > 0 && fee > rate.capCents) {
+    fee = rate.capCents;
+    gross = tuition + fee;
+  }
+  if (fee <= 0) return none;
+  return { tuition: tuition / unit, fee: fee / unit, total: gross / unit };
 }
 export interface TuitionIntentResponse {
   clientSecret: string;
   publishableKey: string;
+  /** What the card will be charged — the gross, when a processing fee was passed on. */
   amount: number;
+  /** The school's part, and the processor's part. Authoritative (the server computed them), so
+   *  the pay step shows these rather than its own estimate. `fee` is 0 for almost every school. */
+  tuition: number;
+  fee: number;
   currency: string;
 }
 export interface TuitionConfirmResponse {
   status: string;
   succeeded: boolean;
+  /** What was charged. `tuition` + `fee` break it down; `fee` is 0 for almost every school. */
   amount: number;
+  tuition: number;
+  fee: number;
   currency: string;
   schoolName: string;
   familyLabel: string;
@@ -750,7 +874,7 @@ export interface TuitionConfirmResponse {
 export type TuitionSelection =
   | { kind: 'full' }
   | { kind: 'invoices'; invoiceIds: string[] }
-  /** The exact bill lines ticked (§11.0b) — used whenever the family's bills are itemised. */
+  /** The exact bill lines ticked (§11.0b) — used whenever the family's bills are itemized. */
   | { kind: 'items'; itemIds: string[] }
   /** A typed amount, optionally towards one child (`student` = their ref from the lookup). */
   | { kind: 'amount'; amount: number; student?: string };
@@ -779,7 +903,18 @@ export const getTunnel = () => request<TunnelStatus>('/api/admin/tunnel');
 export const saveTunnel = (body: { token?: string; enabled?: boolean; publicHostname?: string }) =>
   request<TunnelStatus>('/api/admin/tunnel', { method: 'PUT', body: JSON.stringify(body) });
 
-/** Format a major-unit amount in the given currency, e.g. 50 GBP → "£50.00". */
+/** How many minor units make one major unit, per currency — 2 for most, 0 for JPY, 3 for the
+ *  Gulf dinars. Asked of Intl rather than hardcoded, and defaulted to 2 when it cannot answer. */
+export function currencyDecimals(currency: string): number {
+  try {
+    const d = new Intl.NumberFormat(undefined, { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
+    return typeof d === 'number' ? d : 2;
+  } catch {
+    return 2;
+  }
+}
+
+/** Format a major-unit amount in the given currency, e.g. 50 GBP → "$50.00". */
 export function money(amount: number, currency: string): string {
   try {
     return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount);

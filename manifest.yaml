@@ -5,7 +5,7 @@ id: donations
 name: OpenMasjid Donations
 tagline: Take card donations on your masjid's network with Stripe
 category: donations
-version: 0.43.0
+version: 0.44.0
 author: OpenMasjid-Solutions
 license: AGPL-3.0-only
 icon: icon.svg
@@ -35,7 +35,7 @@ description: |
   own network.
 
 # OpenMasjidOS Fabric: opt into single sign-on. The platform issues this app a
-# per-app secret at install (OPENMASJID_APP_SECRET) and honours its identity-bound
+# per-app secret at install (OPENMASJID_APP_SECRET) and honors its identity-bound
 # /api/auth/session calls, so "Open" signs you in with your OpenMasjidOS login.
 # The app still works fully standalone (its own admin password) when the Fabric is
 # absent. The compose MUST reference the injected vars in `environment:` (it does).
@@ -96,9 +96,15 @@ email: true
 # per notification on our own Settings screen. We never collect a phone number from a donor and never
 # message one.
 #
-# Two rules that shape every use of it here. The API returns 202 {queued:true} and NEVER "sent":
-# ban risk attaches to the NUMBER, so the platform paces everything (randomised 6–20s gaps, hourly
-# and daily caps, quiet hours that defer for hours). And nothing may DEPEND on a message arriving —
+# Needs platform 0.51.0+ to send; message status and the durable queue need 0.51.1+ (we detect that
+# with `outcomes` on the availability probe, and treat an absent field as no).
+#
+# Two rules that shape every use of it here. The API returns 202 {queued:true, id} and NEVER "sent":
+# there is no delivery receipt from WhatsApp. Since 0.51.1 the platform imposes no pacing at all —
+# no quiet hours, no caps, no cooldowns — so a message leaves within seconds and the BOUND IS OURS:
+# 20 per destination per hour, one message per event, and what we hold back is shown to the admin.
+# Ban risk still attaches to the NUMBER, which is shared with every app on the box and cannot be
+# recovered once blocked. And nothing may DEPEND on a message arriving —
 # it is an unofficial client whose number can be restricted at any time. Note the second rule is
 # deliberately weaker than "WhatsApp is always a second copy", which per-event settings made false:
 # an admin may legitimately choose WhatsApp and nothing else for an event. What still holds is that
@@ -119,7 +125,7 @@ whatsapp: true
 alerts:
   - id: donation-received
     label: A donation was received
-    description: Somebody gave. Says how much and which appeal — never who, since an alert can be forwarded and the donor didn't agree to that. Set a smallest amount worth hearing about in the app if a busy Friday is too much.
+    description: Somebody gave. Says how much and which appeal — never who, since an alert can be forwarded and the donor didn't agree to that. If a busy Friday is too much, leave this one unticked for the people who don't need every gift (Settings → Notifications).
   - id: donation-recovered
     label: A donation was found and added
     description: A card payment had gone through but never reached your records (the donor's page didn't finish loading), and the app has now found it and added it, dated when the money actually arrived. Your totals will go up.
@@ -135,11 +141,14 @@ alerts:
   - id: plan-stopped
     label: A monthly donation was stopped by the donor
     description: A monthly donor used the link in their confirmation email to stop their own payments. Nothing more is taken from their card. Worth knowing about, since nobody at the masjid pressed anything.
+  - id: whatsapp-gap
+    label: Some WhatsApp messages may not have arrived
+    description: Your masjid's WhatsApp link had expired without OpenMasjidOS noticing, so messages sent during that period were reported as sent but never delivered. Nothing was lost — every donation, refund and change is in your records as normal; only the messages went missing. Says when the gap was and how many messages fell in it.
   - id: test
     label: Test message
     description: A test you trigger from the app (Settings → Email receipt → "Send me a test") to confirm OpenMasjidOS is reaching you by email/webhook.
 
-# Admin commands (platform v0.51.0+): an authorised admin messages the masjid's number with
+# Admin commands (platform v0.51.0+): an authorized admin messages the masjid's number with
 # `!donations` and the platform renders the menu, decides who may run what, and POSTs the chosen
 # command to POST /fabric/commands/run on our own web port.
 #
@@ -147,7 +156,7 @@ alerts:
 #   * Nothing here changes anything. In a channel this informal the blast radius of a mistake
 #     should be a wrong figure on a screen, never a closed appeal or a refunded donation.
 #   * NO DONOR IS EVER NAMED — no name, no email, no reference. A WhatsApp message is forwardable
-#     and screenshottable and the donor never agreed to be in one, so a command says "£312 from 9
+#     and screenshottable and the donor never agreed to be in one, so a command says "$312 from 9
 #     donations", never who gave it. Donor records stay in the panel, behind a login.
 #   * Every figure comes from this app's own database. There is a 10-second timeout and somebody is
 #     holding a phone, so nothing here calls Stripe.

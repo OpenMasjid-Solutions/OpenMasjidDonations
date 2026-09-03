@@ -3,7 +3,7 @@
 
 /** Tailwind is additive utilities only. Preflight is OFF so the hand-written token
  *  CSS (styles/app.css, mirrored from OpenMasjidOS) stays authoritative for base
- *  styles. Colours map to the CSS custom properties in styles/tokens.css, so a
+ *  styles. Colors map to the CSS custom properties in styles/tokens.css, so a
  *  utility like `bg-surface` or `text-ink` follows the theme + wallpaper. Never put
  *  raw hex in components — add a token, then map it here. */
 /** @type {import('tailwindcss').Config} */

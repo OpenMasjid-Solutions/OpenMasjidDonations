@@ -5,10 +5,13 @@
 
 From the 2026-08-03 security and code-health audit. Ordered by urgency.
 
-> ### Where this stands as of 2026-08-18 (the v0.43.0 sweep)
+> ### Where this stands as of 2026-08-23 (the v0.44.0 sweep)
 >
 > | Item | Status |
 > |---|---|
+> | **v0.44.0 sweep (2026-08-23)** | **No new weakness found.** Both `npm audit` runs clean; no secret in the tree; no `dangerouslySetInnerHTML`; SVG still refused on upload; every `/api/admin/*` route still behind `requireAdmin`; and the §13 invariants (CSV cell escaping, tuition⇄donation route isolation, the `/api/setup` platform probe) all still in place. What it *did* find was a functional bug in this cycle's own feature — see the row below. |
+> | **Notification matrix: ticking a box on a WhatsApp number 400'd** | **Fixed in v0.44.0, before release.** The panel posts a row back whole when a checkbox changes, so a phone-number row arrived with `address: "13135550142"` — which is not a group id, and the route demanded one. Numbers could be added and then never subscribed to anything. An edit now takes the address from **storage** rather than the body, which also closes a second hole: a body-supplied number would have reached `toWhatsAppDigits` with no country ever chosen, the exact bare-ten-digits case the dropdown exists to prevent. Verified against a running server, not just by reading. |
+> | **Gap: there are no route-level tests** | **Open, and worth knowing.** Every test in the suite is a unit test over a module; nothing exercises a Fastify route. That is why the bug above was found by inspection during an audit rather than by CI, and why it had been live on the development channel since `0.44.0-dev.5`. Closing it means a route harness (boot the app, sign in, drive the JSON API) — a real piece of work, and Hasan's call whether it is worth it. |
 > | §4g `@fastify/static` major upgrade (DONATIONS-040) | **Done.** 8.x → 10.1.3 in the v0.43.0 sweep, clearing all four advisories rather than continuing to argue they are unreachable. Verified by a real container start: the SPA, an asset, an uploaded image, the SPA fallback and a 401 all behave, and five traversal shapes (`../`, `%2e%2e`, `..%2f`, `%2e%2e%2f`, `....//`) return 404 with no file body. Both `npm audit` runs are now clean. |
 > | §4a `/api/setup` during an outage (DONATIONS-005) | **Still your decision, but no longer unmetered.** The reachability probe on that route is now behind the same 120/min per-peer cap as the other two unauthenticated platform-callers; the trade-off between recovery and takeover is unchanged and still yours. |
 > | §0a three-decimal currencies (DONATIONS-001) | **Fixed and shipped** in v0.39.0. Steps 1–4 below are still yours if any masjid runs BHD/JOD/KWD/OMR/TND — the fix does not rewrite historical rows. |
@@ -205,7 +208,7 @@ Being right about unreachability is not the same as being clean, a fourth adviso
 the same package, and "we reasoned it was fine" is a worse answer to a masjid than "we upgraded it".
 Two majors, but the API surface used here is four options across two registrations, so the diff is
 one line in `package.json`. Verified by a real container start rather than by tests alone — see the
-status table at the top of this file. The one behaviour change: a request for the `/uploads/`
+status table at the top of this file. The one behavior change: a request for the `/uploads/`
 directory is now a 403 from the plugin rather than a 404, which the error handler no longer logs at
 error level (a client 4xx is not this box's problem).
 

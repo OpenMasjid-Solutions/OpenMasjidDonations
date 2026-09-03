@@ -40,9 +40,6 @@ export const MIN_REFUND_MINOR = 1;
 export const REFUND_REASONS = ['requested_by_customer', 'duplicate', 'fraudulent'] as const;
 export type RefundReason = (typeof REFUND_REASONS)[number];
 
-export function isRefundReason(v: unknown): v is RefundReason {
-  return typeof v === 'string' && (REFUND_REASONS as readonly string[]).includes(v);
-}
 
 /** How much of a charge can still be given back, in minor units. Never negative: an
  *  `amount_refunded` that somehow exceeds the amount captured means there is nothing left,
