@@ -52,6 +52,19 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    // DEVELOPMENT CHANNEL ONLY — never merged to `main`. See the note at the top of this file.
+    //
+    // Opened when v0.44.0 shipped. It starts EMPTY on purpose: the 0.45.0 line has nothing in it
+    // yet, and a Development-channel masjid opening "What's new" should be told that rather than
+    // shown the last stable release as though it were the newest thing they are running.
+    version: '0.45.0',
+    date: '',
+    unreleased: true,
+    notes: [
+      'Nothing has landed on the Development channel since v0.44.0 yet. When something does it will be listed here, and the headline items will become the next release’s notes.',
+    ],
+  },
+  {
     version: '0.44.0',
     date: '2026-08-23',
     notes: [
