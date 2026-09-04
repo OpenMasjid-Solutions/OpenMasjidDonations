@@ -11,27 +11,21 @@
 # inside the app (saved to /data).
 services:
   app:
-    # ── DEV BRANCH: the development channel ──────────────────────────────────
-    # The EXACT prerelease version CI published for this build — never the moving
-    # `:dev` alias. Two reasons, and both are the difference between a working dev
-    # channel and a silent one:
+    # ── MAIN BRANCH: the stable channel ──────────────────────────────────────
+    # Tag for humans + @sha256 digest for integrity (the digest is the real pin — a
+    # moved tag can't repoint it to a different image). Bump both on every release.
     #
-    #   1. OpenMasjidOS spots an update by comparing the catalog's `version` with the
-    #      installed one. The version here has to change per build, and the image
-    #      reference has to change with it, or there is nothing to notify and nothing
-    #      to update to.
-    #   2. An exact tag is immutable, so a masjid on Development gets the build we
-    #      published rather than whatever `:dev` happens to point at by then.
+    # On `dev` this line names that build's exact `X.Y.Z-dev.N` tag, with no digest. That
+    # is correct there and wrong here: a merge from dev will try to bring it across, and
+    # carrying it into main would point every stable install at a development build. Git
+    # conflicts on this line every release — that conflict is a feature, so resolve it by
+    # keeping the pinned form below (CLAUDE.md → Branching policy, rule 6).
     #
-    # Bump this in the SAME commit as manifest.yaml's `version:`. CI signals the catalog
-    # to rebuild only after the image push succeeds, so by the time the catalog reads
-    # this file the tag exists — whereas bumping it in a later commit would have the
-    # catalog rebuilt while this still named the previous tag (CLAUDE.md → Publishing a
-    # dev build).
-    #
-    # On `main` this line is the release tag + @sha256 digest. Never carry this dev
-    # line into main: a merge must restore the pinned form (Branching policy, rule 6).
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.44.0-dev.10
+    # This is the commit the vX.Y.Z tag names — it carries the digest, so anyone pinning the
+    # tag gets exactly this image (CLAUDE.md §16.1). The digest is the multi-arch INDEX digest,
+    # which is what covers both amd64 and arm64; a per-platform one would break the Pi or the
+    # mini-PC depending on which was picked.
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.44.0@sha256:e9031387f26fce38e742efbc75df91921ba9495c5a03346ad18e7666ed2c7f8c
     restart: unless-stopped
     environment:
       PORT: "8080"
