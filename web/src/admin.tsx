@@ -743,11 +743,14 @@ function WidgetEmbed({ url, title, isPublic }: { url: string; title: string; isP
   const [copied, setCopied] = useState(false);
   if (!url) return <p className="hint" style={{ marginBlockStart: '0.4rem' }}>Choose a link above first — the widget lives at that link under <span className="mono">/w/…</span>.</p>;
   const safeTitle = (title || 'Donate').replace(/"/g, '');
-  const snippet = `<iframe src="${url}" title="${safeTitle}" style="width:100%;max-width:480px;height:680px;border:0;border-radius:16px" allow="payment"></iframe>`;
+  // `background:transparent` is belt-and-braces: an iframe is transparent by default once the
+  // embedded document stops painting (which the widget now does), but plenty of site themes ship a
+  // blanket `iframe { background: #fff }` and that would put a white slab back behind the box.
+  const snippet = `<iframe src="${url}" title="${safeTitle}" style="width:100%;max-width:480px;height:680px;border:0;background:transparent" allow="payment"></iframe>`;
   const copy = async () => { try { await navigator.clipboard.writeText(snippet); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ } };
   return (
     <div className="subform glass-inset" style={{ marginBlockStart: '0.4rem' }}>
-      <p className="hint" style={{ marginBlockStart: 0 }}>Paste this into any website to embed this campaign. Save the campaign first{isPublic ? '.' : '; turn on public access (Payments tab) so it works off your network.'}</p>
+      <p className="hint" style={{ marginBlockStart: 0 }}>Paste this into any website to embed this campaign. It has no background of its own — just the donation box, sitting on your page’s own background. Save the campaign first{isPublic ? '.' : '; turn on public access (Payments tab) so it works off your network.'}</p>
       <textarea className="input mono" rows={3} readOnly value={snippet} onFocus={(e) => e.currentTarget.select()} aria-label="Embed code" />
       <button type="button" className="btn btn--ghost btn--sm" onClick={copy}>{copied ? <><CheckCircle2 size={14} /> Copied</> : <><Copy size={14} /> Copy embed code</>}</button>
     </div>

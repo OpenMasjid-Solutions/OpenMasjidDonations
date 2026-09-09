@@ -60,6 +60,32 @@ h1, h2, h3, p { margin: 0; }
    browser viewport, and sit tight to the top so the card isn't lost in vertical centering. */
 .shell--widget, .shell--widget .donate-wrap { min-height: 100%; }
 .shell--widget .donate-wrap { justify-content: flex-start; padding-block: 1.1rem; }
+
+/* ── The widget is TRANSPARENT: the donate box and nothing else ──────────────────────────
+   It sits on somebody else's page, so the masjid's wallpaper is not ours to paint over
+   theirs. `donate.tsx` skips the scene entirely and the server inlines
+   `html,body{background:transparent}` in the head — inline, because `body` carries a
+   near-black `--scene-base` and a rule that waited for the bundle would flash a dark
+   rectangle on every load.
+
+   THE CARD ALSO HAS TO STOP BEING GLASS, which is the non-obvious half. `.glass-raised` is
+   a 68%-opaque colour plus `backdrop-filter: blur()`, and that filter samples only this
+   document — an iframe cannot blur the page around it. So over a transparent body it blurs
+   nothing and the remaining 32% is the HOST page showing straight through the text: fine on
+   a plain white site, unreadable over a photograph. Going opaque is the honest fix, and the
+   token is the one glass.css already falls back to where `backdrop-filter` is unsupported,
+   so light and dark both stay correct.
+
+   glass.css and tokens.css are copied verbatim from OpenMasjidDisplay and must not be
+   edited (CLAUDE.md §7) — hence the override lives here, scoped to the widget. */
+.shell--widget { background: transparent; }
+.shell--widget .glass-raised,
+.shell--widget .glass {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.shell--widget .glass-raised { background-color: var(--color-surface-overlay); }
+.shell--widget .glass { background-color: var(--color-surface-raised); }
 .topbar {
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 0.9rem;

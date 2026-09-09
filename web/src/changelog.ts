@@ -53,15 +53,12 @@ export interface Release {
 export const RELEASES: Release[] = [
   {
     // DEVELOPMENT CHANNEL ONLY — never merged to `main`. See the note at the top of this file.
-    //
-    // Opened when v0.44.0 shipped. It starts EMPTY on purpose: the 0.45.0 line has nothing in it
-    // yet, and a Development-channel masjid opening "What's new" should be told that rather than
-    // shown the last stable release as though it were the newest thing they are running.
     version: '0.45.0',
     date: '',
     unreleased: true,
     notes: [
-      'Nothing has landed on the Development channel since v0.44.0 yet. When something does it will be listed here, and the headline items will become the next release’s notes.',
+      '**The embeddable widget now has no background of its own — just the donation box.** When you paste an appeal into your own website it takes on your page’s background instead of bringing the masjid’s wallpaper with it, so it looks like part of your site rather than a window cut into it. Nothing to change if you already use it: re-copy the embed code from Campaigns if you would like the tidier version, but the existing one picks this up on its own.',
+      'The donation box itself is now solid rather than frosted when it is embedded. That is deliberate: the frosted look works by blurring whatever is behind it, and inside a frame on somebody else’s page there is nothing it is allowed to blur — so the old look would have let your page show faintly through the words. On your own donation page, where there is a real background to blur, nothing changes.',
     ],
   },
   {

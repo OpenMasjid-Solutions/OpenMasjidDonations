@@ -68,11 +68,22 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
 
   // On the thank-you screen, prefer the thank-you's own background (when set); otherwise
   // the campaign's. The scene + readable theme both follow whatever is actually shown.
-  const activeBg = (result && campaign?.thankYou?.backgroundImage) || campaign?.backgroundImage;
+  //
+  // THE WIDGET DRAWS NO BACKGROUND AT ALL. It is an iframe on somebody else's page, so the
+  // masjid's own wallpaper is not ours to paint over theirs — the embed should be the donate
+  // box and nothing else, with the host page showing through. `activeBg` is therefore forced
+  // off in widget mode rather than only hidden: it also feeds the readable-theme sampler
+  // below, and sampling an image that is no longer on screen would pick the text colour for
+  // a background nobody can see.
+  const activeBg = widget ? undefined : (result && campaign?.thankYou?.backgroundImage) || campaign?.backgroundImage;
 
   // The public donation page is its own world: pin the scene to the default wallpaper
   // (never the dashboard's inherited one) and pick a theme that reads on the active
   // background — light text on dark images, dark text on light ones, as readable as can be.
+  //
+  // With no background (the widget) that sampling has nothing to read, so it falls through to
+  // `dark`. An iframe cannot see the colour of the page around it, so there is no better
+  // answer available: a dark card reads on a light host site and belongs on a dark one.
   const readable = useReadableTheme(bgUrl(activeBg) || undefined, 'dark');
   useEffect(() => {
     const html = document.documentElement;
@@ -118,7 +129,7 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
 
   return (
     <div className={`shell${widget ? ' shell--widget' : ''}`}>
-      <DonateScene image={activeBg} />
+      {!widget && <DonateScene image={activeBg} />}
       <main className="donate-wrap">
         {result ? (
           <ThankYou result={result} campaign={campaign} />

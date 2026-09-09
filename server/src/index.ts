@@ -3760,7 +3760,16 @@ async function main(): Promise<void> {
   const sendIndexHtml = (reply: import('fastify').FastifyReply, widgetSlug?: string) => {
     const base = cachedFabricSite().basePath.replace(/[^\w/-]/g, ''); // defensive: path charset only
     let head = `<base href="${base}/">\n    <script>window.__OMOS_BASE__=${JSON.stringify(base)}</script>`;
-    if (widgetSlug) head += `\n    <script>window.__OMOS_WIDGET__=${JSON.stringify({ slug: widgetSlug })}</script>`;
+    if (widgetSlug) {
+      head += `\n    <script>window.__OMOS_WIDGET__=${JSON.stringify({ slug: widgetSlug })}</script>`;
+      // The widget is transparent, and this has to be done HERE rather than in the stylesheet.
+      // `body` carries `background: var(--scene-base)` — a near-black in the default theme — so a
+      // rule that only lands once the bundle has parsed leaves the iframe flashing a dark rectangle
+      // over the masjid's own page on every load. Inline in the head, it is painted correctly from
+      // the first frame. It is a static string with no interpolation, so nothing here can be
+      // injected through it.
+      head += '\n    <style>html,body{background:transparent!important}</style>';
+    }
     reply.type('text/html').send(rawIndex.replace('<head>', `<head>\n    ${head}`));
   };
   if (havePublic) app.get('/', async (_req, reply) => sendIndexHtml(reply));
