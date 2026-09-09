@@ -57,7 +57,8 @@ export const RELEASES: Release[] = [
     date: '',
     unreleased: true,
     notes: [
-      '**The embeddable widget now has no background of its own — just the donation box.** When you paste an appeal into your own website it takes on your page’s background instead of bringing the masjid’s wallpaper with it, so it looks like part of your site rather than a window cut into it. Nothing to change if you already use it: re-copy the embed code from Campaigns if you would like the tidier version, but the existing one picks this up on its own.',
+      '**The embeddable widget is now just the donation box, and it blends into your page.** Pasting an appeal into your own website used to drop a dark panel onto it — the masjid’s own wallpaper, inside a frame, with scrollbars and empty space around the card. Now there is no background at all: your page shows through, the box is light so it sits on an ordinary website the way it should, and the frame shrinks to fit the box exactly instead of leaving a gap or a scrollbar. Re-copy the embed code from Campaigns to get the tidiest version; an embed you already pasted picks up most of it on its own.',
+      'If your own website has a dark background, add ?theme=dark to the end of the address in the embed code and the box turns dark to match.',
       'The donation box itself is now solid rather than frosted when it is embedded. That is deliberate: the frosted look works by blurring whatever is behind it, and inside a frame on somebody else’s page there is nothing it is allowed to blur — so the old look would have let your page show faintly through the words. On your own donation page, where there is a real background to blur, nothing changes.',
     ],
   },

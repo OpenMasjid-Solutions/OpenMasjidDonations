@@ -3757,20 +3757,53 @@ async function main(): Promise<void> {
    *  web for API/nav/asset URLs). basePath is sanitised to a safe URL-path charset. When
    *  `widgetSlug` is given, also inject `window.__OMOS_WIDGET__` so the SPA renders that
    *  campaign in the compact, chrome-less widget layout for embedding. */
-  const sendIndexHtml = (reply: import('fastify').FastifyReply, widgetSlug?: string) => {
+  const sendIndexHtml = (reply: import('fastify').FastifyReply, widgetSlug?: string, widgetDark = false) => {
     const base = cachedFabricSite().basePath.replace(/[^\w/-]/g, ''); // defensive: path charset only
     let head = `<base href="${base}/">\n    <script>window.__OMOS_BASE__=${JSON.stringify(base)}</script>`;
+    let tail = '';
     if (widgetSlug) {
       head += `\n    <script>window.__OMOS_WIDGET__=${JSON.stringify({ slug: widgetSlug })}</script>`;
-      // The widget is transparent, and this has to be done HERE rather than in the stylesheet.
-      // `body` carries `background: var(--scene-base)` — a near-black in the default theme — so a
-      // rule that only lands once the bundle has parsed leaves the iframe flashing a dark rectangle
-      // over the masjid's own page on every load. Inline in the head, it is painted correctly from
-      // the first frame. It is a static string with no interpolation, so nothing here can be
-      // injected through it.
-      head += '\n    <style>html,body{background:transparent!important}</style>';
+      // The widget is transparent AND content-height, and both have to be done HERE rather than in
+      // the stylesheet — for two different reasons.
+      //
+      // Transparency, because of timing: `body` carries `background: var(--scene-base)`, a
+      // near-black, so a rule that only lands once the bundle has parsed leaves the iframe flashing
+      // a dark rectangle over the masjid's own page on every load.
+      //
+      // Height, because of reach: `html`, `body` and `#root` are ANCESTORS of the element that
+      // knows it is a widget (`.shell--widget`), so no selector in app.css can get to them. They
+      // each assume they own a viewport — `#root` is `min-height: 100vh`, which inside an iframe
+      // means the iframe's full height — and that is what left the card centred in a tall box with
+      // dead space and a scrollbar. Collapsing them to content height is what makes the document
+      // exactly the card.
+      //
+      // A static string with no interpolation, so nothing can be injected through it.
+      // `overflow-x: hidden` is asserting a constraint, not papering over a clipped layout, and the
+      // difference matters enough to record. Measured in a real browser at the embed width: the
+      // amount grid resolves to four columns with "Other" wrapped to a second row, its scrollWidth
+      // equals its clientWidth, and NOT ONE element in the document has a right edge past the
+      // document width. Nothing is reachable by scrolling sideways. The document nevertheless
+      // reported a scrollWidth ~89px over its clientWidth and Chromium drew a horizontal scrollbar
+      // for it — in an embed that bar is always wrong, and there is nothing behind it to see.
+      // THIS BLOCK GOES LAST IN <head>, and that placement is the whole trick. `index.html` ships
+      // `<html data-theme="dark">` and then a bootstrap script that re-applies a theme from
+      // localStorage or the visitor's OS preference. Anything injected after `<head>` runs BEFORE
+      // that script and loses. Injected before `</head>`, this wins.
+      //
+      // `color-scheme` is the one that actually caused a black box. `:root` declares
+      // `color-scheme: dark`, and Chromium then paints an OPAQUE DARK CANVAS for the document even
+      // though `background` is `transparent` — so during the lazy-chunk load the embed was a solid
+      // black rectangle on the masjid's cream page. It is pinned to `light` even when the masjid
+      // asked for a dark card, because `light` is the value that leaves the canvas genuinely
+      // transparent; the card's own colours come from `data-theme` below, not from here.
+      const scene = widgetDark ? 'dark' : 'light';
+      tail =
+        '<style>html,body{background:transparent!important;height:auto!important;' +
+        'overflow-x:hidden!important;color-scheme:light!important}#root{min-height:0!important}</style>' +
+        `\n    <script>(function(h){h.setAttribute('data-theme','${scene}');h.setAttribute('data-scene','${scene}')})(document.documentElement)</script>`;
     }
-    reply.type('text/html').send(rawIndex.replace('<head>', `<head>\n    ${head}`));
+    const withHead = rawIndex.replace('<head>', `<head>\n    ${head}`);
+    reply.type('text/html').send(tail ? withHead.replace('</head>', `  ${tail}\n  </head>`) : withHead);
   };
   if (havePublic) app.get('/', async (_req, reply) => sendIndexHtml(reply));
 
@@ -3784,7 +3817,11 @@ async function main(): Promise<void> {
     if (!c || !c.active || !c.widgetEnabled) return reply.code(404).type('text/plain').send('Not found.');
     reply.header('content-security-policy', 'frame-ancestors *'); // meant to be embedded
     reply.header('cache-control', 'no-store');
-    return sendIndexHtml(reply, c.slug);
+    // `?theme=dark` for a masjid whose own site is dark. Light otherwise, which is what blends into
+    // an overwhelmingly light web — the same call OpenMasjidDisplay's widget makes. Read here as
+    // well as in the browser so the very first paint is already the right colour.
+    const dark = String((req.query as { theme?: string }).theme || '') === 'dark';
+    return sendIndexHtml(reply, c.slug, dark);
   });
 
   // SPA fallback: client-side routes (e.g. /admin, /zakat) resolve to index.html; requests

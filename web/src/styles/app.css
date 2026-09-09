@@ -56,10 +56,25 @@ h1, h2, h3, p { margin: 0; }
 
 /* ── Shell + top bar ──────────────────────────────────────────────────────── */
 .shell { min-height: 100vh; min-height: 100dvh; }
-/* Embeddable widget (in an <iframe> on another site): fill the HOST iframe rather than the
-   browser viewport, and sit tight to the top so the card isn't lost in vertical centering. */
-.shell--widget, .shell--widget .donate-wrap { min-height: 100%; }
-.shell--widget .donate-wrap { justify-content: flex-start; padding-block: 1.1rem; }
+/* ── Embeddable widget: the document IS the card, and nothing else ───────────────────────
+   Every layer of this app assumes it owns a viewport — `#root`, `.shell` and `.donate-wrap`
+   each carry `min-height: 100vh`. Inside an iframe `100vh` is the IFRAME's height, so the
+   card got centred in a full-height box: dead space above and below it, and a scrollbar the
+   moment the content grew past the embed's fixed height. That is what an embedder saw.
+
+   So in widget mode the whole chain collapses to content height. `html`, `body` and `#root`
+   are done by the server's inlined <style> (they are ancestors of this element, so CSS here
+   cannot reach them); the rest is below.
+
+   No padding either: the wrap's `1.1rem` inset would be a transparent margin the host page
+   shows through, which reads as the iframe being mis-sized rather than as deliberate space.
+   The embedder controls the space around the box — it is on their page. */
+.shell--widget, .shell--widget .donate-wrap { min-height: 0; }
+/* Horizontal padding goes (the card is the full width of the embed); a little vertical space stays
+   so the "Secured by Stripe" line under the card is not glued to its edge. */
+.shell--widget .donate-wrap { justify-content: flex-start; padding: 0; gap: 0.55rem; }
+/* Fill the embed's width rather than the page's comfortable reading measure. */
+.shell--widget .donate-card { width: 100%; max-width: none; }
 
 /* ── The widget is TRANSPARENT: the donate box and nothing else ──────────────────────────
    It sits on somebody else's page, so the masjid's wallpaper is not ours to paint over
@@ -84,8 +99,23 @@ h1, h2, h3, p { margin: 0; }
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
-.shell--widget .glass-raised { background-color: var(--color-surface-overlay); }
-.shell--widget .glass { background-color: var(--color-surface-raised); }
+/* A NEUTRAL card, not the theme's tinted overlay. `--color-surface-overlay` is `#E0F2FE` in the
+   light theme — a sky blue, which is right for a panel floating on this app's own blue-green scene
+   and wrong on a masjid's cream website, where it reads as a coloured patch rather than a card.
+   Display's widget uses a warm off-white (`--card:#faf8f2`) for exactly this reason. */
+.shell--widget .glass-raised { background-color: var(--color-surface-raised); }
+.shell--widget .glass { background-color: var(--color-surface-hover); }
+
+/* CARD TEXT MUST USE CARD INK, and this is a latent bug that only the widget exposes.
+   Text sitting directly on the wallpaper uses `--ink-scene` (see "Readability" below), and the
+   donate card inherits that instead of the theme's `--color-ink`. Nobody noticed because in the
+   dark theme the two are both near-white — but in a light widget they diverge, and the appeal title
+   rendered as `#F4F7FB` on a white card: invisible. Measured, not guessed: no rule matches
+   `.donate-wrap` with a colour and it has no inline style, so it is pure inheritance.
+   Scoped to the widget rather than fixed globally, because changing what the donation page's own
+   card inherits is a visual change to a shipped screen and not this task. */
+.shell--widget .donate-card,
+.shell--widget .donate-card .donate-title { color: var(--color-ink); }
 .topbar {
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 0.9rem;

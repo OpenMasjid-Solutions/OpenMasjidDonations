@@ -743,15 +743,46 @@ function WidgetEmbed({ url, title, isPublic }: { url: string; title: string; isP
   const [copied, setCopied] = useState(false);
   if (!url) return <p className="hint" style={{ marginBlockStart: '0.4rem' }}>Choose a link above first — the widget lives at that link under <span className="mono">/w/…</span>.</p>;
   const safeTitle = (title || 'Donate').replace(/"/g, '');
+  // A DOM id for the iframe so the resize script can find its own frame and no other. Derived from
+  // the widget's own URL and reduced to a safe charset — a masjid could paste two different appeals
+  // onto one page, and two frames sharing an id would fight over each other's height.
+  const slugId = (url.split('/w/')[1] || 'widget').replace(/[^\w-]/g, '').slice(0, 40) || 'widget';
+  // Two things beyond the obvious.
+  //
   // `background:transparent` is belt-and-braces: an iframe is transparent by default once the
   // embedded document stops painting (which the widget now does), but plenty of site themes ship a
   // blanket `iframe { background: #fff }` and that would put a white slab back behind the box.
-  const snippet = `<iframe src="${url}" title="${safeTitle}" style="width:100%;max-width:480px;height:680px;border:0;background:transparent" allow="payment"></iframe>`;
+  //
+  // The script makes the iframe exactly as tall as the card. A donation form changes height as it
+  // is used — "Other" reveals a field, Stripe's Payment Element mounts, the thank-you screen is a
+  // different size — so any fixed number is either too short (scrollbar) or too tall (dead space).
+  // It verifies the message came from THIS iframe before believing a height, and it degrades
+  // safely: if a CMS strips the script the `height` below still applies and the box still has no
+  // background, so a stripped script costs some slack space rather than a broken embed.
+  //
+  // Deliberately NOT `loading="lazy"`. A lazy frame can be handed a fresh `contentWindow` when it
+  // finally loads, and the check above compares `e.source` against `f.contentWindow` — so the height
+  // message can arrive and be thrown away as coming from a stranger, leaving the box stuck at its
+  // fallback height with a scrollbar. That is the bug this whole change is trying to remove, and a
+  // donation box is meant to be looked at anyway.
+  const snippet =
+    `<iframe id="omd-${slugId}" src="${url}" title="${safeTitle}" allow="payment"\n` +
+    // The fallback height is deliberately GENEROUS (measured: the card is ~750px tall at this
+    // width), because the two ways of being wrong are not symmetrical. Too short shows a scrollbar
+    // inside the box — the thing this change exists to remove. Too tall costs some slack below the
+    // card, and that slack is transparent, so on the masjid's page it is simply their own
+    // background. The script trims it to the exact height; this is what the embed looks like if a
+    // CMS strips the script, and it has to look right on its own.
+    `  style="width:100%;max-width:480px;height:820px;border:0;background:transparent"></iframe>\n` +
+    `<script>addEventListener("message",function(e){var f=document.getElementById("omd-${slugId}");\n` +
+    `  if(!f||e.source!==f.contentWindow)return;var d=e.data;\n` +
+    `  if(d&&d.type==="omos-donations:height"&&d.height>0)f.style.height=d.height+"px";});</script>`;
   const copy = async () => { try { await navigator.clipboard.writeText(snippet); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ } };
   return (
     <div className="subform glass-inset" style={{ marginBlockStart: '0.4rem' }}>
-      <p className="hint" style={{ marginBlockStart: 0 }}>Paste this into any website to embed this campaign. It has no background of its own — just the donation box, sitting on your page’s own background. Save the campaign first{isPublic ? '.' : '; turn on public access (Payments tab) so it works off your network.'}</p>
-      <textarea className="input mono" rows={3} readOnly value={snippet} onFocus={(e) => e.currentTarget.select()} aria-label="Embed code" />
+      <p className="hint" style={{ marginBlockStart: 0 }}>Paste this into any website to embed this campaign. It is just the donation box — no background of its own, and it grows and shrinks to fit, so it sits on your page like part of it. Save the campaign first{isPublic ? '.' : '; turn on public access (Payments tab) so it works off your network.'}</p>
+      <p className="hint">The box is light, to suit most websites. If your site has a dark background, add <span className="mono">?theme=dark</span> to the end of the address in the code below.</p>
+      <textarea className="input mono" rows={7} readOnly value={snippet} onFocus={(e) => e.currentTarget.select()} aria-label="Embed code" />
       <button type="button" className="btn btn--ghost btn--sm" onClick={copy}>{copied ? <><CheckCircle2 size={14} /> Copied</> : <><Copy size={14} /> Copy embed code</>}</button>
     </div>
   );
