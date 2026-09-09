@@ -116,6 +116,36 @@ h1, h2, h3, p { margin: 0; }
    card inherits is a visual change to a shipped screen and not this task. */
 .shell--widget .donate-card,
 .shell--widget .donate-card .donate-title { color: var(--color-ink); }
+
+/* ── NO DROP SHADOW, AND A CHIP INSTEAD OF A GLOW ───────────────────────────────────────
+   Both halves of the smudge under the card were the same mistake: a treatment designed to
+   hold something against THIS app's dark wallpaper, applied where the background belongs to
+   somebody else.
+
+   `--glass-shadow-raised` is a 48px drop shadow plus a soft accent glow. Over our own scene
+   that is depth; over a masjid's cream page it is a grey band on THEIR background, which
+   reads as a smudge or a mis-sized frame rather than as a card lifting off anything.
+   Display's widget has no shadow at all — a hairline border is the entire treatment — so
+   that is what is left here: the inset top highlight and the `0 0 0 1px` ring, which
+   together are Display's `--line`.
+
+   `.donate-foot` was the same thing in text form. It is styled for a line sitting directly
+   on the wallpaper — scene-faint ink plus `--text-shadow-scene`, a 10-12px glow whose whole
+   job is to keep thin text legible over a photograph. Over a host page that glow is the
+   other half of the band, and it is protecting the text from a background we do not draw.
+   So the glow goes and the line gets a small chip of the card's own material instead: it is
+   legible on any host page because it brings its own, and it cannot bleed, because a solid
+   shape has edges where a blur does not. */
+.shell--widget .glass-raised {
+  box-shadow: inset 0 1px 0 0 var(--glass-highlight), 0 0 0 1px var(--glass-border);
+}
+.shell--widget .donate-foot {
+  color: var(--color-ink-muted);
+  text-shadow: none;
+  background-color: var(--color-surface-raised);
+  padding: 0.22rem 0.66rem;
+  border-radius: 999px;
+}
 .topbar {
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 0.9rem;

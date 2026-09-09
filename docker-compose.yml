@@ -35,7 +35,7 @@ services:
     # does not conflict — main's line is simply newer, so git takes it silently. A dev
     # branch left carrying `:X.Y.Z@sha256:…` would serve testers the stable image under
     # a prerelease version number. Check this line after every merge in either direction.
-    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.45.0-dev.3
+    image: ghcr.io/openmasjid-solutions/openmasjiddonations:0.45.0-dev.4
     restart: unless-stopped
     environment:
       PORT: "8080"
