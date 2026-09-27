@@ -277,6 +277,16 @@ Known gap, recorded not hidden: the container still **runs as root** and the roo
 ## 12. Design & theming
 
 Match the OpenMasjid family — the polish must equal Display and the dashboard.
+- **A FILL is `--color-btn`; `--color-primary` is a LETTERFORM.** Text, borders and rings take
+  `--color-primary`; anything painting a solid coloured background takes `--color-btn` /
+  `--color-btn-hover`, and its ink is always `--color-on-primary` — never a literal white. This is
+  the platform's split and Display's, and it is not stylistic: the light theme gives
+  `--color-primary` a darker value so it can be read as text, and an accent replaces it with
+  `textLight`, so a control that fills itself from it goes muddy (measured at 3.35:1). The matching
+  half is that **the fill and its ink move together or neither moves** — setting a fill alone is
+  how the Donate button ended up white-on-gold at 1.67:1 for four of the five accents in light
+  theme. `server/src/accents.test.ts` measures every pairing and reads the palette out of
+  `web/src/prefs.ts` as text, because no test runner reaches the web tree.
 - **Tokens via CSS variables.** Dark is default; light + follow-system supported. Primary **emerald** (`#1FA37A` family), **gold** (`#D4AF37`) accent used sparingly, deep night-green dark base. Never hardcode hex in components.
 - **When launched from OpenMasjidOS**, match the dashboard's theme + wallpaper (server-to-server, like Display). Standalone, use the app's own appearance settings.
 - Subtle Islamic-geometric texture; respectful, serene, trustworthy — this is a payments page, so clarity and calm beat flashiness.

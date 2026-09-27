@@ -27,34 +27,116 @@ export interface Prefs {
 }
 
 const KEY = 'omdon-prefs';
-const DEFAULTS: Prefs = { theme: 'system', wallpaper: 'aurora', wallpaperImage: '', accent: 'cyan', followOmos: true };
+// `accent: ''` means "nobody has handed us one", NOT cyan — and the difference is load-bearing,
+// because `applyAccent` writes INLINE custom properties on <html>, which beat every [data-theme]
+// block. Defaulting to a named accent would make the light theme's own designed primary and button
+// colours unreachable on every standalone install, including a masjid that never opens
+// OpenMasjidOS. Copied from OpenMasjidDisplay, which learned it the same way.
+const DEFAULTS: Prefs = { theme: 'system', wallpaper: 'aurora', wallpaperImage: '', accent: '', followOmos: true };
 
-/** Accent palette — mirrors OpenMasjidOS so the app matches the dashboard's accent.
- *  cyan is the tokens' built-in primary, so selecting it just clears the overrides. */
-export const ACCENTS: Record<string, { primary: string; hover: string; subtle: string }> = {
-  cyan: { primary: '#22D3EE', hover: '#67E8F9', subtle: 'rgba(34,211,238,0.12)' },
-  teal: { primary: '#2DD4BF', hover: '#5EEAD4', subtle: 'rgba(45,212,191,0.12)' },
-  sky: { primary: '#38BDF8', hover: '#7DD3FC', subtle: 'rgba(56,189,248,0.12)' },
-  violet: { primary: '#A78BFA', hover: '#C4B5FD', subtle: 'rgba(167,139,250,0.14)' },
-  gold: { primary: '#FBBF24', hover: '#FCD34D', subtle: 'rgba(251,191,36,0.14)' },
+/**
+ * Accent palette — the five colours OpenMasjidOS hands an app, each with the INK that goes on it.
+ *
+ * Ported from OpenMasjidDisplay's `omosAccents.ts` (CLAUDE.md §2: follow Display's real code),
+ * and the two extra fields are the whole point. This app shipped with `primary`/`hover`/`subtle`
+ * only, and `applyAccent` therefore repainted every filled button without repainting its text:
+ *
+ *   light theme, white ink on the raw accent — gold 1.67:1, cyan 1.81:1, teal 1.86:1,
+ *   sky 2.14:1, violet 2.72:1. AA wants 4.5:1. That is the Donate button.
+ *
+ * • `onPrimary` is the ink for the FILL. Never assume white: these are bright fills chosen to
+ *   carry dark ink, and light theme makes it worse rather than better, because the stylesheet's
+ *   own primary there is a deep blue whose ink genuinely IS white.
+ * • `textLight` is the same accent as a LETTERFORM on the light theme — a link, the brand, an
+ *   active nav label. A fill and a letterform are not the same problem: as text on a white card
+ *   the raw accents measure 1.67:1 to 2.72:1. Each of these is its accent walked toward a dark
+ *   neutral until it clears AA on both the light card (#FFFFFF) and the light page (#F0F9FF),
+ *   keeping the hue — so a gold masjid still looks gold. The dark theme needs no equivalent:
+ *   there the raw accents run 6.9:1 to 11.3:1 on the page, so fill and text really are one colour.
+ *
+ * Kept as a flat literal on purpose: `server/src/accents.test.ts` reads this file as TEXT and
+ * measures every pairing, so the table here cannot drift from the platform's spec unnoticed.
+ */
+export interface Accent {
+  /** The FILL: buttons, active chips. Reaches CSS as `--color-btn`. */
+  primary: string;
+  /** The hover fill. */
+  hover: string;
+  /** The ink that goes ON `primary`. Never assume white. */
+  onPrimary: string;
+  /** The same accent as TEXT on the LIGHT theme. See above. */
+  textLight: string;
+}
+
+export const ACCENTS: Record<string, Accent> = {
+  cyan: { primary: '#22D3EE', hover: '#67E8F9', onPrimary: '#00131C', textLight: '#177A8F' },
+  teal: { primary: '#2DD4BF', hover: '#5EEAD4', onPrimary: '#00201B', textLight: '#1E7F79' },
+  sky: { primary: '#38BDF8', hover: '#7DD3FC', onPrimary: '#001B2E', textLight: '#2679A2' },
+  violet: { primary: '#A78BFA', hover: '#C4B5FD', onPrimary: '#190B3D', textLight: '#7564B4' },
+  gold: { primary: '#FBBF24', hover: '#FCD34D', onPrimary: '#2B1B00', textLight: '#886C22' },
 };
 
-/** Apply the accent by overriding the primary CSS variables (or clearing them for
- *  the default cyan). Mirrors the platform's applyAccent. */
+/** What the dashboard ships with, and what an unrecognised value falls back to. */
+export const DEFAULT_ACCENT = 'cyan';
+
+/**
+ * Looked up through a Map, never `ACCENTS[id]`.
+ *
+ * The accent arrives from the attacker-craftable `#omos` fragment as well as from the platform, so
+ * the id is untrusted input against an object literal: `ACCENTS['toString']` returns a FUNCTION —
+ * truthy, so a `?? DEFAULT` fallback never fires, and reading `.primary` off it gives `undefined`.
+ * Display hit exactly that and it reached localStorage, so the bad value came back on every reload.
+ */
+const BY_ID = new Map(Object.entries(ACCENTS));
+
+export function accentFor(id: string | undefined): Accent {
+  return BY_ID.get(String(id ?? '')) ?? BY_ID.get(DEFAULT_ACCENT)!;
+}
+/** `#rrggbb` as an `rgba(...)` at `alpha`, for the accent's own tint. */
+function tint(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+/**
+ * Paint the dashboard's accent over the stylesheet's.
+ *
+ * THE FILL AND ITS INK MOVE TOGETHER, or neither moves. That is the whole fix here: this used to
+ * set `--color-btn` and leave `--color-on-primary` alone, which in light theme left white ink on a
+ * bright accent — 1.67:1 on gold, on the Donate button. Setting a fill without its ink is not a
+ * smaller version of setting both; it is worse than setting neither.
+ *
+ * The split that matters is FILL versus TEXT, which is why this is not four `setProperty` calls:
+ *
+ *  • `--color-btn` / `--color-btn-hover` take the RAW accent. They are only ever backgrounds, and
+ *    `--color-on-primary` is the ink measured against them.
+ *  • `--color-primary` is the accent as a LETTERFORM — links, the brand, the active dock item —
+ *    and on a light page the raw accent is unreadable. There it takes `textLight`.
+ *
+ * Because that choice depends on the theme, it has to run again whenever the theme changes,
+ * including when the OS flips under a `system` preference at dusk. `applyTheme` calls it.
+ */
 export function applyAccent(id: string): void {
-  const el = document.documentElement;
-  const a = ACCENTS[id];
-  if (!a || id === 'cyan') {
-    for (const p of ['--color-primary', '--color-primary-hover', '--color-primary-subtle', '--color-btn', '--color-btn-hover']) {
-      el.style.removeProperty(p);
+  const root = document.documentElement.style;
+  if (!id) {
+    // Nothing handed over: take the inline overrides back OFF so the stylesheet's own theme
+    // colours apply again. Removing rather than re-setting, so turning "follow OpenMasjidOS" off
+    // restores the app rather than freezing it on the last accent it happened to see.
+    for (const prop of ['--color-btn', '--color-btn-hover', '--color-on-primary', '--color-primary', '--color-primary-hover', '--color-primary-subtle']) {
+      root.removeProperty(prop);
     }
     return;
   }
-  el.style.setProperty('--color-primary', a.primary);
-  el.style.setProperty('--color-primary-hover', a.hover);
-  el.style.setProperty('--color-primary-subtle', a.subtle);
-  el.style.setProperty('--color-btn', a.primary);
-  el.style.setProperty('--color-btn-hover', a.hover);
+  const a = accentFor(id);
+  const light = document.documentElement.getAttribute('data-theme') === 'light';
+  root.setProperty('--color-btn', a.primary);
+  root.setProperty('--color-btn-hover', a.hover);
+  root.setProperty('--color-on-primary', a.onPrimary);
+  root.setProperty('--color-primary', light ? a.textLight : a.primary);
+  root.setProperty('--color-primary-hover', light ? a.textLight : a.hover);
+  // The tint behind accent-coloured text (active dock item, badges). Always the RAW accent: it is
+  // a wash of the masjid's colour, and at 10-12% it is the page underneath that carries contrast.
+  root.setProperty('--color-primary-subtle', tint(a.primary, light ? 0.1 : 0.12));
 }
 
 export const WALLPAPERS: Record<string, { label: string; preview: string }> = {
@@ -78,6 +160,33 @@ export function resolveTheme(theme: Prefs['theme']): 'dark' | 'light' {
 
 export function applyTheme(theme: Prefs['theme']): void {
   document.documentElement.setAttribute('data-theme', resolveTheme(theme));
+  // The accent's TEXT form depends on which page it is sitting on, so it is re-resolved here and
+  // not only when the accent itself changes — otherwise a masjid whose dashboard is on `system`
+  // gets a dark-theme accent on a light page the moment their laptop switches at dusk.
+  applyAccent(accentOf());
+}
+
+/** The accent currently in force. Read lazily so `applyTheme` can be called before the store is
+ *  hydrated — it is, on the very first paint, when `state` is still in its temporal dead zone. */
+function accentOf(): string {
+  try {
+    return state.accent;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Re-resolve the accent against whatever `data-theme` now says.
+ *
+ * For pages that pin their OWN theme rather than going through `applyTheme` — the donation page
+ * chooses light or dark from the campaign's background image, and the donor's plan page is always
+ * dark. They call `setAttribute('data-theme', …)` directly, so without this the accent keeps the
+ * form it was given at hydrate: a masjid on `light` whose campaign has a dark photo would get the
+ * light theme's dark-olive `textLight` painted on a dark card, at about 3:1.
+ */
+export function refreshAccent(): void {
+  applyAccent(accentOf());
 }
 
 export function applyWallpaper(id: string): void {

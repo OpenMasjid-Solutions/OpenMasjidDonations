@@ -28,7 +28,7 @@ import {
   type TuitionIntentResponse,
   type TuitionSelection,
 } from './api';
-import { useReadableTheme } from './prefs';
+import { refreshAccent, useReadableTheme } from './prefs';
 import { asset } from './base';
 
 /** Sanitise an admin-entered image URL for use in a CSS url()/<img> (accept only
@@ -117,6 +117,10 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
     // Pinned in both directions, not just "light": the donation page's scene IS the campaign's
     // background image, so the ink must follow that measurement and never the theme's own scene.
     html.setAttribute('data-scene', readable === 'light' ? 'light' : 'dark');
+    // This page sets `data-theme` itself instead of going through `applyTheme`, so the accent has
+    // to be told: its TEXT form differs between the themes, and it was resolved at hydrate against
+    // whichever theme the dashboard had, not the one this campaign's background just chose.
+    refreshAccent();
   }, [readable]);
 
   // Tell the embedding page how tall we actually are, so the iframe can be exactly the card and

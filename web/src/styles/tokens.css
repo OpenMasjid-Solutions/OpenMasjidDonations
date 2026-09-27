@@ -95,8 +95,12 @@
   --color-surface-hover: rgba(2, 132, 199, 0.06);
   --color-surface-shimmer: #BAE6FD;
 
-  --color-primary: #0284C7;
-  --color-primary-hover: #0369A1;
+  /* #0284C7 measured 4.10:1 as TEXT on this theme's white card — under AA, on every link and
+     every active nav label. `--color-primary` is the text/border/ring colour; the FILL is
+     `--color-btn` below, which is where a brighter blue belongs. Taken from OpenMasjidDisplay,
+     which fixed this in its own copy of these tokens; ours had not been re-synced. */
+  --color-primary: #0369A1;
+  --color-primary-hover: #075985;
   --color-primary-muted: #BAE6FD;
   --color-primary-subtle: rgba(2, 132, 199, 0.1);
 
