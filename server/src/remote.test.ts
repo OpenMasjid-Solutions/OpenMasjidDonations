@@ -137,6 +137,9 @@ const TUNNEL = { 'cf-ray': '8f00aa11bb22cc33-LHR', 'x-forwarded-proto': 'https',
 
 let site: { status: number; body?: unknown } = { status: 503 };
 let siteCalls = 0;
+/** The platform's public appearance endpoint drops the connection — what the app reads as
+ *  "OpenMasjidOS is unreachable", the one state in which it offers password recovery. */
+let platformLooksDown = false;
 let platform: http.Server;
 let child: ChildProcess;
 let base = '';
@@ -166,7 +169,7 @@ before(async () => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
-    if (req.url === '/api/public/appearance') return send(200, {});
+    if (req.url === '/api/public/appearance') return platformLooksDown ? void req.socket.destroy() : send(200, {});
     if (req.headers['x-openmasjid-app-secret'] !== SECRET) return send(403, { error: 'Unknown app.' });
     if (req.url === '/api/fabric/site') {
       siteCalls += 1;
@@ -299,4 +302,96 @@ test('server: signing out from outside clears the session under our prefix, and 
     .map((c) => /;\s*Path=([^;]*)/i.exec(c)?.[1])
     .sort();
   assert.deepEqual(paths, ['/', '/donations']);
+});
+
+// ── 4. From outside, the password is never the way in ───────────────────────
+// Under OpenMasjidOS the admin from the internet is the platform's two-step sign-in or nobody. The
+// local password must not be guessable from there — and its limiter keys on the TCP peer, which
+// through the tunnel is the platform's proxy, so every remote visitor shares one bucket anyway.
+
+const PASSWORD = 'correct horse battery';
+const post = (p: string, headers: Record<string, string>, body: unknown) =>
+  call(p, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+const sessionCookie = (r: Response) => r.headers.getSetCookie().find((c) => c.startsWith('omdon_session='));
+/** A POST whose path goes on the wire exactly as written — fetch would resolve a dot segment first. */
+function rawPost(p: string, headers: Record<string, string>, body: unknown): Promise<{ status: number; setCookie: string[] }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(base);
+    const data = JSON.stringify(body);
+    const req = http.request({ host: u.hostname, port: u.port, path: p, method: 'POST', headers: { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
+      res.resume();
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, setCookie: ([] as string[]).concat(res.headers['set-cookie'] ?? []) }));
+    });
+    req.on('error', reject);
+    req.end(data);
+  });
+}
+
+test('server: from outside, nobody can claim the password — not even while OpenMasjidOS looks unreachable', { timeout: 30_000 }, async () => {
+  // The recovery opens exactly when the platform cannot be reached. Before this, that moment let
+  // anyone on the internet choose the admin password of a shared app.
+  platformLooksDown = true;
+  try {
+    for (const p of ['/donations/api/setup', '/donations/api/%73etup']) {
+      const r = await post(p, TUNNEL, { password: PASSWORD });
+      assert.equal(r.status, 403, `${p}: the old code answered 200 and set the admin password`);
+      assert.match(((await r.json()) as { error: string }).error, /OpenMasjidOS dashboard/);
+      assert.equal(sessionCookie(r), undefined);
+    }
+  } finally {
+    platformLooksDown = false;
+  }
+});
+
+test('server: on the LAN, recovery and the password work exactly as before', { timeout: 30_000 }, async () => {
+  platformLooksDown = true;
+  try {
+    const setup = await post('/api/setup', {}, { password: PASSWORD });
+    assert.equal(setup.status, 200, 'recovery while the platform is down is the LAN way back in');
+    assert.ok(sessionCookie(setup));
+  } finally {
+    platformLooksDown = false;
+  }
+  // `/api/%6Cogin` too: the router decodes it to /api/login, which is why the guard lives in the
+  // route rather than in a match on the URL.
+  for (const p of ['/api/login', '/api/%6Cogin', '/donations/api/login']) {
+    const r = await post(p, {}, { password: PASSWORD });
+    assert.equal(r.status, 200, p);
+    assert.match(sessionCookie(r) ?? '', /;\s*Path=\/(?:;|$)/i, p);
+  }
+  const wrong = await post('/api/login', {}, { password: 'not it' });
+  assert.equal(wrong.status, 401);
+});
+
+test('server: from outside, the password never signs anyone in — in any spelling the router resolves', { timeout: 30_000 }, async () => {
+  for (const p of ['/donations/api/login', '/donations/api/%6Cogin', '/donations/api/%6c%6F%67%69%6E']) {
+    const r = await post(p, TUNNEL, { password: PASSWORD });
+    assert.equal(r.status, 403, `${p}: the old code signed in with the right password`);
+    assert.match(((await r.json()) as { error: string }).error, /OpenMasjidOS dashboard/);
+    assert.equal(sessionCookie(r), undefined, p);
+  }
+  // A dot segment is not resolved by the router, so it never reaches the login route at all.
+  for (const p of ['/donations/api/x/../login', '/donations/api/./login', '/donations/api/%2e/login']) {
+    const dot = await rawPost(p, TUNNEL, { password: PASSWORD });
+    assert.ok(dot.status !== 200 && dot.status !== 401, `${p}: ${dot.status}`);
+    assert.ok(!dot.setCookie.some((c) => c.startsWith('omdon_session=')), p);
+  }
+  // Ten refused attempts from outside never lock the admin out at the masjid.
+  for (let i = 0; i < 10; i++) await post('/donations/api/login', TUNNEL, { password: 'guess ' + i });
+  assert.equal((await post('/api/login', {}, { password: PASSWORD })).status, 200);
+});
+
+test('server: from outside the panel is told there is no password box; SSO, the admin API, logout and donors are untouched', { timeout: 30_000 }, async () => {
+  const anon = (await (await call('/donations/api/session', { headers: TUNNEL })).json()) as { data: { authed: boolean; passwordClosed?: boolean } };
+  assert.deepEqual([anon.data.authed, anon.data.passwordClosed], [false, true]);
+  const lan = (await (await call('/api/session')).json()) as { data: { passwordClosed?: boolean } };
+  assert.equal(lan.data.passwordClosed, false);
+
+  const sso = await call('/donations/api/session', { headers: { ...TUNNEL, cookie: `omos_session=${ACCESS_TOKEN}` } });
+  const set = sessionCookie(sso);
+  assert.ok(set, 'SSO still signs the admin in from outside');
+  const admin = await call('/donations/api/admin/metrics', { headers: { ...TUNNEL, cookie: `omdon_session=${cookieValue(set)}` } });
+  assert.equal(admin.status, 200);
+  assert.equal((await call('/donations/api/logout', { method: 'POST', headers: TUNNEL })).status, 200);
+  assert.equal((await call('/donations/api/app', { headers: TUNNEL })).status, 200, 'the public bootstrap a donor page reads');
 });

@@ -35,6 +35,9 @@ export interface Session {
    *  platform couldn't be contacted (down / migrated) — the UI then offers the local
    *  password recovery instead of looping on "open from the dashboard". */
   sso: { enabled: boolean; reachable: boolean; username?: string };
+  /** Reached from outside the masjid under OpenMasjidOS: the server refuses the password (sign-in,
+   *  setup, recovery), so the only way in is Open on the dashboard. Absent on an older server. */
+  passwordClosed?: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

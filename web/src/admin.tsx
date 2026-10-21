@@ -36,6 +36,8 @@ export function AdminApp({ info }: { info: AppInfo | null }) {
 
   if (!loaded) return <Centered><span className="spinner" aria-label="Loading" /></Centered>;
   if (session?.authed) return <AdminConsole info={info} session={session} onSignedOut={refresh} />;
+  // From outside the masjid there is no password box at all — the server would refuse it.
+  if (session?.passwordClosed) return <OpenFromDashboard onRetry={refresh} />;
   if (session?.needsSetup) return <Setup onDone={refresh} />;
   // Embedded under OpenMasjidOS: sign in via the dashboard. But a local password is
   // always available as a recovery, and if the platform is unreachable we lead with it
@@ -110,6 +112,20 @@ function Login({ onDone }: { onDone: () => void }) {
         {error && <p className="form-error" role="alert">{error}</p>}
         <button className="btn btn--primary btn--block" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : <LogIn size={16} />} Sign in</button>
       </form>
+    </AuthCard>
+  );
+}
+
+/** Reached from outside the masjid and not signed in by SSO. The password is refused out here, so
+ *  there is nothing to type — only the way in, and a retry for after pressing Open. */
+function OpenFromDashboard({ onRetry }: { onRetry: () => void }) {
+  return (
+    <AuthCard title="Sign in through OpenMasjidOS">
+      <p className="auth-sub muted">
+        From outside the masjid, open Donations from your OpenMasjidOS dashboard — press <b>Open</b> on the Donations app —
+        and you’ll be signed in automatically. A password only works on the masjid’s own network.
+      </p>
+      <button className="btn btn--ghost btn--block" onClick={onRetry}><RefreshCw size={16} /> Try again</button>
     </AuthCard>
   );
 }

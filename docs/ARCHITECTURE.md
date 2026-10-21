@@ -163,6 +163,13 @@ aware on **both** ends:
   clears both. SSO itself needs nothing special: the platform's `/_omos/open` gives the
   browser an access token for this app as `omos_session` under our path, and
   `/api/auth/session` accepts it.
+- **From outside, SSO is the only way in.** Under OpenMasjidOS a Cloudflare request
+  (`cf-ray`) to `/api/login` or `/api/setup` (first run and the local-password recovery) is
+  refused with a 403 telling the admin to press Open on the dashboard, and `/api/session`
+  reports `passwordClosed` so the panel shows that instead of a password box. The check is
+  inside each route, so every spelling the router resolves to it (`/api/%6Cogin`) is covered;
+  it runs before the login limiter, which out here would see every visitor as the platform's
+  proxy. The LAN is unchanged, and so is a standalone install's own tunnel, which has no SSO.
 - **Client**: Vite builds with `base:'./'` (assets resolve against the injected `<base href>`,
   so dynamic-import chunks follow the prefix via `import.meta.url`). `web/src/base.ts` exposes
   `BASE`/`withBase`/`asset`/`stripBase`; API/nav/asset/upload URLs are prefixed, the router

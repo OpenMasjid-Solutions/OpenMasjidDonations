@@ -255,11 +255,26 @@ async function main(): Promise<void> {
   // simple, synchronous check.
   const isAuthed = (cookie: string | undefined): boolean => verifyToken(store.secret, cookie, 'admin');
 
+  /** Did this request come through Cloudflare? Cloudflare sets `cf-ray` at its edge and the
+   *  OpenMasjidOS ingress passes it on, so a visitor from outside cannot remove it. A LAN client
+   *  that types it only restricts itself (a narrower cookie, no password sign-in). */
+  const viaTunnel = (req: import('fastify').FastifyRequest): boolean => !!req.headers['cf-ray'];
+
   /** Where our session cookie lives: our prefix for a request that came through Cloudflare (auth.ts
    *  `cookieOptions` says why), `/` otherwise — on the LAN exactly as before, even though our page
-   *  there also calls the prefixed API once remote access is on. A LAN client sending `cf-ray` only
-   *  narrows its own cookie. */
-  const cookiePath = (req: import('fastify').FastifyRequest): string => (req.headers['cf-ray'] && servedUnder.get(req.raw)) || '/';
+   *  there also calls the prefixed API once remote access is on. */
+  const cookiePath = (req: import('fastify').FastifyRequest): string => (viaTunnel(req) && servedUnder.get(req.raw)) || '/';
+
+  /** From outside the masjid, under OpenMasjidOS, the admin is the platform's two-step sign-in
+   *  (SSO) or nobody: the local password — sign-in, first-run setup, recovery — is never offered to
+   *  the internet, where it would be one guessable secret behind a limiter that sees every remote
+   *  visitor as the same peer (the platform's proxy). Asked inside each password route rather than
+   *  by matching the URL, so it holds for every spelling the router resolves to that route
+   *  (`/api/%6Cogin` included). Standalone, the app's own tunnel has no SSO to send anyone to, so
+   *  it is left as it was. */
+  const passwordClosed = (req: import('fastify').FastifyRequest): boolean => ssoConfigured() && viaTunnel(req);
+  const PASSWORD_CLOSED =
+    'From outside the masjid, open Donations from your OpenMasjidOS dashboard — press Open on the Donations app — and you’ll be signed in. A password only works on the masjid’s own network.';
 
   const requireAdmin = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
     if (!isAuthed(req.cookies[COOKIE])) {
@@ -401,6 +416,9 @@ async function main(): Promise<void> {
         authed,
         hasPassword: store.hasAdmin(),
         sso: { enabled: ssoConfigured(), reachable, username },
+        // Reached from outside under OpenMasjidOS: the dashboard's Open is the only way in, so the
+        // panel shows that instead of a password box.
+        passwordClosed: passwordClosed(req),
       },
     };
   });
@@ -408,6 +426,8 @@ async function main(): Promise<void> {
   // ── First-run setup / local-password recovery ───────────────────────────────
   const SetupBody = z.object({ password: z.string().min(8).max(200), name: z.string().max(80).optional() });
   app.post('/api/setup', async (req, reply) => {
+    // First, before anything that would say whether a password exists or spend a platform probe.
+    if (passwordClosed(req)) return reply.code(403).send({ error: PASSWORD_CLOSED });
     if (store.hasAdmin()) return reply.code(409).send({ error: 'This app is already set up.' });
     // The local password is a RECOVERY for when OpenMasjidOS can't sign you in. We allow
     // it whenever SSO isn't configured (standalone) OR the platform is currently
@@ -439,6 +459,8 @@ async function main(): Promise<void> {
   // ── Password login (rate-limited) ───────────────────────────────────────────
   const LoginBody = z.object({ password: z.string().min(1).max(200) });
   app.post('/api/login', async (req, reply) => {
+    // Before the limiter, so a refused attempt from outside costs the LAN admin nothing.
+    if (passwordClosed(req)) return reply.code(403).send({ error: PASSWORD_CLOSED });
     // Key the brute-force limiter on the real, unspoofable TCP peer — never req.ip
     // (which would honor a forged X-Forwarded-For). This is the defense behind the
     // short admin password, so it must not be bypassable by a request header.
@@ -3857,7 +3879,7 @@ async function main(): Promise<void> {
     const url = req.raw.url ?? '/';
     // 307 keeps the method and body, so an API POST is retried as sent. `url` is this request's own
     // path under our (validated) prefix, so the Location can only ever point back at us.
-    if (ssoConfigured() && req.headers['cf-ray'] && !servedUnder.has(req.raw) && underBase(url, (await siteAfterMiss()).basePath) !== null) {
+    if (ssoConfigured() && viaTunnel(req) && !servedUnder.has(req.raw) && underBase(url, (await siteAfterMiss()).basePath) !== null) {
       return reply.redirect(url, 307);
     }
     const pathname = url.split('?')[0];
