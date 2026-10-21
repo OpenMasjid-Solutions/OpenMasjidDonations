@@ -22,7 +22,7 @@ import { DIALS, DEFAULT_DIAL, toE164 } from './phone';
 import { recoveryBreakdown } from './notify';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch, WhatsAppEventOutcome } from './store';
 import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
-import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
+import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, underBase, type FabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
   chooseAppeal,
@@ -156,6 +156,10 @@ async function main(): Promise<void> {
   // (already applied via a cache clear) doesn't itself trigger a restart.
   let fabricBaseline: string | null = null;
 
+  /** The tunnel prefix each request arrived under, keyed by the raw request (absent = no prefix,
+   *  i.e. the LAN). Set by the rewrite hook below, which is the only thing that knows. */
+  const servedUnder = new WeakMap<object, string>();
+
   const app = Fastify({
     logger: false, // we log ourselves and never log secrets
     // trustProxy stays OFF: the app is port-mapped directly (no reverse proxy in
@@ -180,11 +184,10 @@ async function main(): Promise<void> {
     rewriteUrl(req) {
       const url = req.url ?? '/';
       const base = cachedFabricSite().basePath;
-      if (!base) return url;
-      if (url === base) return '/';
-      if (url.startsWith(base + '/')) return url.slice(base.length);
-      if (url.startsWith(base + '?')) return '/' + url.slice(base.length);
-      return url;
+      const stripped = underBase(url, base);
+      if (stripped === null) return url;
+      servedUnder.set(req, base);
+      return stripped;
     },
   });
   await app.register(fastifyCookie); // parses req.cookies + decorates reply.setCookie
@@ -3827,8 +3830,27 @@ async function main(): Promise<void> {
   // SPA fallback: client-side routes (e.g. /admin, /zakat) resolve to index.html; requests
   // that look like a file (have an extension, e.g. a stale /assets/x.js) still 404 rather
   // than silently returning the app shell; unknown API routes return JSON.
-  app.setNotFoundHandler((req, reply) => {
+  // A request from outside that missed and was NOT stripped may be under a prefix we do not know
+  // yet: the platform was not up when we booted (a power cut brings every container up at once), or
+  // the admin has just changed our path. Ask the platform — at most once per 10s however many misses
+  // arrive, because anyone can send one — and if the answer covers this URL, send the browser back
+  // to the very same address, which the rewrite hook now strips. Before this, the first visits from
+  // outside got the page with `<base href="/">`, whose script then loaded from the OpenMasjidOS
+  // dashboard: a white screen. Only for Cloudflare traffic (`cf-ray`): on the LAN every page load of
+  // a client-side route lands here, and must neither wait on the platform nor spend its rate budget.
+  let missLookup: { at: number; site: Promise<FabricSite> } | null = null;
+  const siteAfterMiss = (): Promise<FabricSite> => {
+    if (!missLookup || Date.now() - missLookup.at > 10_000) missLookup = { at: Date.now(), site: fetchFabricSite(true) };
+    return missLookup.site;
+  };
+
+  app.setNotFoundHandler(async (req, reply) => {
     const url = req.raw.url ?? '/';
+    // 307 keeps the method and body, so an API POST is retried as sent. `url` is this request's own
+    // path under our (validated) prefix, so the Location can only ever point back at us.
+    if (ssoConfigured() && req.headers['cf-ray'] && !servedUnder.has(req.raw) && underBase(url, (await siteAfterMiss()).basePath) !== null) {
+      return reply.redirect(url, 307);
+    }
     const pathname = url.split('?')[0];
     const looksLikeFile = path.extname(pathname) !== '';
     if (req.method === 'GET' && havePublic && !looksLikeFile && !url.startsWith('/api') && !url.startsWith('/healthz')) {
