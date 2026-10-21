@@ -105,7 +105,30 @@ test('site: a prefix that is not a plain path is refused, not half-used', async 
   }
 });
 
-// ── 1 against the REAL server ───────────────────────────────────────────
+// ── 3. Nothing on the page escapes the prefix ───────────────────────────────
+
+test('web: no root-relative link, image, fetch or navigation — each would land on the dashboard', () => {
+  // Through the tunnel "/" is the OpenMasjidOS dashboard. Every in-app URL goes through withBase().
+  const dir = path.join(__dirname, '..', '..', 'web', 'src');
+  const offenders: string[] = [];
+  for (const f of fs.readdirSync(dir).filter((n) => /\.tsx?$/.test(n))) {
+    fs.readFileSync(path.join(dir, f), 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (
+          /\b(?:href|src|action)=["']\/(?!\/)/.test(line) ||
+          /\bfetch\(\s*["'`]\/(?!\/)/.test(line) ||
+          /\blocation(?:\.href)?\s*=\s*["'`]\/(?!\/)/.test(line) ||
+          /\blocation\.(?:assign|replace)\(\s*["'`]\/(?!\/)/.test(line)
+        ) {
+          offenders.push(`${f}:${i + 1}: ${line.trim()}`);
+        }
+      });
+  }
+  assert.deepEqual(offenders, []);
+});
+
+// ── 1 + 2 against the REAL server ───────────────────────────────────────────
 
 const SECRET = 'fake-app-secret';
 /** The access token the platform's /_omos/open hands the admin's browser for THIS app. */
@@ -134,6 +157,8 @@ function freePort(): Promise<number> {
 function call(p: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) {
   return realFetch(base + p, { ...init, redirect: 'manual' });
 }
+
+const cookieValue = (setCookie: string): string => setCookie.split(';')[0].split('=').slice(1).join('=');
 
 before(async () => {
   platform = http.createServer((req, res) => {
@@ -235,3 +260,43 @@ test('server: a miss that is not ours is never redirected, and a flood of misses
   assert.ok(odd.status < 300 || odd.status >= 400, 'never a redirect off-site');
 });
 
+test('server: opened from the remote dashboard, SSO signs the admin in with a session scoped to our prefix', { timeout: 30_000 }, async () => {
+  const r = await call('/donations/api/session', { headers: { ...TUNNEL, cookie: `omos_session=${ACCESS_TOKEN}; theme=dark` } });
+  assert.equal(r.status, 200);
+  const body = (await r.json()) as { data: { authed: boolean; sso: { username?: string } } };
+  assert.equal(body.data.authed, true, 'no password asked for');
+  assert.equal(body.data.sso.username, 'hasan');
+
+  const set = r.headers.getSetCookie().find((c) => c.startsWith('omdon_session='));
+  assert.ok(set, 'a session was minted');
+  assert.match(set, /;\s*Path=\/donations(?:;|$)/i, `scoped to our prefix, not the shared hostname: ${set}`);
+  assert.match(set, /;\s*Secure/i);
+  assert.match(set, /;\s*HttpOnly/i);
+  assert.ok(!/^omos_session=/i.test(set), 'never the platform cookie name');
+
+  // …and that session reaches the admin API under the prefix.
+  const settings = await call('/donations/api/settings', { headers: { ...TUNNEL, cookie: `omdon_session=${cookieValue(set)}` } });
+  assert.equal(settings.status, 200);
+});
+
+test('server: on the LAN the session cookie is exactly as before — Path=/, no Secure on plain HTTP', { timeout: 30_000 }, async () => {
+  // The LAN page also calls the prefixed API once remote access is on, and plain /api too.
+  for (const p of ['/donations/api/session', '/api/session']) {
+    const r = await call(p, { headers: { cookie: `omos_session=${ACCESS_TOKEN}` } });
+    const set = r.headers.getSetCookie().find((c) => c.startsWith('omdon_session='));
+    assert.ok(set, p);
+    assert.match(set, /;\s*Path=\/(?:;|$)/i, `${p}: ${set}`);
+    assert.ok(!/;\s*Secure/i.test(set), `${p}: ${set}`);
+  }
+});
+
+test('server: signing out from outside clears the session under our prefix, and an old one at /', { timeout: 30_000 }, async () => {
+  const r = await call('/donations/api/logout', { method: 'POST', headers: TUNNEL });
+  assert.equal(r.status, 200);
+  const paths = r.headers
+    .getSetCookie()
+    .filter((c) => c.startsWith('omdon_session='))
+    .map((c) => /;\s*Path=([^;]*)/i.exec(c)?.[1])
+    .sort();
+  assert.deepEqual(paths, ['/', '/donations']);
+});

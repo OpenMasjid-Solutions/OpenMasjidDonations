@@ -255,6 +255,12 @@ async function main(): Promise<void> {
   // simple, synchronous check.
   const isAuthed = (cookie: string | undefined): boolean => verifyToken(store.secret, cookie, 'admin');
 
+  /** Where our session cookie lives: our prefix for a request that came through Cloudflare (auth.ts
+   *  `cookieOptions` says why), `/` otherwise — on the LAN exactly as before, even though our page
+   *  there also calls the prefixed API once remote access is on. A LAN client sending `cf-ray` only
+   *  narrows its own cookie. */
+  const cookiePath = (req: import('fastify').FastifyRequest): string => (req.headers['cf-ray'] && servedUnder.get(req.raw)) || '/';
+
   const requireAdmin = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
     if (!isAuthed(req.cookies[COOKIE])) {
       return reply.code(401).send({ error: 'Please sign in.' });
@@ -381,7 +387,7 @@ async function main(): Promise<void> {
       const probe = await probePlatform(req.headers.cookie);
       reachable = probe.reachable;
       if (probe.username) {
-        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username), cookieOptions(SSO_SESSION_MS, secureForRequest(req)));
+        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username), cookieOptions(SSO_SESSION_MS, secureForRequest(req), cookiePath(req)));
         authed = true;
         username = probe.username;
       }
@@ -426,7 +432,7 @@ async function main(): Promise<void> {
     const parsed = SetupBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose a password of at least 8 characters.' });
     store.setAdmin(hashPassword(parsed.data.password), parsed.data.name?.trim());
-    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
+    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req), cookiePath(req)));
     return { data: { ok: true } };
   });
 
@@ -444,15 +450,18 @@ async function main(): Promise<void> {
     const parsed = LoginBody.safeParse(req.body);
     if (parsed.success && verifyPassword(parsed.data.password, admin)) {
       loginLimiter.succeed(peer);
-      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
+      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req), cookiePath(req)));
       return { data: { ok: true } };
     }
     loginLimiter.fail(peer);
     return reply.code(401).send({ error: 'Incorrect password.' });
   });
 
-  app.post('/api/logout', async (_req, reply) => {
+  app.post('/api/logout', async (req, reply) => {
     reply.clearCookie(COOKIE, { path: '/' });
+    // From outside the session lives under our prefix; the line above still clears one an older
+    // version set at `/`.
+    if (cookiePath(req) !== '/') reply.clearCookie(COOKIE, { path: cookiePath(req) });
     return { data: { ok: true } };
   });
 

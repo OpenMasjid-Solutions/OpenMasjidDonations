@@ -125,14 +125,19 @@ export function secureForRequest(req: { protocol?: string; headers: Record<strin
   return first === 'https';
 }
 
-/** Cookie options for @fastify/cookie's setCookie. HTTP-only + SameSite=Lax + Path=/, and `Secure`
- *  when the request came over TLS. Pass the request; omitting it falls back to the env override
- *  only, which is the pre-existing behavior. */
-export function cookieOptions(maxAgeMs = MAX_AGE_MS, secure = COOKIE_SECURE) {
+/** Cookie options for @fastify/cookie's setCookie. HTTP-only + SameSite=Lax, and `Secure` when the
+ *  request came over TLS. Pass the request; omitting it falls back to the env override only, which
+ *  is the pre-existing behavior.
+ *
+ *  `path` is `/` on the LAN and the tunnel prefix (e.g. `/donations`) from outside. Through the
+ *  OpenMasjidOS tunnel every app shares ONE hostname, and the platform passes each app every cookie
+ *  but its own session cookies — so a `Path=/` admin session reached every other app on that
+ *  hostname, which could replay it here from its own server. */
+export function cookieOptions(maxAgeMs = MAX_AGE_MS, secure = COOKIE_SECURE, path = '/') {
   return {
     httpOnly: true,
     sameSite: 'lax' as const,
-    path: '/',
+    path,
     secure,
     maxAge: Math.floor(maxAgeMs / 1000),
   };
