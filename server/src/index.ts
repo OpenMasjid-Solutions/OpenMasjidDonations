@@ -21,7 +21,7 @@ import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAc
 import { DIALS, DEFAULT_DIAL, toE164 } from './phone';
 import { recoveryBreakdown } from './notify';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch, WhatsAppEventOutcome } from './store';
-import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
+import { COOKIE, accessTokenBinding, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS, type Audience } from './auth';
 import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, underBase, type FabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
@@ -249,17 +249,36 @@ async function main(): Promise<void> {
   fs.mkdirSync(uploadsDir, { recursive: true });
   await app.register(fastifyStatic, { root: uploadsDir, prefix: '/uploads/', decorateReply: false, index: false });
 
-  // A request is authenticated if it carries a valid local session cookie. That
-  // cookie is minted by first-run setup, by password login, or by a confirmed
-  // OpenMasjidOS SSO check (see GET /api/session) — so every protected route stays a
-  // simple, synchronous check.
-  const isAuthed = (cookie: string | undefined): boolean => verifyToken(store.secret, cookie, 'admin');
-
   /** Did this request come through Cloudflare? Cloudflare sets `cf-ray` at its edge, and both the
    *  OpenMasjidOS ingress and this app's own cloudflared pass it on, so a visitor from outside cannot
    *  remove it. A LAN client that types it only restricts itself (a narrower cookie, no password
    *  sign-in). `x-forwarded-proto` is deliberately NOT read here. */
   const viaTunnel = (req: import('fastify').FastifyRequest): boolean => !!req.headers['cf-ray'];
+
+  /** Through the tunnel the OpenMasjidOS ingress strips every platform cookie and puts back exactly
+   *  one `omos_session`: this app's access token, and only while the admin's two-step-verified
+   *  remote session is live (core `system/app-access.ts`). '' when the request carries none. */
+  const ACCESS_TOKEN_RE = /^a1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
+  const accessTokenOf = (req: import('fastify').FastifyRequest): string => {
+    const t = /(?:^|;\s*)omos_session=([^;]*)/.exec(req.headers.cookie ?? '')?.[1].trim() ?? '';
+    return ACCESS_TOKEN_RE.test(t) ? t : '';
+  };
+
+  /** Which admin session counts on this request. On the LAN an `admin` token, exactly as always
+   *  (minted by first-run setup, password login or SSO). Through the tunnel ONLY an `admin-remote`
+   *  token — made by the SSO upgrade through the tunnel — bound to the access token THIS request
+   *  carries: a session made at the masjid counts for nothing out here, and one made out here ends
+   *  the moment the platform stops sending the token (sign-out, remote management off, a new second
+   *  factor). Every check stays synchronous, with no platform call. */
+  const scopeOf = (req: import('fastify').FastifyRequest): { aud: Audience; bnd?: string } => {
+    if (!viaTunnel(req)) return { aud: 'admin' };
+    const at = accessTokenOf(req);
+    return { aud: 'admin-remote', bnd: at ? accessTokenBinding(at) : undefined };
+  };
+  const isAuthed = (req: import('fastify').FastifyRequest): boolean => {
+    const { aud, bnd } = scopeOf(req);
+    return verifyToken(store.secret, req.cookies[COOKIE], aud, bnd);
+  };
 
   /** Where our session cookie lives: our prefix for a request that came through Cloudflare (auth.ts
    *  `cookieOptions` says why), `/` otherwise — on the LAN exactly as before, even though our page
@@ -281,14 +300,17 @@ async function main(): Promise<void> {
     : 'From outside the masjid, the Donations admin can’t be opened. Please manage it from a computer or phone on the masjid’s own network — your donation pages keep working from anywhere.';
 
   const requireAdmin = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
-    if (!isAuthed(req.cookies[COOKIE])) {
+    if (!isAuthed(req)) {
       return reply.code(401).send({ error: 'Please sign in.' });
     }
   };
 
   /** Who is acting, for the audit log. The name comes out of the SIGNED session token, so it cannot
    *  be spoofed; a local-password session has no platform username, hence the fallback. */
-  const actorOf = (req: import('fastify').FastifyRequest): string => tokenUser(store.secret, req.cookies[COOKIE]) || 'local admin';
+  const actorOf = (req: import('fastify').FastifyRequest): string => {
+    const { aud, bnd } = scopeOf(req);
+    return tokenUser(store.secret, req.cookies[COOKIE], aud, bnd) || 'local admin';
+  };
   /** Append one admin action to the audit log (never throws — see store.recordAudit). */
   const audit = (req: import('fastify').FastifyRequest, action: string, subject = '', detail = ''): void =>
     store.recordAudit(action, { actor: actorOf(req), subject, detail });
@@ -391,22 +413,31 @@ async function main(): Promise<void> {
   // local cookie, so the rest of the API stays a simple synchronous check. Falls
   // back silently to local login when SSO is absent or the platform is down.
   app.get('/api/session', async (req, reply) => {
-    let authed = isAuthed(req.cookies[COOKIE]);
+    let authed = isAuthed(req);
     let username: string | undefined;
     // True unless we tried to reach the platform and couldn't — lets the UI tell
     // "open it from the dashboard" apart from "OpenMasjidOS is unreachable" (a
     // migrated/down platform must offer the local-password way in, not a dead loop).
     let reachable = true;
+    // Through the tunnel the platform is asked about the access token ALONE, never the browser's
+    // other cookies (it also accepts a password-only dashboard session), and not at all when there
+    // is none — so a stranger's visit costs no platform call. On the LAN, exactly as before.
+    const tunnel = viaTunnel(req);
+    const accessToken = tunnel ? accessTokenOf(req) : '';
+    const trySso = !authed && ssoConfigured() && (!tunnel || accessToken !== '');
     // Only the SSO upgrade costs an outbound platform call, so the limit guards that branch only —
     // an already-signed-in admin (or a standalone install) is never rate-limited out of the panel.
-    if (!authed && ssoConfigured() && !platformCallRateOk(peerOf(req))) {
+    if (trySso && !platformCallRateOk(peerOf(req))) {
       return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
     }
-    if (!authed && ssoConfigured()) {
-      const probe = await probePlatform(req.headers.cookie);
+    if (trySso) {
+      const probe = await probePlatform(tunnel ? `omos_session=${accessToken}` : req.headers.cookie);
       reachable = probe.reachable;
       if (probe.username) {
-        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username), cookieOptions(SSO_SESSION_MS, secureForRequest(req), cookiePath(req)));
+        const token = tunnel
+          ? makeToken(store.secret, SSO_SESSION_MS, 'admin-remote', probe.username, accessTokenBinding(accessToken))
+          : makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username);
+        reply.setCookie(COOKIE, token, cookieOptions(SSO_SESSION_MS, secureForRequest(req), cookiePath(req)));
         authed = true;
         username = probe.username;
       }

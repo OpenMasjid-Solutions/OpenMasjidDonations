@@ -51,23 +51,32 @@ function hmac(secret: Buffer, payload: string): string {
   return crypto.createHmac('sha256', secret).update(payload).digest('base64url');
 }
 
-type Audience = 'admin';
+/** `admin` is a session made at the masjid (the password, or SSO on the LAN). `admin-remote` is one
+ *  the SSO upgrade made through the tunnel, bound (`bnd`) to the platform access token it was made
+ *  from — it counts only on a request that still carries that same token. */
+export type Audience = 'admin' | 'admin-remote';
+
+/** What an `admin-remote` session is bound to: a hash of the platform's per-app access token. */
+export function accessTokenBinding(accessToken: string): string {
+  return crypto.createHash('sha256').update(accessToken).digest('base64url');
+}
 
 /** `usr` is carried so the audit log can name WHO did something (DONATIONS-011) without another
  *  platform round-trip on every request. It is inside the HMAC, so it cannot be forged; it is the
  *  admin's own OpenMasjidOS username, which they already see in the panel. Purely additive — a token
- *  minted before this existed simply has no `usr` and still verifies. */
-export function makeToken(secret: Buffer, maxAgeMs = MAX_AGE_MS, aud: Audience = 'admin', usr?: string): string {
-  const claims: { exp: number; aud: Audience; usr?: string } = { exp: Date.now() + maxAgeMs, aud };
+ *  minted before this existed simply has no `usr` and still verifies. `bnd` is inside the HMAC too. */
+export function makeToken(secret: Buffer, maxAgeMs = MAX_AGE_MS, aud: Audience = 'admin', usr?: string, bnd?: string): string {
+  const claims: { exp: number; aud: Audience; usr?: string; bnd?: string } = { exp: Date.now() + maxAgeMs, aud };
   if (usr) claims.usr = usr.slice(0, 120);
+  if (bnd) claims.bnd = bnd;
   const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
   return `${payload}.${hmac(secret, payload)}`;
 }
 
 /** The username inside a VALID token, or '' (unsigned/expired/absent). Verifies before reading, so
  *  a caller can never be handed an attacker-chosen name. */
-export function tokenUser(secret: Buffer, token: string | undefined, aud: Audience = 'admin'): string {
-  if (!verifyToken(secret, token, aud) || !token) return '';
+export function tokenUser(secret: Buffer, token: string | undefined, aud: Audience = 'admin', bnd?: string): string {
+  if (!verifyToken(secret, token, aud, bnd) || !token) return '';
   try {
     const obj = JSON.parse(Buffer.from(token.slice(0, token.lastIndexOf('.')), 'base64url').toString()) as { usr?: unknown };
     return typeof obj.usr === 'string' ? obj.usr.slice(0, 120) : '';
@@ -76,8 +85,9 @@ export function tokenUser(secret: Buffer, token: string | undefined, aud: Audien
   }
 }
 
-/** Verify signature, expiry AND audience (constant-time on the signature). */
-export function verifyToken(secret: Buffer, token: string | undefined, aud: Audience = 'admin'): boolean {
+/** Verify signature, expiry AND audience (constant-time on the signature). An `admin-remote` token
+ *  also needs `bnd`, the binding of the access token on THIS request, and must match it. */
+export function verifyToken(secret: Buffer, token: string | undefined, aud: Audience = 'admin', bnd?: string): boolean {
   if (!token) return false;
   const dot = token.lastIndexOf('.');
   if (dot < 0) return false;
@@ -87,8 +97,8 @@ export function verifyToken(secret: Buffer, token: string | undefined, aud: Audi
   const b = Buffer.from(hmac(secret, payload));
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
   try {
-    const obj = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { exp?: number; aud?: string };
-    return typeof obj.exp === 'number' && obj.exp > Date.now() && obj.aud === aud;
+    const obj = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { exp?: number; aud?: string; bnd?: unknown };
+    return typeof obj.exp === 'number' && obj.exp > Date.now() && obj.aud === aud && (aud !== 'admin-remote' || (!!bnd && obj.bnd === bnd));
   } catch {
     return false;
   }

@@ -178,6 +178,14 @@ aware on **both** ends:
   `ssh -L 7870:localhost:7870 <user>@<server>`, then `http://localhost:7870/admin` — which
   reaches the container's port directly with no Cloudflare headers. There is deliberately no
   switch to re-open the password to the tunnel.
+- **Through the tunnel a session counts only beside the access token it was made from.** The
+  ingress puts back this app's access token as the one `omos_session` only while the admin's
+  remote session is live. The SSO upgrade through the tunnel shows the platform that token alone
+  and mints an `admin-remote` session carrying a hash of it; through the tunnel only such a
+  session counts, and only when the request still carries the same token. A session made at the
+  masjid counts only at the masjid, so signing out of OpenMasjidOS (or turning remote management
+  off, or changing the second factor) ends the remote one on the next request, with no platform
+  call per request.
 - **Client**: Vite builds with `base:'./'` (assets resolve against the injected `<base href>`,
   so dynamic-import chunks follow the prefix via `import.meta.url`). `web/src/base.ts` exposes
   `BASE`/`withBase`/`asset`/`stripBase`; API/nav/asset/upload URLs are prefixed, the router
