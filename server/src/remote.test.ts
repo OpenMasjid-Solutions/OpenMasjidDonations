@@ -143,7 +143,10 @@ let platformLooksDown = false;
 let platform: http.Server;
 let child: ChildProcess;
 let base = '';
-let output = '';
+let serverLog = (): string => '';
+/** A STANDALONE install (no OpenMasjidOS), reached through its own Cloudflare tunnel. */
+let alone: ChildProcess;
+let aloneBase = '';
 const tmp: string[] = [];
 
 function freePort(): Promise<number> {
@@ -156,9 +159,48 @@ function freePort(): Promise<number> {
   });
 }
 
-/** A request to the spawned server; redirects are NOT followed, so a 307 is visible. */
-function call(p: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) {
-  return realFetch(base + p, { ...init, redirect: 'manual' });
+/** A request to a spawned server (the OpenMasjidOS one unless `at` says otherwise); redirects are
+ *  NOT followed, so a 307 is visible. */
+function call(p: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}, at = base) {
+  return realFetch(at + p, { ...init, redirect: 'manual' });
+}
+
+/** Spawn the REAL server. `env` is added to the defaults; '' unsets a variable (config reads it so). */
+async function spawnApp(env: Record<string, string>): Promise<{ proc: ChildProcess; url: string; log: () => string }> {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omd-remote-data-'));
+  const publicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omd-remote-web-'));
+  tmp.push(dataDir, publicDir);
+  fs.writeFileSync(path.join(publicDir, 'index.html'), '<!doctype html><html><head><title>t</title></head><body><div id="root"></div></body></html>');
+
+  const port = await freePort();
+  const url = `http://127.0.0.1:${port}`;
+  let output = '';
+  const proc = spawn(process.execPath, ['--import', 'tsx', path.join(__dirname, 'index.ts')], {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      DATA_DIR: dataDir,
+      PUBLIC_DIR: publicDir,
+      CLOUDFLARED_BIN: path.join(dataDir, 'no-cloudflared'),
+      LOG_LEVEL: 'warn',
+      ...env,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const keep = (b: Buffer) => { output = (output + b.toString()).slice(-4000); };
+  proc.stdout?.on('data', keep);
+  proc.stderr?.on('data', keep);
+
+  for (let i = 0; i < 150; i++) {
+    try {
+      if ((await realFetch(url + '/healthz')).ok) return { proc, url, log: () => output };
+    } catch { /* not listening yet */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  proc.kill('SIGKILL');
+  throw new Error('the server did not start:\n' + output);
 }
 
 const cookieValue = (setCookie: string): string => setCookie.split(';')[0].split('=').slice(1).join('=');
@@ -185,44 +227,17 @@ before(async () => {
   await new Promise<void>((r) => platform.listen(0, '127.0.0.1', r));
   const platformPort = (platform.address() as AddressInfo).port;
 
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omd-remote-data-'));
-  const publicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omd-remote-web-'));
-  tmp.push(dataDir, publicDir);
-  fs.writeFileSync(path.join(publicDir, 'index.html'), '<!doctype html><html><head><title>t</title></head><body><div id="root"></div></body></html>');
-
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['--import', 'tsx', path.join(__dirname, 'index.ts')], {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env,
-      PORT: String(port),
-      HOST: '127.0.0.1',
-      DATA_DIR: dataDir,
-      PUBLIC_DIR: publicDir,
-      OPENMASJID_BASE_URL: `http://127.0.0.1:${platformPort}`,
-      OPENMASJID_APP_SECRET: SECRET,
-      OPENMASJID_APP_ID: 'donations',
-      CLOUDFLARED_BIN: path.join(dataDir, 'no-cloudflared'),
-      LOG_LEVEL: 'warn',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const keep = (b: Buffer) => { output = (output + b.toString()).slice(-4000); };
-  child.stdout?.on('data', keep);
-  child.stderr?.on('data', keep);
-
-  for (let i = 0; i < 150; i++) {
-    try {
-      if ((await realFetch(base + '/healthz')).ok) return;
-    } catch { /* not listening yet */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error('the server did not start:\n' + output);
+  const [omos, standalone] = await Promise.all([
+    spawnApp({ OPENMASJID_BASE_URL: `http://127.0.0.1:${platformPort}`, OPENMASJID_APP_SECRET: SECRET, OPENMASJID_APP_ID: 'donations' }),
+    spawnApp({ OPENMASJID_BASE_URL: '', OPENMASJID_APP_SECRET: '', OPENMASJID_APP_ID: '' }),
+  ]);
+  ({ proc: child, url: base, log: serverLog } = omos);
+  ({ proc: alone, url: aloneBase } = standalone);
 });
 
 after(() => {
   child?.kill('SIGKILL');
+  alone?.kill('SIGKILL');
   platform?.close();
   for (const d of tmp) fs.rmSync(d, { recursive: true, force: true });
 });
@@ -240,7 +255,7 @@ test('server: a first visit from outside, before the prefix is known, is sent ba
   // We booted while the platform answered 503, so no prefix is known. Now it is up.
   site = { status: 200, body: GOOD_SITE };
   const first = await call('/donations/admin', { headers: { ...TUNNEL, accept: 'text/html' } });
-  assert.equal(first.status, 307, 'the old code served index.html with <base href="/"> here:\n' + output);
+  assert.equal(first.status, 307, 'the old code served index.html with <base href="/"> here:\n' + serverLog());
   assert.equal(first.headers.get('location'), '/donations/admin', 'back to the very same address');
 
   const again = await call('/donations/admin', { headers: { ...TUNNEL, accept: 'text/html' } });
@@ -308,15 +323,17 @@ test('server: signing out from outside clears the session under our prefix, and 
 // Under OpenMasjidOS the admin from the internet is the platform's two-step sign-in or nobody. The
 // local password must not be guessable from there — and its limiter keys on the TCP peer, which
 // through the tunnel is the platform's proxy, so every remote visitor shares one bucket anyway.
+// A STANDALONE install's own tunnel is closed the same way (section 5): there is no SSO to send
+// anyone to, so from outside there is no admin at all — it is managed from the masjid's network.
 
 const PASSWORD = 'correct horse battery';
-const post = (p: string, headers: Record<string, string>, body: unknown) =>
-  call(p, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+const post = (p: string, headers: Record<string, string>, body: unknown, at = base) =>
+  call(p, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) }, at);
 const sessionCookie = (r: Response) => r.headers.getSetCookie().find((c) => c.startsWith('omdon_session='));
 /** A POST whose path goes on the wire exactly as written — fetch would resolve a dot segment first. */
-function rawPost(p: string, headers: Record<string, string>, body: unknown): Promise<{ status: number; setCookie: string[] }> {
+function rawPost(p: string, headers: Record<string, string>, body: unknown, at = base): Promise<{ status: number; setCookie: string[] }> {
   return new Promise((resolve, reject) => {
-    const u = new URL(base);
+    const u = new URL(at);
     const data = JSON.stringify(body);
     const req = http.request({ host: u.hostname, port: u.port, path: p, method: 'POST', headers: { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } }, (res) => {
       res.resume();
@@ -394,4 +411,83 @@ test('server: from outside the panel is told there is no password box; SSO, the 
   assert.equal(admin.status, 200);
   assert.equal((await call('/donations/api/logout', { method: 'POST', headers: TUNNEL })).status, 200);
   assert.equal((await call('/donations/api/app', { headers: TUNNEL })).status, 200, 'the public bootstrap a donor page reads');
+});
+
+// ── 5. A standalone install's own tunnel: no admin from outside at all ──────
+// No OpenMasjidOS, so no SSO. The app's own cloudflared forwards Cloudflare's headers, `cf-ray`
+// included, and arrives from localhost — so the login limiter sees every visitor on the internet as
+// one peer. Before this, that tunnel offered the password, AND first-run setup to whoever reached a
+// fresh install first.
+
+/** What the app's own cloudflared forwards: Cloudflare's edge headers, no path prefix. */
+const OWN_TUNNEL = { 'cf-ray': '8f00aa11bb22cc44-LHR', 'x-forwarded-proto': 'https', 'cf-connecting-ip': '203.0.113.7' };
+const AT_MASJID = /masjid’s own network/;
+/** Spellings the router does NOT resolve to the route: each must reach no password check at all. */
+const unresolved = (r: string) => [`//api/${r}`, `/api//${r}`, `/api/${r}/`, `/API/${r}`, `/api/x/../${r}`, `/api/./${r}`, `/api/%2e/${r}`];
+
+test('standalone: from outside, nobody can claim the password of a fresh install', { timeout: 30_000 }, async () => {
+  const s = (await (await call('/api/session', { headers: OWN_TUNNEL }, aloneBase)).json()) as {
+    data: { authed: boolean; passwordClosed?: boolean; sso: { enabled: boolean } };
+  };
+  assert.deepEqual([s.data.authed, s.data.passwordClosed, s.data.sso.enabled], [false, true, false]);
+
+  for (const p of ['/api/setup', '/api/%73etup', '/api/%73%65%74%75%70']) {
+    const r = await post(p, OWN_TUNNEL, { password: PASSWORD }, aloneBase);
+    assert.equal(r.status, 403, `${p}: the old code answered 200 and made the visitor the admin`);
+    const error = ((await r.json()) as { error: string }).error;
+    assert.match(error, AT_MASJID, p);
+    assert.doesNotMatch(error, /OpenMasjidOS/, 'a standalone install has no dashboard to send anyone to');
+    assert.equal(sessionCookie(r), undefined, p);
+  }
+  for (const p of unresolved('setup')) {
+    const r = await rawPost(p, OWN_TUNNEL, { password: PASSWORD }, aloneBase);
+    assert.notEqual(r.status, 200, p);
+    assert.ok(!r.setCookie.some((c) => c.startsWith('omdon_session=')), p);
+  }
+  const lan = (await (await call('/api/session', {}, aloneBase)).json()) as { data: { needsSetup: boolean; hasPassword: boolean; passwordClosed?: boolean } };
+  assert.deepEqual([lan.data.needsSetup, lan.data.hasPassword, lan.data.passwordClosed], [true, false, false], 'still unclaimed, and open on the LAN');
+});
+
+test('standalone: on the LAN, first-run setup and the password work exactly as before', { timeout: 30_000 }, async () => {
+  const setup = await post('/api/setup', {}, { password: PASSWORD }, aloneBase);
+  assert.equal(setup.status, 200);
+  assert.match(sessionCookie(setup) ?? '', /;\s*Path=\/(?:;|$)/i);
+  for (const p of ['/api/login', '/api/%6Cogin']) {
+    const r = await post(p, {}, { password: PASSWORD }, aloneBase);
+    assert.equal(r.status, 200, p);
+    assert.ok(sessionCookie(r), p);
+  }
+  assert.equal((await post('/api/login', {}, { password: 'not it' }, aloneBase)).status, 401);
+});
+
+test('standalone: from outside, the password never signs anyone in — in any spelling', { timeout: 30_000 }, async () => {
+  for (const p of ['/api/login', '/api/%6Cogin', '/api/%6c%6F%67%69%6E']) {
+    const r = await post(p, OWN_TUNNEL, { password: PASSWORD }, aloneBase);
+    assert.equal(r.status, 403, `${p}: the old code signed in with the right password`);
+    assert.match(((await r.json()) as { error: string }).error, AT_MASJID, p);
+    assert.equal(sessionCookie(r), undefined, p);
+  }
+  for (const p of unresolved('login')) {
+    const r = await rawPost(p, OWN_TUNNEL, { password: PASSWORD }, aloneBase);
+    assert.ok(r.status !== 200 && r.status !== 401, `${p}: ${r.status}`);
+    assert.ok(!r.setCookie.some((c) => c.startsWith('omdon_session=')), p);
+  }
+  // Setup with a password already set: refused as "not from here", not "already set up" (409).
+  assert.equal((await post('/api/setup', OWN_TUNNEL, { password: PASSWORD }, aloneBase)).status, 403);
+  // Ten refused attempts from outside never lock the admin out at the masjid.
+  for (let i = 0; i < 10; i++) await post('/api/login', OWN_TUNNEL, { password: 'guess ' + i }, aloneBase);
+  assert.equal((await post('/api/login', {}, { password: PASSWORD }, aloneBase)).status, 200);
+});
+
+test('standalone: from outside, donors are untouched', { timeout: 30_000 }, async () => {
+  for (const p of ['/healthz', '/api/app', '/api/public/appearance']) {
+    assert.equal((await call(p, { headers: OWN_TUNNEL }, aloneBase)).status, 200, p);
+  }
+  assert.equal((await call('/', { headers: { ...OWN_TUNNEL, accept: 'text/html' } }, aloneBase)).status, 200, 'the donation site itself');
+  const appeal = await call('/api/public/campaign/no-such-appeal', { headers: OWN_TUNNEL }, aloneBase);
+  assert.equal(appeal.status, 404, 'the donor route answered for itself');
+  assert.doesNotMatch(((await appeal.json()) as { error: string }).error, AT_MASJID);
+  const plan = await post('/api/public/plan/lookup', OWN_TUNNEL, { token: 'x'.repeat(32) }, aloneBase);
+  assert.equal(plan.status, 404, 'the emailed stop-my-plan link answers for itself');
+  assert.doesNotMatch(((await plan.json()) as { error: string }).error, AT_MASJID);
 });

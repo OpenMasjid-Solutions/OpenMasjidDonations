@@ -157,7 +157,7 @@ the app, so it works with no internet.
   your OpenMasjidOS login — verified server-to-server, never trusting the browser —
   and the app matches your dashboard's light/dark theme, accent and wallpaper. A
   **local admin password** works when running standalone, and as recovery if the
-  platform is ever unreachable.
+  platform is ever unreachable — on the masjid's own network only.
 - **Stripe configured once.** Use the keys vaulted in OpenMasjidOS → Settings →
   Payments, fetched server-to-server and never stored here, or paste keys into the app.
 - **Email without credentials.** Receipts go out through the platform's email provider,
@@ -190,7 +190,10 @@ the app, so it works with no internet.
   carries a smallest-amount setting, since it is the one that happens every single time.
 - **Public access without port-forwarding**, through the platform's Cloudflare Tunnel
   on a single hostname, or the app's own tunnel when standalone. Share links, QR codes
-  and the Stripe webhook URL then use your public domain automatically.
+  and the Stripe webhook URL then use your public domain automatically. The admin panel
+  never takes a password from outside: from there you sign in with **Open** on your
+  OpenMasjidOS dashboard, and a standalone install is managed from the masjid's network
+  (on a server with no such network, over an SSH port-forward to the app's port).
 - Everything **fails soft**: if the platform is absent or a capability is off, the
   donation site carries on working.
 

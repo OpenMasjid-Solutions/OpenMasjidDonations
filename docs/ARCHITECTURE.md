@@ -169,7 +169,15 @@ aware on **both** ends:
   reports `passwordClosed` so the panel shows that instead of a password box. The check is
   inside each route, so every spelling the router resolves to it (`/api/%6Cogin`) is covered;
   it runs before the login limiter, which out here would see every visitor as the platform's
-  proxy. The LAN is unchanged, and so is a standalone install's own tunnel, which has no SSO.
+  proxy. The LAN is unchanged.
+- **Standalone, the same rule closes the app's own tunnel** (its cloudflared forwards `cf-ray`
+  too): `/api/login` and `/api/setup` answer a Cloudflare request with a 403 saying to manage
+  the app from the masjid's network, and the panel shows "Manage Donations at the masjid"
+  instead of a password box. There is no SSO there, so from outside there is no admin at all;
+  donors are untouched. An operator with no masjid network (a VPS) gets in over SSH —
+  `ssh -L 7870:localhost:7870 <user>@<server>`, then `http://localhost:7870/admin` — which
+  reaches the container's port directly with no Cloudflare headers. There is deliberately no
+  switch to re-open the password to the tunnel.
 - **Client**: Vite builds with `base:'./'` (assets resolve against the injected `<base href>`,
   so dynamic-import chunks follow the prefix via `import.meta.url`). `web/src/base.ts` exposes
   `BASE`/`withBase`/`asset`/`stripBase`; API/nav/asset/upload URLs are prefixed, the router

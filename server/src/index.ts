@@ -255,9 +255,10 @@ async function main(): Promise<void> {
   // simple, synchronous check.
   const isAuthed = (cookie: string | undefined): boolean => verifyToken(store.secret, cookie, 'admin');
 
-  /** Did this request come through Cloudflare? Cloudflare sets `cf-ray` at its edge and the
-   *  OpenMasjidOS ingress passes it on, so a visitor from outside cannot remove it. A LAN client
-   *  that types it only restricts itself (a narrower cookie, no password sign-in). */
+  /** Did this request come through Cloudflare? Cloudflare sets `cf-ray` at its edge, and both the
+   *  OpenMasjidOS ingress and this app's own cloudflared pass it on, so a visitor from outside cannot
+   *  remove it. A LAN client that types it only restricts itself (a narrower cookie, no password
+   *  sign-in). `x-forwarded-proto` is deliberately NOT read here. */
   const viaTunnel = (req: import('fastify').FastifyRequest): boolean => !!req.headers['cf-ray'];
 
   /** Where our session cookie lives: our prefix for a request that came through Cloudflare (auth.ts
@@ -265,16 +266,19 @@ async function main(): Promise<void> {
    *  there also calls the prefixed API once remote access is on. */
   const cookiePath = (req: import('fastify').FastifyRequest): string => (viaTunnel(req) && servedUnder.get(req.raw)) || '/';
 
-  /** From outside the masjid, under OpenMasjidOS, the admin is the platform's two-step sign-in
-   *  (SSO) or nobody: the local password — sign-in, first-run setup, recovery — is never offered to
-   *  the internet, where it would be one guessable secret behind a limiter that sees every remote
-   *  visitor as the same peer (the platform's proxy). Asked inside each password route rather than
-   *  by matching the URL, so it holds for every spelling the router resolves to that route
-   *  (`/api/%6Cogin` included). Standalone, the app's own tunnel has no SSO to send anyone to, so
-   *  it is left as it was. */
-  const passwordClosed = (req: import('fastify').FastifyRequest): boolean => ssoConfigured() && viaTunnel(req);
-  const PASSWORD_CLOSED =
-    'From outside the masjid, open Donations from your OpenMasjidOS dashboard — press Open on the Donations app — and you’ll be signed in. A password only works on the masjid’s own network.';
+  /** From outside the masjid the local password — sign-in, first-run setup, recovery — is never
+   *  offered, on EVERY install: there it would be one guessable secret behind a limiter that sees
+   *  every remote visitor as the same peer (the proxy, or cloudflared on localhost), and an install
+   *  with no password yet would let anyone on the internet choose one. Under OpenMasjidOS the way in
+   *  from outside is the platform's two-step sign-in (SSO); a standalone install is administered from
+   *  the masjid's network (an operator with no such network reaches it over an SSH port-forward,
+   *  which carries no `cf-ray` — CLAUDE.md §13). Asked inside each password route rather than by
+   *  matching the URL, so it holds for every spelling the router resolves to that route
+   *  (`/api/%6Cogin` included). */
+  const passwordClosed = (req: import('fastify').FastifyRequest): boolean => viaTunnel(req);
+  const PASSWORD_CLOSED = ssoConfigured()
+    ? 'From outside the masjid, open Donations from your OpenMasjidOS dashboard — press Open on the Donations app — and you’ll be signed in. A password only works on the masjid’s own network.'
+    : 'From outside the masjid, the Donations admin can’t be opened. Please manage it from a computer or phone on the masjid’s own network — your donation pages keep working from anywhere.';
 
   const requireAdmin = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
     if (!isAuthed(req.cookies[COOKIE])) {
@@ -416,8 +420,8 @@ async function main(): Promise<void> {
         authed,
         hasPassword: store.hasAdmin(),
         sso: { enabled: ssoConfigured(), reachable, username },
-        // Reached from outside under OpenMasjidOS: the dashboard's Open is the only way in, so the
-        // panel shows that instead of a password box.
+        // Reached from outside: no password box. Under OpenMasjidOS the panel says to press Open on
+        // the dashboard; standalone, to manage it from the masjid's network.
         passwordClosed: passwordClosed(req),
       },
     };

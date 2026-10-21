@@ -37,7 +37,7 @@ export function AdminApp({ info }: { info: AppInfo | null }) {
   if (!loaded) return <Centered><span className="spinner" aria-label="Loading" /></Centered>;
   if (session?.authed) return <AdminConsole info={info} session={session} onSignedOut={refresh} />;
   // From outside the masjid there is no password box at all — the server would refuse it.
-  if (session?.passwordClosed) return <OpenFromDashboard onRetry={refresh} />;
+  if (session?.passwordClosed) return session.sso.enabled ? <OpenFromDashboard onRetry={refresh} /> : <ManageAtMasjid />;
   if (session?.needsSetup) return <Setup onDone={refresh} />;
   // Embedded under OpenMasjidOS: sign in via the dashboard. But a local password is
   // always available as a recovery, and if the platform is unreachable we lead with it
@@ -126,6 +126,19 @@ function OpenFromDashboard({ onRetry }: { onRetry: () => void }) {
         and you’ll be signed in automatically. A password only works on the masjid’s own network.
       </p>
       <button className="btn btn--ghost btn--block" onClick={onRetry}><RefreshCw size={16} /> Try again</button>
+    </AuthCard>
+  );
+}
+
+/** A standalone install reached from outside. There is no other way in from here, so nothing to
+ *  press — only where to go instead. */
+function ManageAtMasjid() {
+  return (
+    <AuthCard title="Manage Donations at the masjid">
+      <p className="auth-sub muted">
+        For safety, the admin panel only opens on the masjid’s own network. Please sign in from a computer or phone
+        connected there. Your donation pages keep working from anywhere.
+      </p>
     </AuthCard>
   );
 }
@@ -2125,7 +2138,7 @@ function PublicAccessCard() {
         <Globe size={18} className="panel-ico" aria-hidden="true" />
         <div className="card-head__main">
           <h2 className="section-title-inline">Public access (Cloudflare Tunnel)</h2>
-          <p className="muted">Optional — take donations from outside the masjid network over secure HTTPS, with no port-forwarding. Only enable this if you want your donation links reachable on the public internet.</p>
+          <p className="muted">Optional — take donations from outside the masjid network over secure HTTPS, with no port-forwarding. Only enable this if you want your donation links reachable on the public internet. This admin panel stays on the masjid’s network: it won’t open from the public address.</p>
         </div>
       </div>
       <details className="steps-details">
