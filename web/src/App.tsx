@@ -147,10 +147,15 @@ export function App() {
     );
 
   // A campaign donation page — and the embeddable widget — are their own full-screen
-  // experience (own Scene, no admin chrome). The widget is the same page in an iframe.
+  // experience (own Scene, no admin chrome). The widget is the same page in an iframe, and it
+  // draws NO background at all: it sits on somebody else's page.
+  //
+  // The fallback has to honour that too. `DonatePage` is lazy, so this is what an embedder
+  // actually sees first — rendering `<Scene />` here would flash the full gradient inside the
+  // iframe on every load and then vanish, which looks like a bug on their site.
   if (campaign)
     return (
-      <Suspense fallback={<div className="shell"><Scene /><LoadFallback /></div>}>
+      <Suspense fallback={<div className={`shell${widgetSlug ? ' shell--widget' : ''}`}>{!widgetSlug && <Scene />}<LoadFallback /></div>}>
         <DonatePage slug={campaign.slug} token={'token' in campaign ? campaign.token : undefined} widget={!!widgetSlug} />
       </Suspense>
     );

@@ -9,7 +9,7 @@
 // own panel with no way back in. Both directions are asserted.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cookieOptions, hashPassword, makeToken, secureForRequest, verifyPassword, verifyToken, MAX_AGE_MS } from './auth';
+import { accessTokenBinding, cookieOptions, hashPassword, makeToken, secureForRequest, verifyPassword, verifyToken, MAX_AGE_MS } from './auth';
 
 const req = (protocol: string | undefined, headers: Record<string, unknown> = {}) => ({ protocol, headers });
 
@@ -73,6 +73,20 @@ test('session token: the audience claim is checked, so a token minted for anothe
   const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 60_000, aud: 'something-else' })).toString('base64url');
   const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
   assert.equal(verifyToken(secret, `${payload}.${sig}`), false);
+});
+
+test('session token: a remote session counts only beside the access token it was made from', () => {
+  const secret = Buffer.from('e'.repeat(32));
+  const mine = accessTokenBinding('a1.' + 'h'.repeat(22) + '.' + 'm'.repeat(43));
+  const other = accessTokenBinding('a1.' + 'x'.repeat(22) + '.' + 'y'.repeat(43));
+  const remote = makeToken(secret, 60_000, 'admin-remote', 'hasan', mine);
+  assert.equal(verifyToken(secret, remote, 'admin-remote', mine), true);
+  assert.equal(verifyToken(secret, remote, 'admin-remote', other), false, 'another access token');
+  assert.equal(verifyToken(secret, remote, 'admin-remote'), false, 'no access token on the request');
+  assert.equal(verifyToken(secret, remote), false, 'never an at-the-masjid session');
+  const lan = makeToken(secret, 60_000);
+  assert.equal(verifyToken(secret, lan, 'admin-remote', mine), false, 'an at-the-masjid session is never a remote one');
+  assert.equal(verifyToken(secret, makeToken(secret, 60_000, 'admin-remote', 'hasan'), 'admin-remote', mine), false, 'an unbound remote token');
 });
 
 // ── Password hashing ─────────────────────────────────────────────────────────

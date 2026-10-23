@@ -29,7 +29,7 @@ export function Scene() {
 /** Brand mark; links home so you can leave the admin area. */
 export function Brand() {
   return (
-    <a className="brand" href="/" aria-label="OpenMasjid Donations — home">
+    <a className="brand" href={withBase('/')} aria-label="OpenMasjid Donations — home">
       <img className="brand-mark" src={brandMark} width={24} height={24} alt="" aria-hidden="true" />
       <b>OpenMasjid&nbsp;Donations</b>
     </a>

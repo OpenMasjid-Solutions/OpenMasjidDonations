@@ -19,6 +19,7 @@ import { useEffect, useState } from 'react';
 import { CalendarClock, HeartHandshake, Lock, Repeat, ShieldCheck, XCircle } from 'lucide-react';
 import { lookupPlan, money, stopPlan, type PublicPlan } from './api';
 import { asset, withBase } from './base';
+import { refreshAccent } from './prefs';
 
 /** "3 September 2026" in the READER's own locale — they are the one watching their bank. '' in, '' out. */
 function fmtDay(iso: string): string {
@@ -71,9 +72,13 @@ export function PlanStopPage({ token }: { token: string }) {
     const prevT = html.getAttribute('data-theme');
     html.setAttribute('data-wallpaper', 'aurora');
     html.setAttribute('data-theme', 'dark');
+    // Pinned dark by hand rather than through `applyTheme`, so the accent's text form has to be
+    // re-resolved or a masjid on the light theme keeps its dark `textLight` on this dark page.
+    refreshAccent();
     return () => {
       if (prevW) html.setAttribute('data-wallpaper', prevW); else html.removeAttribute('data-wallpaper');
       if (prevT) html.setAttribute('data-theme', prevT); else html.removeAttribute('data-theme');
+      refreshAccent();
     };
   }, []);
 

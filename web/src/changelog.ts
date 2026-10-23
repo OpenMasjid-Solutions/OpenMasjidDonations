@@ -52,6 +52,18 @@ export interface Release {
 
 export const RELEASES: Release[] = [
   {
+    version: '0.45.0',
+    date: '2026-10-23',
+    notes: [
+      '**Donations now runs on Node.js 22.23.4, with the October security fixes.** Node.js is the software the app runs on, and this version fixes ten security problems published on 21 October, one of them serious. If Stripe emailed you about your Node.js version, this is the update it means. The web server underneath the app was also updated to fix several published security problems. Nothing looks or works any differently.',
+      '**The embeddable widget is now just the donation box, and it blends into your page.** Pasting an appeal into your own website used to drop a dark panel onto it, with the masjid’s wallpaper, scrollbars and empty space around the card. Now your page shows through, the box is light so it suits an ordinary website, and the frame shrinks to fit the box exactly. Re-copy the embed code from Campaigns for the tidiest version. If your website has a dark background, add ?theme=dark to the end of the address in the embed code.',
+      '**Buttons now stay readable whatever color your dashboard is set to.** On the light theme, some of OpenMasjidOS’s accent colors left the Donate button pale-on-pale and hard to read, worst of all on gold. The writing on a button now changes with the button’s color.',
+      '**From outside the masjid, the way into the admin panel is Open on your OpenMasjidOS dashboard.** That sign-in has a second step (your authenticator app), so it is the one that belongs on the internet. The Donations password now only works on the masjid’s own network, and signing out of OpenMasjidOS, or turning off managing from outside, stops Donations letting that window in straight away. Opening Donations from outside just after the server has restarted no longer risks a blank page. At the masjid nothing changes.',
+      '**Running Donations on its own, with public access turned on? The admin panel now only opens on the masjid’s own network.** Your donation pages work from anywhere exactly as before. If Donations runs on a rented server with no masjid network, you can still get in through an SSH tunnel to the app’s port.',
+      'Nothing you have set up needs redoing, and your donations, appeals and monthly plans are all exactly as they were.',
+    ],
+  },
+  {
     version: '0.44.0',
     date: '2026-08-23',
     notes: [

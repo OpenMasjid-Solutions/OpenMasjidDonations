@@ -551,12 +551,26 @@ export interface FabricSite {
 
 const SITE_OFF: FabricSite = { enabled: false, domain: '', publicUrl: '', basePath: '' };
 
-/** Normalize a path to "" or "/seg[/seg…]" (leading slash, no trailing slash). */
+/** Normalize a path to "" or "/seg[/seg…]" (leading slash, no trailing slash). Anything but word
+ *  characters and hyphens is refused outright (""), because the one value goes into routing, a
+ *  `<base href>`, a cookie's Path and a redirect's Location — none of which may carry `;`, `//`,
+ *  a dot segment or a quote. The platform only ever hands out kebab-case paths. */
 function normBasePath(raw: unknown): string {
   let p = (typeof raw === 'string' ? raw : '').trim();
   if (!p || p === '/') return '';
   if (!p.startsWith('/')) p = '/' + p;
-  return p.replace(/\/+$/, '');
+  p = p.replace(/\/+$/, '');
+  return /^(?:\/[\w-]+)+$/.test(p) ? p : '';
+}
+
+/** `url` with the tunnel prefix `base` taken off, or null when `url` is not under it. The one
+ *  rule for the URL-rewrite hook, the session cookie's Path and the cold-cache retry. */
+export function underBase(url: string, base: string): string | null {
+  if (!base) return null;
+  if (url === base) return '/';
+  if (url.startsWith(base + '/')) return url.slice(base.length);
+  if (url.startsWith(base + '?')) return '/' + url.slice(base.length);
+  return null;
 }
 
 let siteCache: { at: number; value: FabricSite } | null = null;
@@ -596,6 +610,10 @@ export async function fetchFabricSite(force = false): Promise<FabricSite> {
       redirect: 'error',
     });
     clearTimeout(t);
+    // 403 (no `domain` grant) and 404 (a platform without this endpoint) are answers. A 429 or 5xx
+    // is NO information: caching SITE_OFF for it forgot our tunnel prefix, so every request from
+    // outside — donors included — missed its route until the next good refresh.
+    if (!res.ok && res.status !== 403 && res.status !== 404) throw new Error(`HTTP ${res.status}`);
     const value = res.ok ? parseSite(await res.json().catch(() => null)) : SITE_OFF;
     siteCache = { at: now, value };
     return value;

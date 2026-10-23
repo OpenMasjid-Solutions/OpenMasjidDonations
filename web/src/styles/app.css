@@ -56,10 +56,96 @@ h1, h2, h3, p { margin: 0; }
 
 /* ── Shell + top bar ──────────────────────────────────────────────────────── */
 .shell { min-height: 100vh; min-height: 100dvh; }
-/* Embeddable widget (in an <iframe> on another site): fill the HOST iframe rather than the
-   browser viewport, and sit tight to the top so the card isn't lost in vertical centering. */
-.shell--widget, .shell--widget .donate-wrap { min-height: 100%; }
-.shell--widget .donate-wrap { justify-content: flex-start; padding-block: 1.1rem; }
+/* ── Embeddable widget: the document IS the card, and nothing else ───────────────────────
+   Every layer of this app assumes it owns a viewport — `#root`, `.shell` and `.donate-wrap`
+   each carry `min-height: 100vh`. Inside an iframe `100vh` is the IFRAME's height, so the
+   card got centred in a full-height box: dead space above and below it, and a scrollbar the
+   moment the content grew past the embed's fixed height. That is what an embedder saw.
+
+   So in widget mode the whole chain collapses to content height. `html`, `body` and `#root`
+   are done by the server's inlined <style> (they are ancestors of this element, so CSS here
+   cannot reach them); the rest is below.
+
+   No padding either: the wrap's `1.1rem` inset would be a transparent margin the host page
+   shows through, which reads as the iframe being mis-sized rather than as deliberate space.
+   The embedder controls the space around the box — it is on their page. */
+.shell--widget, .shell--widget .donate-wrap { min-height: 0; }
+/* Horizontal padding goes (the card is the full width of the embed); a little vertical space stays
+   so the "Secured by Stripe" line under the card is not glued to its edge. */
+.shell--widget .donate-wrap { justify-content: flex-start; padding: 0; gap: 0.55rem; }
+/* Fill the embed's width rather than the page's comfortable reading measure. */
+.shell--widget .donate-card { width: 100%; max-width: none; }
+
+/* ── The widget is TRANSPARENT: the donate box and nothing else ──────────────────────────
+   It sits on somebody else's page, so the masjid's wallpaper is not ours to paint over
+   theirs. `donate.tsx` skips the scene entirely and the server inlines
+   `html,body{background:transparent}` in the head — inline, because `body` carries a
+   near-black `--scene-base` and a rule that waited for the bundle would flash a dark
+   rectangle on every load.
+
+   THE CARD ALSO HAS TO STOP BEING GLASS, which is the non-obvious half. `.glass-raised` is
+   a 68%-opaque colour plus `backdrop-filter: blur()`, and that filter samples only this
+   document — an iframe cannot blur the page around it. So over a transparent body it blurs
+   nothing and the remaining 32% is the HOST page showing straight through the text: fine on
+   a plain white site, unreadable over a photograph. Going opaque is the honest fix, and the
+   token is the one glass.css already falls back to where `backdrop-filter` is unsupported,
+   so light and dark both stay correct.
+
+   glass.css and tokens.css are copied verbatim from OpenMasjidDisplay and must not be
+   edited (CLAUDE.md §7) — hence the override lives here, scoped to the widget. */
+.shell--widget { background: transparent; }
+.shell--widget .glass-raised,
+.shell--widget .glass {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+/* A NEUTRAL card, not the theme's tinted overlay. `--color-surface-overlay` is `#E0F2FE` in the
+   light theme — a sky blue, which is right for a panel floating on this app's own blue-green scene
+   and wrong on a masjid's cream website, where it reads as a coloured patch rather than a card.
+   Display's widget uses a warm off-white (`--card:#faf8f2`) for exactly this reason. */
+.shell--widget .glass-raised { background-color: var(--color-surface-raised); }
+.shell--widget .glass { background-color: var(--color-surface-hover); }
+
+/* CARD TEXT MUST USE CARD INK, and this is a latent bug that only the widget exposes.
+   Text sitting directly on the wallpaper uses `--ink-scene` (see "Readability" below), and the
+   donate card inherits that instead of the theme's `--color-ink`. Nobody noticed because in the
+   dark theme the two are both near-white — but in a light widget they diverge, and the appeal title
+   rendered as `#F4F7FB` on a white card: invisible. Measured, not guessed: no rule matches
+   `.donate-wrap` with a colour and it has no inline style, so it is pure inheritance.
+   Scoped to the widget rather than fixed globally, because changing what the donation page's own
+   card inherits is a visual change to a shipped screen and not this task. */
+.shell--widget .donate-card,
+.shell--widget .donate-card .donate-title { color: var(--color-ink); }
+
+/* ── NO DROP SHADOW, AND A CHIP INSTEAD OF A GLOW ───────────────────────────────────────
+   Both halves of the smudge under the card were the same mistake: a treatment designed to
+   hold something against THIS app's dark wallpaper, applied where the background belongs to
+   somebody else.
+
+   `--glass-shadow-raised` is a 48px drop shadow plus a soft accent glow. Over our own scene
+   that is depth; over a masjid's cream page it is a grey band on THEIR background, which
+   reads as a smudge or a mis-sized frame rather than as a card lifting off anything.
+   Display's widget has no shadow at all — a hairline border is the entire treatment — so
+   that is what is left here: the inset top highlight and the `0 0 0 1px` ring, which
+   together are Display's `--line`.
+
+   `.donate-foot` was the same thing in text form. It is styled for a line sitting directly
+   on the wallpaper — scene-faint ink plus `--text-shadow-scene`, a 10-12px glow whose whole
+   job is to keep thin text legible over a photograph. Over a host page that glow is the
+   other half of the band, and it is protecting the text from a background we do not draw.
+   So the glow goes and the line gets a small chip of the card's own material instead: it is
+   legible on any host page because it brings its own, and it cannot bleed, because a solid
+   shape has edges where a blur does not. */
+.shell--widget .glass-raised {
+  box-shadow: inset 0 1px 0 0 var(--glass-highlight), 0 0 0 1px var(--glass-border);
+}
+.shell--widget .donate-foot {
+  color: var(--color-ink-muted);
+  text-shadow: none;
+  background-color: var(--color-surface-raised);
+  padding: 0.22rem 0.66rem;
+  border-radius: 999px;
+}
 .topbar {
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 0.9rem;
@@ -96,7 +182,7 @@ h1, h2, h3, p { margin: 0; }
 .hero-emblem {
   width: 4.2rem; height: 4.2rem; border-radius: 50%;
   display: grid; place-items: center; color: var(--color-on-primary);
-  background: var(--color-primary); box-shadow: var(--glow-primary);
+  background: var(--color-btn); box-shadow: var(--glow-primary);
 }
 .hero-title { font-family: var(--font-display); font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; }
 .hero-lead { color: var(--color-ink-muted); line-height: 1.6; max-width: 30rem; }
@@ -119,6 +205,15 @@ h1, h2, h3, p { margin: 0; }
 .btn:hover { background: var(--color-surface-overlay); }
 .btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* THE FILL TOKEN IS `--color-btn`; `--color-primary` IS THE LETTERFORM. Everything that paints a
+   solid coloured BACKGROUND takes `--color-btn`, and only text, borders and rings take
+   `--color-primary`. That split is the platform's and Display's, and it stopped being cosmetic in
+   0.45.0-dev.5: the light theme now gives `--color-primary` a darker, readable value, and an
+   accent gives it `textLight` — so a control that fills itself with it goes muddy. Measured at
+   3.35:1 on the active amount button under a gold accent, against 9.99:1 for the same button
+   filling itself correctly. New filled control? `--color-btn` / `--color-btn-hover`.
+   (`--color-primary-subtle` is the exception and stays a fill: at 10-12% it is a wash, and the
+   page underneath is what carries the contrast.) */
 .btn--primary { background: var(--color-btn); color: var(--color-on-primary); box-shadow: var(--glow-primary); }
 .btn--primary:hover { background: var(--color-btn-hover); transform: translateY(-1px); }
 .btn--ghost { background: transparent; box-shadow: inset 0 0 0 1px var(--color-border); }
@@ -163,7 +258,7 @@ h1, h2, h3, p { margin: 0; }
 .auth-logo {
   width: 3.6rem; height: 3.6rem; border-radius: 50%; margin: 0 auto 1rem;
   display: grid; place-items: center; color: var(--color-on-primary);
-  background: var(--color-primary); box-shadow: var(--glow-primary);
+  background: var(--color-btn); box-shadow: var(--glow-primary);
 }
 .auth-title { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; letter-spacing: -0.01em; }
 .auth-sub { margin-block: 0.4rem 1.2rem; font-size: 0.92rem; line-height: 1.5; }
@@ -290,6 +385,18 @@ select.input { appearance: auto; }
 .don-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .don-table th { text-align: start; color: var(--color-ink-muted); font-weight: 600; padding: 0.4rem 0.6rem; border-block-end: 1px solid var(--color-border); white-space: nowrap; }
 .don-table td { padding: 0.45rem 0.6rem; border-block-end: 1px solid var(--color-border); white-space: nowrap; }
+
+/* FIGURES DO NOT JITTER. Proportional digits are different widths, so any number that changes in
+   place — the clock ticking, the Donate button following the amount buttons, a total refreshing —
+   visibly shifts its neighbours as it changes. This app is almost entirely figures, so the cost of
+   getting it wrong is higher here than anywhere else in the family.
+   Applied per element rather than on `body`, the way Display, Kiosk and the platform all do it:
+   tabular digits are deliberately wide, and prose does not want them. */
+.topclock-time,
+.don-table td, .don-date,
+.stat-tile__value, .metric-bar-amt,
+.amount-btn, .cprev-amt,
+.donate-cta, .donate-title { font-variant-numeric: tabular-nums; }
 .don-status { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
 .don-status--succeeded { color: var(--color-success); }
 .don-status--pending { color: var(--color-warning); }
@@ -303,7 +410,7 @@ select.input { appearance: auto; }
 .donate-wrap { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 1.5rem 1.1rem 2rem; gap: 0.8rem; }
 .donate-card { width: min(30rem, 100%); padding: 2rem 1.8rem; text-align: center; display: flex; flex-direction: column; gap: 0.7rem; }
 .donate-cover { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: var(--radius-button); margin-block-end: 0.4rem; }
-.donate-emblem { width: 3.6rem; height: 3.6rem; border-radius: 50%; margin: 0 auto; display: grid; place-items: center; color: var(--color-on-primary); background: var(--color-primary); box-shadow: var(--glow-primary); }
+.donate-emblem { width: 3.6rem; height: 3.6rem; border-radius: 50%; margin: 0 auto; display: grid; place-items: center; color: var(--color-on-primary); background: var(--color-btn); box-shadow: var(--glow-primary); }
 .donate-emblem.is-success { background: var(--color-success); }
 .donate-title { font-family: var(--font-display); font-size: 1.5rem; font-weight: 700; letter-spacing: -0.01em; }
 .donate-sub { font-size: 0.92rem; margin-block-start: -0.2rem; }
@@ -318,7 +425,7 @@ select.input { appearance: auto; }
 .amount-btn { padding: 0.7rem 0.5rem; border-radius: var(--radius-button); border: 1px solid var(--color-border); background: var(--glass-bg-inset); color: var(--color-ink); font-weight: 700; font-size: 0.95rem; transition: transform var(--dur-micro) var(--ease-settle), border-color var(--dur-micro) ease; }
 .amount-btn:hover { border-color: var(--color-primary); transform: translateY(-1px); }
 .amount-btn:active { transform: scale(0.96); }
-.amount-btn.is-active { background: var(--color-primary); color: var(--color-on-primary); border-color: transparent; }
+.amount-btn.is-active { background: var(--color-btn); color: var(--color-on-primary); border-color: transparent; }
 
 /* Goal progress */
 /* A quiet inline notice on the donation page: "we can't take a card just now", or the TEST MODE
@@ -333,7 +440,7 @@ select.input { appearance: auto; }
 
 .goal { margin-block: 0.3rem 0.5rem; }
 .goal-bar { height: 0.5rem; border-radius: 999px; background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border); overflow: hidden; }
-.goal-fill { height: 100%; background: var(--color-primary); border-radius: 999px; transition: width var(--dur-settle) var(--ease-settle); }
+.goal-fill { height: 100%; background: var(--color-btn); border-radius: 999px; transition: width var(--dur-settle) var(--ease-settle); }
 
 /* Stripe Payment Element wrapper */
 .pay-form { display: flex; flex-direction: column; gap: 0.8rem; margin-block-start: 0.6rem; }
@@ -371,7 +478,7 @@ select.input { appearance: auto; }
 .metric-bar-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .metric-bar-amt { white-space: nowrap; }
 .metric-bar-track { height: 0.5rem; border-radius: 999px; background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border); overflow: hidden; }
-.metric-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--color-primary), var(--color-primary-hover)); transition: width var(--dur-settle) var(--ease-settle); }
+.metric-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--color-btn), var(--color-btn-hover)); transition: width var(--dur-settle) var(--ease-settle); }
 
 /* 6-month trend chart */
 .trend-chart { display: flex; align-items: flex-end; gap: 0.5rem; height: 7rem; }
@@ -379,7 +486,7 @@ select.input { appearance: auto; }
 .trend-bar-wrap { flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; }
 .trend-bar {
   width: 62%; max-width: 2.4rem; min-height: 3px; border-radius: 0.4rem 0.4rem 0 0;
-  background: linear-gradient(180deg, var(--color-primary), color-mix(in srgb, var(--color-primary) 30%, transparent));
+  background: linear-gradient(180deg, var(--color-btn), color-mix(in srgb, var(--color-btn) 30%, transparent));
   transition: height var(--dur-settle) var(--ease-settle);
 }
 .trend-label { font-size: 0.72rem; color: var(--color-ink-faint); }
@@ -422,15 +529,15 @@ select.input { appearance: auto; }
   display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
 }
 .cprev-cover { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--radius-button); }
-.cprev-emblem { width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid; place-items: center; color: var(--color-on-primary); background: var(--color-primary); box-shadow: var(--glow-primary); }
+.cprev-emblem { width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid; place-items: center; color: var(--color-on-primary); background: var(--color-btn); box-shadow: var(--glow-primary); }
 .cprev-title { font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; letter-spacing: -0.01em; }
 .cprev-sub { font-size: 0.76rem; color: var(--color-ink-muted); margin-block-start: -0.25rem; }
 .cprev-desc { font-size: 0.8rem; color: var(--color-ink-muted); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .cprev-goal-bar { width: 100%; height: 0.4rem; border-radius: 999px; background: var(--glass-bg-inset); box-shadow: inset 0 0 0 1px var(--color-border); overflow: hidden; }
-.cprev-goal-fill { height: 100%; border-radius: 999px; background: var(--color-primary); }
+.cprev-goal-fill { height: 100%; border-radius: 999px; background: var(--color-btn); }
 .cprev-amounts { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: center; }
 .cprev-amt { font-size: 0.76rem; font-weight: 700; padding: 0.3rem 0.55rem; border-radius: 0.5rem; border: 1px solid var(--color-border); background: var(--glass-bg-inset); color: var(--color-ink); }
-.cprev-amt.is-active { background: var(--color-primary); color: var(--color-on-primary); border-color: transparent; }
+.cprev-amt.is-active { background: var(--color-btn); color: var(--color-on-primary); border-color: transparent; }
 .cprev-cta { width: 100%; margin-block-start: 0.2rem; padding: 0.5rem; border-radius: var(--radius-button); background: var(--color-btn); color: var(--color-on-primary); font-weight: 600; font-size: 0.85rem; box-shadow: var(--glow-primary); }
 
 /* Thumbnail swatch beside each campaign in the list */
@@ -551,7 +658,7 @@ select.input { appearance: auto; }
   background: transparent; color: var(--color-ink-muted); font-weight: 600; font-size: 0.9rem;
   transition: background-color var(--dur-micro) ease, color var(--dur-micro) ease;
 }
-.freq-opt.is-active { background: var(--color-primary); color: var(--color-on-primary); }
+.freq-opt.is-active { background: var(--color-btn); color: var(--color-on-primary); }
 /* Short content — never show an inner scrollbar (the detail modal keeps its own). */
 .confirm-modal { width: min(26rem, 100%); max-height: none; overflow: visible; text-align: center; align-items: center; }
 .confirm-actions { display: flex; gap: 0.6rem; margin-block-start: 0.9rem; width: 100%; }

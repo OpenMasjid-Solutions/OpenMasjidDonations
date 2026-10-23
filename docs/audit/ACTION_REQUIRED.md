@@ -12,6 +12,8 @@ From the 2026-08-03 security and code-health audit. Ordered by urgency.
 > | **v0.44.0 sweep (2026-08-23)** | **No new weakness found.** Both `npm audit` runs clean; no secret in the tree; no `dangerouslySetInnerHTML`; SVG still refused on upload; every `/api/admin/*` route still behind `requireAdmin`; and the §13 invariants (CSV cell escaping, tuition⇄donation route isolation, the `/api/setup` platform probe) all still in place. What it *did* find was a functional bug in this cycle's own feature — see the row below. |
 > | **Notification matrix: ticking a box on a WhatsApp number 400'd** | **Fixed in v0.44.0, before release.** The panel posts a row back whole when a checkbox changes, so a phone-number row arrived with `address: "13135550142"` — which is not a group id, and the route demanded one. Numbers could be added and then never subscribed to anything. An edit now takes the address from **storage** rather than the body, which also closes a second hole: a body-supplied number would have reached `toWhatsAppDigits` with no country ever chosen, the exact bare-ten-digits case the dropdown exists to prevent. Verified against a running server, not just by reading. |
 > | **Gap: there are no route-level tests** | **Open, and worth knowing.** Every test in the suite is a unit test over a module; nothing exercises a Fastify route. That is why the bug above was found by inspection during an audit rather than by CI, and why it had been live on the development channel since `0.44.0-dev.5`. Closing it means a route harness (boot the app, sign in, drive the JSON API) — a real piece of work, and Hasan's call whether it is worth it. |
+> | §4i widget follows the dashboard's theme (DONATIONS-050) | **New, 2026-09-09. Open, cosmetic, and a preference rather than a defect.** `/w/<slug>` pins itself light before paint, and then `useOmosAppearanceSync` — which runs on the widget route too — polls the platform's appearance and overwrites `data-theme` on mount and every 45s. So an embed on a masjid's public website wears their *admin dashboard's* theme, which is why a dark card appears on a cream site while the code says light. Three ways to settle it in §4i; none taken, because the current visible result is the one that was asked for. |
+> | §4j platform UI/UX spec sweep (DONATIONS-051) | **New, 2026-09-27. Two defects found and FIXED, the rest recorded.** Fixed: `applyAccent` was setting a filled button's background without its ink, so four of five accents in light theme put white on a bright fill — gold measured **1.67:1** on the Donate button, against AA's 4.5. And eleven controls filled themselves from `--color-primary`, which is the letterform token, not the fill token. Both now measured in a real browser (1.67:1 → **9.99:1**) and pinned by `server/src/accents.test.ts`, which reads the palette out of `web/src/prefs.ts` as text and computes every pairing. Open and deliberate: fonts, Hijri dates, device locale/timezone, dialog focus trap, skeletons, `dir` — each with its reason in §4j. |
 > | §4g `@fastify/static` major upgrade (DONATIONS-040) | **Done.** 8.x → 10.1.3 in the v0.43.0 sweep, clearing all four advisories rather than continuing to argue they are unreachable. Verified by a real container start: the SPA, an asset, an uploaded image, the SPA fallback and a 401 all behave, and five traversal shapes (`../`, `%2e%2e`, `..%2f`, `%2e%2e%2f`, `....//`) return 404 with no file body. Both `npm audit` runs are now clean. |
 > | §4a `/api/setup` during an outage (DONATIONS-005) | **Still your decision, but no longer unmetered.** The reachability probe on that route is now behind the same 120/min per-peer cap as the other two unauthenticated platform-callers; the trade-off between recovery and takeover is unchanged and still yours. |
 > | §0a three-decimal currencies (DONATIONS-001) | **Fixed and shipped** in v0.39.0. Steps 1–4 below are still yours if any masjid runs BHD/JOD/KWD/OMR/TND — the fix does not rewrite historical rows. |
@@ -217,6 +219,44 @@ There is no way to change the admin password and no way to invalidate a stolen 3
 of deleting the database. Needs a token-version scheme (bump a counter in the store, include it in
 the token, check it on verify) plus a change-password route. Straightforward, but it is an auth-model
 change with no existing auth-route tests, so it wants a human eye.
+
+### 4i. The embedded widget follows the DASHBOARD's theme, not its own default (DONATIONS-050) — Low
+`/w/<slug>` is written to be light by default (Display's widget is hardcoded light, and a masjid
+website is overwhelmingly light), and on a standalone box it is: measured `data-theme=light`, white
+card. **On an install embedded under OpenMasjidOS it is not.** `App.tsx` calls
+`useOmosAppearanceSync(info?.embedded)` on every route including the widget, which polls
+`/api/public/appearance` on mount and every 45s and `patch()`es the fetched theme into prefs — and
+`applyTheme` writes `data-theme` on the same `<html>` the widget just pinned. So the box on a
+masjid's *public* website renders in whatever theme their *admin* dashboard is set to, and would
+change theme under a donor mid-donation if an admin toggled it.
+
+Rated Low because it is cosmetic in both directions and both themes are legible; recorded because it
+is invisible, it silently overrides a deliberate default, and it is why a dark card can appear on a
+cream site while the code says light. **Three ways to settle it and it is a preference, not a bug to
+be fixed a particular way:** skip the sync when `window.__OMOS_WIDGET__` is set (the embed then obeys
+`?theme=`, which is what the embed snippet documents); leave it as is and treat the dashboard as the
+masjid's single appearance choice; or make dark the widget default if a dark box is what a masjid
+actually wants on their page. Not changed either way, because the visible result is currently the one
+Hasan asked for and choosing differently is his call.
+
+### 4j. Platform UI/UX spec conformance — what is still open after the 2026-09-27 sweep
+The platform's `docs/design-system/APP_UI_SPEC.md` was handed over on 2026-09-27 and this app was
+checked against all twelve sections plus the closing checklist. **Two real defects were found and
+fixed in 0.45.0-dev.5** (the accent ink and the fill/letterform split — see the changelog). What is
+listed here is what was found and deliberately NOT changed, each with the reason:
+
+| Spec | State here | Why it is not a one-line fix |
+|---|---|---|
+| §4 type — Inter Variable + Space Grotesk, self-hosted | **We use the system stack.** So does **Display**, byte-for-byte identically (`--font-sans: ui-sans-serif, system-ui, …`). | This is the spec disagreeing with its own reference implementation, not us drifting from it. CLAUDE.md §2 says follow Display's real code when the two differ, and the cost of the other answer is ~100-200 kB of webfont on a donation page that §11 requires to stay light on a Pi. **Worth a platform answer rather than a guess.** |
+| §8 "No CDNs. None." | The built output references `https://js.stripe.com`. | Not removable. Card entry must happen inside Stripe's own Elements (CLAUDE.md §2, PCI SAQ-A); self-hosting Stripe.js voids SAQ-A eligibility and Stripe's terms. A LAN-only masjid cannot take card payments at all, so nothing is lost that was available. Everything else — fonts, icons, scripts — is bundled. |
+| §10 Hijri + Gregorian together | **Absent.** Four date-formatting sites, all Gregorian. | Cheap in bytes (`Intl.DateTimeFormat` with `calendar: 'islamic-umalqura'` is built in) but it is a product decision about a ledger and a receipt, not a formatting tweak — and a Ramadan appeal is exactly where a masjid would want it. Hasan's call. |
+| §10 "Never assume the browser's locale is the masjid's" | **We do assume it.** `toLocaleDateString(undefined, …)` in four places and `Intl.NumberFormat(undefined, …)` in `api.ts` take the DEVICE's locale, and no timezone is passed at all. | Real, and the spec names the exact symptom: a trustee checking the ledger on holiday sees shifted dates. The fix needs the masjid's timezone plumbed from settings to the client and a decision about whether money follows the masjid's locale or the reader's. |
+| §7 dialogs trap focus and return it | Eight dialogs. All have `role="dialog"` + `aria-modal` and all close on Escape; **one** moves focus in; **none** traps focus or returns it to the opener. | Exactly the "missing at least two of the three" the spec predicts. The spec's own advice is to use a primitive, and CLAUDE.md §11 says no component library — so it is a hand-rolled hook applied at eight call sites, which wants doing once, carefully. |
+| §5 skeleton shimmer, never a bare spinner | We use a spinner. | Cosmetic, and the honest reason is that it has not been done, not that it was decided against. |
+| §6 RTL | **The hard half is already right**: zero physical properties in `app.css` (no `margin-left`, no `left:`, no `text-align: left`) and no `translateX` anywhere, so the toggle-thumb bug the spec describes cannot occur here. **The easy half is missing**: `dir` is never set from `appearance.lang`. | Setting `dir="rtl"` today would mirror the layout under English strings, which is worse than not doing it. It belongs with i18n (CLAUDE.md §12, "English first"), not before it. |
+| §2 `--color-on-danger` | **Not defined here.** | And not needed: `.btn--danger` is an OUTLINE button — transparent fill, danger-coloured text and a 1px ring — so nothing ever puts white on `#F87171`. Measured: `#F87171` on the dark page is 7.05:1 and `#DC2626` on the light page is 4.53:1, both over AA. Adding an unused token to satisfy a checklist would be theatre; the day a FILLED danger button appears, it needs the token first. |
+
+One thing the sweep found on the way: **`web/src/styles/tokens.css` is about six weeks behind Display's copy**, which CLAUDE.md §11 says is a verbatim mirror. The drift that mattered has been taken (Display's light `--color-primary` fix — `#0284C7` measured 4.10:1 as text on a white card); the rest is tokens we do not reference (`--radius-input`, `--window-bg/head/edge`, `--color-on-danger`). A full re-sync would also pull Display's dark-scene changes into our deliberately different light scene, so it is a job, not a copy.
 
 ---
 

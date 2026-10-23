@@ -21,8 +21,8 @@ import { Store, slugify, rid, RESERVED_SLUGS, looksLikePlanToken, parsePaymentAc
 import { DIALS, DEFAULT_DIAL, toE164 } from './phone';
 import { recoveryBreakdown } from './notify';
 import type { Campaign, Donation, StripeAccount, StripeConfig, ThankYou, LargeDonation, EmailReceipt, NotifyEventId, NotifyPatch, WhatsAppEventOutcome } from './store';
-import { COOKIE, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS } from './auth';
-import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
+import { COOKIE, accessTokenBinding, cookieOptions, hashPassword, makeToken, secureForRequest, tokenUser, verifyPassword, verifyToken, MAX_AGE_MS, SSO_SESSION_MS, type Audience } from './auth';
+import { probePlatform, fetchFabricStripe, fetchFabricStripeDetailed, cachedFabricStripe, fetchFabricStripeAccounts, clearFabricStripeCache, fetchFabricSite, cachedFabricSite, underBase, type FabricSite, fabricConfigSignature, fabricEmail, fabricAlert, emailStatus, emailLikelyAvailable, onEmailStatusChange, primeEmailStatus } from './fabric';
 import { renderMonthlySetup, renderReceipt, renderRefundNotice, type ReceiptContext } from './email';
 import {
   chooseAppeal,
@@ -156,6 +156,10 @@ async function main(): Promise<void> {
   // (already applied via a cache clear) doesn't itself trigger a restart.
   let fabricBaseline: string | null = null;
 
+  /** The tunnel prefix each request arrived under, keyed by the raw request (absent = no prefix,
+   *  i.e. the LAN). Set by the rewrite hook below, which is the only thing that knows. */
+  const servedUnder = new WeakMap<object, string>();
+
   const app = Fastify({
     logger: false, // we log ourselves and never log secrets
     // trustProxy stays OFF: the app is port-mapped directly (no reverse proxy in
@@ -180,11 +184,10 @@ async function main(): Promise<void> {
     rewriteUrl(req) {
       const url = req.url ?? '/';
       const base = cachedFabricSite().basePath;
-      if (!base) return url;
-      if (url === base) return '/';
-      if (url.startsWith(base + '/')) return url.slice(base.length);
-      if (url.startsWith(base + '?')) return '/' + url.slice(base.length);
-      return url;
+      const stripped = underBase(url, base);
+      if (stripped === null) return url;
+      servedUnder.set(req, base);
+      return stripped;
     },
   });
   await app.register(fastifyCookie); // parses req.cookies + decorates reply.setCookie
@@ -246,21 +249,68 @@ async function main(): Promise<void> {
   fs.mkdirSync(uploadsDir, { recursive: true });
   await app.register(fastifyStatic, { root: uploadsDir, prefix: '/uploads/', decorateReply: false, index: false });
 
-  // A request is authenticated if it carries a valid local session cookie. That
-  // cookie is minted by first-run setup, by password login, or by a confirmed
-  // OpenMasjidOS SSO check (see GET /api/session) — so every protected route stays a
-  // simple, synchronous check.
-  const isAuthed = (cookie: string | undefined): boolean => verifyToken(store.secret, cookie, 'admin');
+  /** Did this request come through Cloudflare? Cloudflare sets `cf-ray` at its edge, and both the
+   *  OpenMasjidOS ingress and this app's own cloudflared pass it on, so a visitor from outside cannot
+   *  remove it. A LAN client that types it only restricts itself (a narrower cookie, no password
+   *  sign-in). `x-forwarded-proto` is deliberately NOT read here. */
+  const viaTunnel = (req: import('fastify').FastifyRequest): boolean => !!req.headers['cf-ray'];
+
+  /** Through the tunnel the OpenMasjidOS ingress strips every platform cookie and puts back exactly
+   *  one `omos_session`: this app's access token, and only while the admin's two-step-verified
+   *  remote session is live (core `system/app-access.ts`). '' when the request carries none. */
+  const ACCESS_TOKEN_RE = /^a1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
+  const accessTokenOf = (req: import('fastify').FastifyRequest): string => {
+    const t = /(?:^|;\s*)omos_session=([^;]*)/.exec(req.headers.cookie ?? '')?.[1].trim() ?? '';
+    return ACCESS_TOKEN_RE.test(t) ? t : '';
+  };
+
+  /** Which admin session counts on this request. On the LAN an `admin` token, exactly as always
+   *  (minted by first-run setup, password login or SSO). Through the tunnel ONLY an `admin-remote`
+   *  token — made by the SSO upgrade through the tunnel — bound to the access token THIS request
+   *  carries: a session made at the masjid counts for nothing out here, and one made out here ends
+   *  the moment the platform stops sending the token (sign-out, remote management off, a new second
+   *  factor). Every check stays synchronous, with no platform call. */
+  const scopeOf = (req: import('fastify').FastifyRequest): { aud: Audience; bnd?: string } => {
+    if (!viaTunnel(req)) return { aud: 'admin' };
+    const at = accessTokenOf(req);
+    return { aud: 'admin-remote', bnd: at ? accessTokenBinding(at) : undefined };
+  };
+  const isAuthed = (req: import('fastify').FastifyRequest): boolean => {
+    const { aud, bnd } = scopeOf(req);
+    return verifyToken(store.secret, req.cookies[COOKIE], aud, bnd);
+  };
+
+  /** Where our session cookie lives: our prefix for a request that came through Cloudflare (auth.ts
+   *  `cookieOptions` says why), `/` otherwise — on the LAN exactly as before, even though our page
+   *  there also calls the prefixed API once remote access is on. */
+  const cookiePath = (req: import('fastify').FastifyRequest): string => (viaTunnel(req) && servedUnder.get(req.raw)) || '/';
+
+  /** From outside the masjid the local password — sign-in, first-run setup, recovery — is never
+   *  offered, on EVERY install: there it would be one guessable secret behind a limiter that sees
+   *  every remote visitor as the same peer (the proxy, or cloudflared on localhost), and an install
+   *  with no password yet would let anyone on the internet choose one. Under OpenMasjidOS the way in
+   *  from outside is the platform's two-step sign-in (SSO); a standalone install is administered from
+   *  the masjid's network (an operator with no such network reaches it over an SSH port-forward,
+   *  which carries no `cf-ray` — CLAUDE.md §13). Asked inside each password route rather than by
+   *  matching the URL, so it holds for every spelling the router resolves to that route
+   *  (`/api/%6Cogin` included). */
+  const passwordClosed = (req: import('fastify').FastifyRequest): boolean => viaTunnel(req);
+  const PASSWORD_CLOSED = ssoConfigured()
+    ? 'From outside the masjid, open Donations from your OpenMasjidOS dashboard — press Open on the Donations app — and you’ll be signed in. A password only works on the masjid’s own network.'
+    : 'From outside the masjid, the Donations admin can’t be opened. Please manage it from a computer or phone on the masjid’s own network — your donation pages keep working from anywhere.';
 
   const requireAdmin = async (req: import('fastify').FastifyRequest, reply: import('fastify').FastifyReply) => {
-    if (!isAuthed(req.cookies[COOKIE])) {
+    if (!isAuthed(req)) {
       return reply.code(401).send({ error: 'Please sign in.' });
     }
   };
 
   /** Who is acting, for the audit log. The name comes out of the SIGNED session token, so it cannot
    *  be spoofed; a local-password session has no platform username, hence the fallback. */
-  const actorOf = (req: import('fastify').FastifyRequest): string => tokenUser(store.secret, req.cookies[COOKIE]) || 'local admin';
+  const actorOf = (req: import('fastify').FastifyRequest): string => {
+    const { aud, bnd } = scopeOf(req);
+    return tokenUser(store.secret, req.cookies[COOKIE], aud, bnd) || 'local admin';
+  };
   /** Append one admin action to the audit log (never throws — see store.recordAudit). */
   const audit = (req: import('fastify').FastifyRequest, action: string, subject = '', detail = ''): void =>
     store.recordAudit(action, { actor: actorOf(req), subject, detail });
@@ -363,22 +413,31 @@ async function main(): Promise<void> {
   // local cookie, so the rest of the API stays a simple synchronous check. Falls
   // back silently to local login when SSO is absent or the platform is down.
   app.get('/api/session', async (req, reply) => {
-    let authed = isAuthed(req.cookies[COOKIE]);
+    let authed = isAuthed(req);
     let username: string | undefined;
     // True unless we tried to reach the platform and couldn't — lets the UI tell
     // "open it from the dashboard" apart from "OpenMasjidOS is unreachable" (a
     // migrated/down platform must offer the local-password way in, not a dead loop).
     let reachable = true;
+    // Through the tunnel the platform is asked about the access token ALONE, never the browser's
+    // other cookies (it also accepts a password-only dashboard session), and not at all when there
+    // is none — so a stranger's visit costs no platform call. On the LAN, exactly as before.
+    const tunnel = viaTunnel(req);
+    const accessToken = tunnel ? accessTokenOf(req) : '';
+    const trySso = !authed && ssoConfigured() && (!tunnel || accessToken !== '');
     // Only the SSO upgrade costs an outbound platform call, so the limit guards that branch only —
     // an already-signed-in admin (or a standalone install) is never rate-limited out of the panel.
-    if (!authed && ssoConfigured() && !platformCallRateOk(peerOf(req))) {
+    if (trySso && !platformCallRateOk(peerOf(req))) {
       return reply.code(429).send({ error: 'Too many requests. Please try again shortly.' });
     }
-    if (!authed && ssoConfigured()) {
-      const probe = await probePlatform(req.headers.cookie);
+    if (trySso) {
+      const probe = await probePlatform(tunnel ? `omos_session=${accessToken}` : req.headers.cookie);
       reachable = probe.reachable;
       if (probe.username) {
-        reply.setCookie(COOKIE, makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username), cookieOptions(SSO_SESSION_MS, secureForRequest(req)));
+        const token = tunnel
+          ? makeToken(store.secret, SSO_SESSION_MS, 'admin-remote', probe.username, accessTokenBinding(accessToken))
+          : makeToken(store.secret, SSO_SESSION_MS, 'admin', probe.username);
+        reply.setCookie(COOKIE, token, cookieOptions(SSO_SESSION_MS, secureForRequest(req), cookiePath(req)));
         authed = true;
         username = probe.username;
       }
@@ -392,6 +451,9 @@ async function main(): Promise<void> {
         authed,
         hasPassword: store.hasAdmin(),
         sso: { enabled: ssoConfigured(), reachable, username },
+        // Reached from outside: no password box. Under OpenMasjidOS the panel says to press Open on
+        // the dashboard; standalone, to manage it from the masjid's network.
+        passwordClosed: passwordClosed(req),
       },
     };
   });
@@ -399,6 +461,8 @@ async function main(): Promise<void> {
   // ── First-run setup / local-password recovery ───────────────────────────────
   const SetupBody = z.object({ password: z.string().min(8).max(200), name: z.string().max(80).optional() });
   app.post('/api/setup', async (req, reply) => {
+    // First, before anything that would say whether a password exists or spend a platform probe.
+    if (passwordClosed(req)) return reply.code(403).send({ error: PASSWORD_CLOSED });
     if (store.hasAdmin()) return reply.code(409).send({ error: 'This app is already set up.' });
     // The local password is a RECOVERY for when OpenMasjidOS can't sign you in. We allow
     // it whenever SSO isn't configured (standalone) OR the platform is currently
@@ -423,13 +487,15 @@ async function main(): Promise<void> {
     const parsed = SetupBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Please choose a password of at least 8 characters.' });
     store.setAdmin(hashPassword(parsed.data.password), parsed.data.name?.trim());
-    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
+    reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req), cookiePath(req)));
     return { data: { ok: true } };
   });
 
   // ── Password login (rate-limited) ───────────────────────────────────────────
   const LoginBody = z.object({ password: z.string().min(1).max(200) });
   app.post('/api/login', async (req, reply) => {
+    // Before the limiter, so a refused attempt from outside costs the LAN admin nothing.
+    if (passwordClosed(req)) return reply.code(403).send({ error: PASSWORD_CLOSED });
     // Key the brute-force limiter on the real, unspoofable TCP peer — never req.ip
     // (which would honor a forged X-Forwarded-For). This is the defense behind the
     // short admin password, so it must not be bypassable by a request header.
@@ -441,15 +507,18 @@ async function main(): Promise<void> {
     const parsed = LoginBody.safeParse(req.body);
     if (parsed.success && verifyPassword(parsed.data.password, admin)) {
       loginLimiter.succeed(peer);
-      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req)));
+      reply.setCookie(COOKIE, makeToken(store.secret), cookieOptions(MAX_AGE_MS, secureForRequest(req), cookiePath(req)));
       return { data: { ok: true } };
     }
     loginLimiter.fail(peer);
     return reply.code(401).send({ error: 'Incorrect password.' });
   });
 
-  app.post('/api/logout', async (_req, reply) => {
+  app.post('/api/logout', async (req, reply) => {
     reply.clearCookie(COOKIE, { path: '/' });
+    // From outside the session lives under our prefix; the line above still clears one an older
+    // version set at `/`.
+    if (cookiePath(req) !== '/') reply.clearCookie(COOKIE, { path: cookiePath(req) });
     return { data: { ok: true } };
   });
 
@@ -3757,11 +3826,53 @@ async function main(): Promise<void> {
    *  web for API/nav/asset URLs). basePath is sanitised to a safe URL-path charset. When
    *  `widgetSlug` is given, also inject `window.__OMOS_WIDGET__` so the SPA renders that
    *  campaign in the compact, chrome-less widget layout for embedding. */
-  const sendIndexHtml = (reply: import('fastify').FastifyReply, widgetSlug?: string) => {
+  const sendIndexHtml = (reply: import('fastify').FastifyReply, widgetSlug?: string, widgetDark = false) => {
     const base = cachedFabricSite().basePath.replace(/[^\w/-]/g, ''); // defensive: path charset only
     let head = `<base href="${base}/">\n    <script>window.__OMOS_BASE__=${JSON.stringify(base)}</script>`;
-    if (widgetSlug) head += `\n    <script>window.__OMOS_WIDGET__=${JSON.stringify({ slug: widgetSlug })}</script>`;
-    reply.type('text/html').send(rawIndex.replace('<head>', `<head>\n    ${head}`));
+    let tail = '';
+    if (widgetSlug) {
+      head += `\n    <script>window.__OMOS_WIDGET__=${JSON.stringify({ slug: widgetSlug })}</script>`;
+      // The widget is transparent AND content-height, and both have to be done HERE rather than in
+      // the stylesheet — for two different reasons.
+      //
+      // Transparency, because of timing: `body` carries `background: var(--scene-base)`, a
+      // near-black, so a rule that only lands once the bundle has parsed leaves the iframe flashing
+      // a dark rectangle over the masjid's own page on every load.
+      //
+      // Height, because of reach: `html`, `body` and `#root` are ANCESTORS of the element that
+      // knows it is a widget (`.shell--widget`), so no selector in app.css can get to them. They
+      // each assume they own a viewport — `#root` is `min-height: 100vh`, which inside an iframe
+      // means the iframe's full height — and that is what left the card centred in a tall box with
+      // dead space and a scrollbar. Collapsing them to content height is what makes the document
+      // exactly the card.
+      //
+      // A static string with no interpolation, so nothing can be injected through it.
+      // `overflow-x: hidden` is asserting a constraint, not papering over a clipped layout, and the
+      // difference matters enough to record. Measured in a real browser at the embed width: the
+      // amount grid resolves to four columns with "Other" wrapped to a second row, its scrollWidth
+      // equals its clientWidth, and NOT ONE element in the document has a right edge past the
+      // document width. Nothing is reachable by scrolling sideways. The document nevertheless
+      // reported a scrollWidth ~89px over its clientWidth and Chromium drew a horizontal scrollbar
+      // for it — in an embed that bar is always wrong, and there is nothing behind it to see.
+      // THIS BLOCK GOES LAST IN <head>, and that placement is the whole trick. `index.html` ships
+      // `<html data-theme="dark">` and then a bootstrap script that re-applies a theme from
+      // localStorage or the visitor's OS preference. Anything injected after `<head>` runs BEFORE
+      // that script and loses. Injected before `</head>`, this wins.
+      //
+      // `color-scheme` is the one that actually caused a black box. `:root` declares
+      // `color-scheme: dark`, and Chromium then paints an OPAQUE DARK CANVAS for the document even
+      // though `background` is `transparent` — so during the lazy-chunk load the embed was a solid
+      // black rectangle on the masjid's cream page. It is pinned to `light` even when the masjid
+      // asked for a dark card, because `light` is the value that leaves the canvas genuinely
+      // transparent; the card's own colours come from `data-theme` below, not from here.
+      const scene = widgetDark ? 'dark' : 'light';
+      tail =
+        '<style>html,body{background:transparent!important;height:auto!important;' +
+        'overflow-x:hidden!important;color-scheme:light!important}#root{min-height:0!important}</style>' +
+        `\n    <script>(function(h){h.setAttribute('data-theme','${scene}');h.setAttribute('data-scene','${scene}')})(document.documentElement)</script>`;
+    }
+    const withHead = rawIndex.replace('<head>', `<head>\n    ${head}`);
+    reply.type('text/html').send(tail ? withHead.replace('</head>', `  ${tail}\n  </head>`) : withHead);
   };
   if (havePublic) app.get('/', async (_req, reply) => sendIndexHtml(reply));
 
@@ -3775,14 +3886,37 @@ async function main(): Promise<void> {
     if (!c || !c.active || !c.widgetEnabled) return reply.code(404).type('text/plain').send('Not found.');
     reply.header('content-security-policy', 'frame-ancestors *'); // meant to be embedded
     reply.header('cache-control', 'no-store');
-    return sendIndexHtml(reply, c.slug);
+    // `?theme=dark` for a masjid whose own site is dark. Light otherwise, which is what blends into
+    // an overwhelmingly light web — the same call OpenMasjidDisplay's widget makes. Read here as
+    // well as in the browser so the very first paint is already the right colour.
+    const dark = String((req.query as { theme?: string }).theme || '') === 'dark';
+    return sendIndexHtml(reply, c.slug, dark);
   });
 
   // SPA fallback: client-side routes (e.g. /admin, /zakat) resolve to index.html; requests
   // that look like a file (have an extension, e.g. a stale /assets/x.js) still 404 rather
   // than silently returning the app shell; unknown API routes return JSON.
-  app.setNotFoundHandler((req, reply) => {
+  // A request from outside that missed and was NOT stripped may be under a prefix we do not know
+  // yet: the platform was not up when we booted (a power cut brings every container up at once), or
+  // the admin has just changed our path. Ask the platform — at most once per 10s however many misses
+  // arrive, because anyone can send one — and if the answer covers this URL, send the browser back
+  // to the very same address, which the rewrite hook now strips. Before this, the first visits from
+  // outside got the page with `<base href="/">`, whose script then loaded from the OpenMasjidOS
+  // dashboard: a white screen. Only for Cloudflare traffic (`cf-ray`): on the LAN every page load of
+  // a client-side route lands here, and must neither wait on the platform nor spend its rate budget.
+  let missLookup: { at: number; site: Promise<FabricSite> } | null = null;
+  const siteAfterMiss = (): Promise<FabricSite> => {
+    if (!missLookup || Date.now() - missLookup.at > 10_000) missLookup = { at: Date.now(), site: fetchFabricSite(true) };
+    return missLookup.site;
+  };
+
+  app.setNotFoundHandler(async (req, reply) => {
     const url = req.raw.url ?? '/';
+    // 307 keeps the method and body, so an API POST is retried as sent. `url` is this request's own
+    // path under our (validated) prefix, so the Location can only ever point back at us.
+    if (ssoConfigured() && viaTunnel(req) && !servedUnder.has(req.raw) && underBase(url, (await siteAfterMiss()).basePath) !== null) {
+      return reply.redirect(url, 307);
+    }
     const pathname = url.split('?')[0];
     const looksLikeFile = path.extname(pathname) !== '';
     if (req.method === 'GET' && havePublic && !looksLikeFile && !url.startsWith('/api') && !url.startsWith('/healthz')) {

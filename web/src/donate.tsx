@@ -4,7 +4,7 @@
 /** The public donation page for a single campaign, at the clean path /<slug>.
  *  Flow: pick an amount → Stripe Payment Element → confirm on return by asking the
  *  server to RETRIEVE the PaymentIntent (never trusting the client) → thank-you. */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { loadStripe, type Stripe } from '@stripe/stripe-js';
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
 import { GraduationCap, HandCoins, HeartHandshake, Lock, Plus, Repeat, Search, ShieldCheck, UserCheck } from 'lucide-react';
@@ -28,7 +28,7 @@ import {
   type TuitionIntentResponse,
   type TuitionSelection,
 } from './api';
-import { useReadableTheme } from './prefs';
+import { refreshAccent, useReadableTheme } from './prefs';
 import { asset } from './base';
 
 /** Sanitise an admin-entered image URL for use in a CSS url()/<img> (accept only
@@ -68,12 +68,37 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
 
   // On the thank-you screen, prefer the thank-you's own background (when set); otherwise
   // the campaign's. The scene + readable theme both follow whatever is actually shown.
-  const activeBg = (result && campaign?.thankYou?.backgroundImage) || campaign?.backgroundImage;
+  //
+  // THE WIDGET DRAWS NO BACKGROUND AT ALL. It is an iframe on somebody else's page, so the
+  // masjid's own wallpaper is not ours to paint over theirs — the embed should be the donate
+  // box and nothing else, with the host page showing through. `activeBg` is therefore forced
+  // off in widget mode rather than only hidden: it also feeds the readable-theme sampler
+  // below, and sampling an image that is no longer on screen would pick the text colour for
+  // a background nobody can see.
+  const activeBg = widget ? undefined : (result && campaign?.thankYou?.backgroundImage) || campaign?.backgroundImage;
+
+  // THE WIDGET IS LIGHT BY DEFAULT, and that is copied from OpenMasjidDisplay rather than
+  // reasoned from first principles — §2 says to follow Display's real code when it disagrees
+  // with a guess, and this is a case where the guess was wrong.
+  //
+  // Display's widget (`server/src/widget.ts`) hardcodes a light palette — `--card:#faf8f2` on
+  // `--ink:#22302a`, no `prefers-color-scheme` anywhere — and it blends into a masjid's site
+  // precisely because of that. A masjid website is overwhelmingly light, so a light card with a
+  // hairline border reads as part of the page while a dark one reads as a hole punched in it.
+  // Following the VISITOR's OS preference would be worse, not better: a dark-mode visitor on a
+  // cream site would get exactly the mismatch this is fixing.
+  //
+  // `?theme=dark` is the escape hatch for a masjid whose own site is dark. Display has no
+  // equivalent; it is cheap here and the alternative is being wrong on those sites for ever.
+  const widgetTheme: 'light' | 'dark' = widget && new URLSearchParams(location.search).get('theme') === 'dark' ? 'dark' : 'light';
 
   // The public donation page is its own world: pin the scene to the default wallpaper
   // (never the dashboard's inherited one) and pick a theme that reads on the active
   // background — light text on dark images, dark text on light ones, as readable as can be.
-  const readable = useReadableTheme(bgUrl(activeBg) || undefined, 'dark');
+  //
+  // With no background (the widget) the sampler has nothing to read, so it returns the fallback
+  // — which is where the widget's light default is applied.
+  const readable = useReadableTheme(bgUrl(activeBg) || undefined, widget ? widgetTheme : 'dark');
   useEffect(() => {
     const html = document.documentElement;
     const prevW = html.getAttribute('data-wallpaper');
@@ -92,7 +117,75 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
     // Pinned in both directions, not just "light": the donation page's scene IS the campaign's
     // background image, so the ink must follow that measurement and never the theme's own scene.
     html.setAttribute('data-scene', readable === 'light' ? 'light' : 'dark');
+    // This page sets `data-theme` itself instead of going through `applyTheme`, so the accent has
+    // to be told: its TEXT form differs between the themes, and it was resolved at hydrate against
+    // whichever theme the dashboard had, not the one this campaign's background just chose.
+    refreshAccent();
   }, [readable]);
+
+  // Tell the embedding page how tall we actually are, so the iframe can be exactly the card and
+  // nothing else. A fixed height cannot work here: this form CHANGES height as it is used —
+  // "Other" reveals an amount field, Monthly swaps the copy, Stripe's Payment Element mounts an
+  // iframe of its own, and the thank-you screen is a different size again. Any single number is
+  // therefore too short (a scrollbar) or too tall (dead space), which is what the fixed 680px was.
+  //
+  // `'*'` as the target origin is correct and safe: we do not know which site embedded us, and the
+  // payload is one integer. The receiving snippet is the half that verifies the sender.
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!widget || !shellRef.current) return;
+    // NEVER REPORT THE SPINNER'S HEIGHT. Observed in a real browser on a cold load: the first
+    // measurement ran while the campaign was still being fetched, reported the loading card's
+    // 106px, and the embedding page collapsed the iframe to it — after which the donate form was
+    // a 106px letterbox. Staying silent until there is something real to measure means the embed
+    // simply keeps the fallback height from its own snippet until the box is ready, which is what
+    // an embedder expects a loading frame to do.
+    if (!campaign && !loadError && !result) return;
+    const el = shellRef.current;
+    let last = 0;
+    let raf = 0;
+    const post = () => {
+      // scrollHeight, not offsetHeight: it counts a child that overflows, which is exactly the
+      // case we must not under-report.
+      const height = Math.ceil(Math.max(el.scrollHeight, el.offsetHeight));
+      if (!height || Math.abs(height - last) < 2) return; // 2px of hysteresis: sub-pixel reflow would loop
+      last = height;
+      try { window.parent?.postMessage({ type: 'omos-donations:height', height }, '*'); } catch { /* not embedded */ }
+    };
+    // Measure after layout, not during render — otherwise the first number is whatever the tree
+    // happened to be mid-commit. `requestAnimationFrame` is the accurate moment to read it, but it
+    // CANNOT be the only trigger: a frame the browser considers throttled or quiesced stops being
+    // served animation frames, and then the height is never posted and the embed sits at its
+    // fallback size for ever. Observed exactly that — the same page resized reliably while a stray
+    // timer kept it busy and not at all once the timer was gone. `setTimeout` still runs in a
+    // throttled frame, just later, so it is the backstop. `post` is idempotent (`last`), so
+    // whichever fires first wins and the other is a no-op.
+    let timer = 0;
+    const measure = () => {
+      // SYNCHRONOUSLY FIRST, and this is the one that matters. Effects run after React has
+      // committed the DOM, and reading `scrollHeight` forces layout — so the height is already
+      // correct here without waiting for anything to be scheduled. The deferred pair below only
+      // catches what settles later (a web font, Stripe's own iframe), and neither of them is
+      // allowed to be the sole path: an embed whose height depends on the browser choosing to
+      // serve this frame an animation frame is an embed that sometimes just stays the wrong size.
+      post();
+      cancelAnimationFrame(raf);
+      clearTimeout(timer);
+      raf = requestAnimationFrame(post);
+      timer = window.setTimeout(post, 250);
+    };
+
+    // TWO triggers, and the second is not redundant. A ResizeObserver alone missed the most
+    // important change of all: the first measurement runs while the campaign is still loading, so
+    // it reported the SPINNER's height — 106px, observed in a real browser — and the embedding page
+    // dutifully collapsed the iframe to it. Re-running on the state that changes the layout
+    // (campaign arriving, the Payment Element step, the thank-you screen) guarantees a fresh
+    // measurement at each of those points regardless of what the observer did or did not fire for.
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    measure();
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer); ro?.disconnect(); };
+  }, [widget, campaign, intent, result, loadError]);
 
   // Load the campaign on mount / slug change (needed for both the donation flow and the
   // thank-you screen's custom message/accent/background on a redirect return).
@@ -117,8 +210,8 @@ export function DonatePage({ slug, token, widget }: { slug: string; token?: stri
   }, [campaign, slug, token, result]);
 
   return (
-    <div className={`shell${widget ? ' shell--widget' : ''}`}>
-      <DonateScene image={activeBg} />
+    <div ref={shellRef} className={`shell${widget ? ' shell--widget' : ''}`}>
+      {!widget && <DonateScene image={activeBg} />}
       <main className="donate-wrap">
         {result ? (
           <ThankYou result={result} campaign={campaign} />

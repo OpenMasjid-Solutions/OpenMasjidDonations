@@ -150,13 +150,49 @@ aware on **both** ends:
   every route stays written at the root and works identically on the LAN (no prefix) and
   behind the tunnel. `index.html` is served (not via static-index) with an injected
   `<base href="${basePath}/">` + `window.__OMOS_BASE__`. The base path is warmed before
-  `listen` and refreshed every 15s, so the prefix is stripped from the first request and
-  recovers quickly after a restart-during-outage.
+  `listen` and refreshed every 20s. Losing it is a white screen from outside (the page's
+  script then loads from the OpenMasjidOS dashboard), so: a 429/5xx from the platform keeps
+  the last good value — only 403/404 are answers; a prefix that is not a plain path is
+  refused; and a request from Cloudflare (`cf-ray`) that misses unstripped makes one lookup
+  (at most one per 10s) and, if that reveals the prefix, is sent back to itself with a 307 —
+  the case of a box that booted before the platform was up.
+- **The admin session is scoped to the prefix from outside.** Through the tunnel every app and
+  the dashboard share ONE hostname, and the platform passes each app every cookie but its own,
+  so a `Path=/` `omdon_session` reached every other app, which could replay it here. A
+  Cloudflare request gets `Path=<basePath>`; the LAN keeps `Path=/` as before; sign-out
+  clears both. SSO itself needs nothing special: the platform's `/_omos/open` gives the
+  browser an access token for this app as `omos_session` under our path, and
+  `/api/auth/session` accepts it.
+- **From outside, SSO is the only way in.** Under OpenMasjidOS a Cloudflare request
+  (`cf-ray`) to `/api/login` or `/api/setup` (first run and the local-password recovery) is
+  refused with a 403 telling the admin to press Open on the dashboard, and `/api/session`
+  reports `passwordClosed` so the panel shows that instead of a password box. The check is
+  inside each route, so every spelling the router resolves to it (`/api/%6Cogin`) is covered;
+  it runs before the login limiter, which out here would see every visitor as the platform's
+  proxy. The LAN is unchanged.
+- **Standalone, the same rule closes the app's own tunnel** (its cloudflared forwards `cf-ray`
+  too): `/api/login` and `/api/setup` answer a Cloudflare request with a 403 saying to manage
+  the app from the masjid's network, and the panel shows "Manage Donations at the masjid"
+  instead of a password box. There is no SSO there, so from outside there is no admin at all;
+  donors are untouched. An operator with no masjid network (a VPS) gets in over SSH —
+  `ssh -L 7870:localhost:7870 <user>@<server>`, then `http://localhost:7870/admin` — which
+  reaches the container's port directly with no Cloudflare headers. There is deliberately no
+  switch to re-open the password to the tunnel.
+- **Through the tunnel a session counts only beside the access token it was made from.** The
+  ingress puts back this app's access token as the one `omos_session` only while the admin's
+  remote session is live. The SSO upgrade through the tunnel shows the platform that token alone
+  and mints an `admin-remote` session carrying a hash of it; through the tunnel only such a
+  session counts, and only when the request still carries the same token. A session made at the
+  masjid counts only at the masjid, so signing out of OpenMasjidOS (or turning remote management
+  off, or changing the second factor) ends the remote one on the next request, with no platform
+  call per request.
 - **Client**: Vite builds with `base:'./'` (assets resolve against the injected `<base href>`,
   so dynamic-import chunks follow the prefix via `import.meta.url`). `web/src/base.ts` exposes
   `BASE`/`withBase`/`asset`/`stripBase`; API/nav/asset/upload URLs are prefixed, the router
   strips the prefix off `location.pathname`, and share links / QR codes / the Stripe webhook
-  URL use the Fabric `publicUrl`.
+  URL use the Fabric `publicUrl`. No root-relative URL anywhere in `web/src` — through the
+  tunnel `/` is the dashboard. `server/src/remote.test.ts` pins all of this, the server half
+  against the real server spawned beside a fake platform.
 
 Standalone (or remote access off), `basePath`/`publicUrl` are empty and everything behaves
 exactly as before (root paths, this device's address); the in-app Cloudflare tunnel
